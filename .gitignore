@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+Thumbs.db
+.vite/
+test/.tmp/
+
+# 真实跑通时抓下来的接口快照 / 本地数据。
+# 整目录排除 —— 别只写 *.json，以后往里放什么都可能漏。
+local-data/

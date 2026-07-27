@@ -1,0 +1,35 @@
+{
+  "name": "jikai",
+  "private": true,
+  "version": "1.0.0",
+  "description": "ACG 追番桌面台历：本季番剧、播出时间表、更新倒计时、补番 deadline 卡片",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "desktop": "electron .",
+    "assets": "node scripts/make-icons.cjs && node scripts/make-wallpaper.cjs",
+    "shoot": "vite build && node scripts/screenshot.cjs",
+    "builtin": "node scripts/build-builtin.mjs",
+    "live": "node scripts/live-check.mjs",
+    "live:offline": "node scripts/live-check.mjs --offline",
+    "live:shot": "node scripts/live-shot.cjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "puppeteer-core": "^25.11.0",
+    "vite": "^5.4.11"
+  }
+}

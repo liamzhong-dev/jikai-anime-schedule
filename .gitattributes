@@ -1,0 +1,17 @@
+# 默认按文本处理，交给 git 判断
+* text=auto
+
+# 批处理必须保持 CRLF。
+# 这个文件在 Windows 上是 GBK 编码 + CRLF，一旦被规范化成 LF，
+# cmd 解析 goto / 标签会出怪问题，中文提示也会错位。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 构建期生成的内置数据：体积大、内容不手写，
+# 不做行尾转换，免得每次生成都产生整文件级 diff。
+src/data/builtin/*.js -text
+
+# 二进制资源
+*.png binary
+*.jpg binary
+*.ico binary
