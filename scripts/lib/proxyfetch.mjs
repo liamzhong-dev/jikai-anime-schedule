@@ -19,7 +19,7 @@ export const PROXY_CANDIDATES = [
 
 /** 从环境变量取代理配置，形如 http://127.0.0.1:7890 或 127.0.0.1:7890 */
 export function proxyFromEnv(env = process.env) {
-  const raw = env.ANIME_DESK_PROXY || env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy;
+  const raw = env.JIKAI_PROXY || env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy;
   if (!raw) return null;
   const m = String(raw).trim().replace(/^\w+:\/\//, '').replace(/\/.*$/, '');
   const [host, port] = m.split(':');

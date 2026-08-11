@@ -12,7 +12,7 @@
  *   node scripts/live-check.mjs                  # 自动探测代理，跑完整验证
  *   node scripts/live-check.mjs --limit=8        # 多补几部
  *   node scripts/live-check.mjs --offline        # 只用本地快照，不联网（回归解析用）
- *   ANIME_DESK_PROXY=http://127.0.0.1:7890 node scripts/live-check.mjs
+ *   JIKAI_PROXY=http://127.0.0.1:7890 node scripts/live-check.mjs
  */
 import fs from 'node:fs';
 import path from 'node:path';

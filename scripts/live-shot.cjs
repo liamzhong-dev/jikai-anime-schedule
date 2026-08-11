@@ -29,7 +29,7 @@ const argOf = (name, dflt) => {
   return hit ? hit.slice(name.length + 3) : dflt;
 };
 const WAIT_MS = Number(argOf('wait', 90000));
-const CANDIDATES = [argOf('proxy', null), process.env.ANIME_DESK_PROXY, '127.0.0.1:7892', '127.0.0.1:7890']
+const CANDIDATES = [argOf('proxy', null), process.env.JIKAI_PROXY, '127.0.0.1:7892', '127.0.0.1:7890']
   .filter(Boolean)
   .map((s) => s.replace(/^https?:\/\//, '').replace(/\/.*$/, ''));
 

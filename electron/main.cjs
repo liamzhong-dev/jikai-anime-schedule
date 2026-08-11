@@ -15,7 +15,7 @@ const path = require('node:path');
 const netBridge = require('./net.cjs');
 const { createTray } = require('./tray.cjs');
 
-const DEV_URL = process.env.ANIME_DESK_DEV_URL || '';
+const DEV_URL = process.env.JIKAI_DEV_URL || '';
 const ICON_PNG = path.join(__dirname, '..', 'build', 'icons', 'icon.png');
 
 const stateFile = () => path.join(app.getPath('userData'), 'state.json');
