@@ -223,7 +223,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   // Windows 上不设 AppUserModelId，通知会显示成 electron.app.Electron
-  app.setAppUserModelId('com.animedesk.app');
+  app.setAppUserModelId('com.jikai.app');
 
   app.on('second-instance', () => showWindow());
 
