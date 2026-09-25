@@ -14,6 +14,17 @@ import { APP_VERSION } from '../core/version.js';
 
 const STORE_KEY = 'jikai/state/v1';
 const WALLPAPER_KEY = 'jikai/wallpaper/v1';
+const NAME_INDEX_KEY = 'jikai/nameindex/v1';
+
+/**
+ * 浏览器这一侧不支持的能力，统一回这个形状。
+ *
+ * 为什么不直接抛：界面要有区分度 —— 「浏览器里就是不行」和「程序出错了」
+ * 是两回事，混成同一种会让用户以为是 bug。所以带上 unsupported 标记。
+ */
+function unsupported(what, detail) {
+  return { ok: false, unsupported: true, error: `${what}：${detail}` };
+}
 
 const hasLocalStorage = () => {
   try {
@@ -126,6 +137,60 @@ const webAdapter = {
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     return true;
   },
+
+  // ---- 封面缓存 ----
+  // 浏览器里没有本地磁盘缓存这回事：直接 <img> 跨域指向 lain.bgm.tv 能显示，
+  // 但画进 canvas 就会被 taint，toBlob() 抛 SecurityError。所以这条能力
+  // 在 Web 侧明确不支持 —— 宁可说清楚，也不要给一张「看起来能用、导出就炸」的图。
+  async getCoverImage() {
+    return unsupported('封面本地缓存', '浏览器环境不支持，导出高清图请用桌面版');
+  },
+  async warmCovers() {
+    return unsupported('封面预热', '浏览器环境不支持，导出高清图请用桌面版');
+  },
+  async coverCacheStats() {
+    return { root: null, exists: false, totalBytes: 0, totalFiles: 0, groups: [] };
+  },
+  async clearCoverCache() {
+    return { removed: 0, freedBytes: 0 };
+  },
+  onCoverProgress() {
+    return () => {};
+  },
+
+  /** 浏览器里也试着走一次 fetch→blob→dataURL。CORS 允许就成，不允许照实报错。 */
+  async saveBinaryFile({ name = 'jikai.png', dataUrl = '' } = {}) {
+    if (typeof document === 'undefined') return { ok: false, error: '当前环境不能保存文件' };
+    try {
+      const blob = await (await fetch(dataUrl)).blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      return { ok: true, bytes: blob.size };
+    } catch (err) {
+      return { ok: false, error: err?.message ?? String(err) };
+    }
+  },
+
+  // ---- 名称索引 ----
+  async readNameIndex() {
+    return readJson(NAME_INDEX_KEY);
+  },
+  async writeNameIndex(payload) {
+    return writeJson(NAME_INDEX_KEY, payload);
+  },
+  async clearNameIndex() {
+    if (!hasLocalStorage()) return false;
+    try {
+      localStorage.removeItem(NAME_INDEX_KEY);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
   onCommand() {
     return () => {};
   },
@@ -186,6 +251,47 @@ const electronAdapter = {
     if (r && r.ok === false) throw new Error(r.error || '保存失败');
     return true;
   },
+  async saveBinaryFile({ name = 'jikai.png', dataUrl = '' } = {}) {
+    const r = await window.jikai?.saveBinaryFile?.({ name, dataUrl });
+    if (!r) throw new Error('主进程没有提供保存能力');
+    if (r.ok === false) throw new Error(r.error || '保存失败');
+    return r;
+  },
+
+  // ---- 封面缓存 ----
+  /** @returns {{status:'hit'|'fetched'|'error', dataUrl?, bytes?, error?}} */
+  async getCoverImage({ group, url, timeoutMs, refresh, readOnly } = {}) {
+    const r = await window.jikai?.getCover?.({ group, url, timeoutMs, refresh, readOnly });
+    if (!r) return unsupported('封面取图', '主进程没有提供封面通道');
+    return r;
+  },
+  async warmCovers({ group, urls, concurrency, timeoutMs } = {}) {
+    const r = await window.jikai?.warmCovers?.({ group, urls, concurrency, timeoutMs });
+    if (!r) return unsupported('封面预热', '主进程没有提供封面通道');
+    return r;
+  },
+  async coverCacheStats() {
+    return (await window.jikai?.coverCacheStats?.()) ?? { totalBytes: 0, totalFiles: 0, groups: [], exists: false };
+  },
+  async clearCoverCache({ group = null } = {}) {
+    return (await window.jikai?.clearCoverCache?.({ group })) ?? { removed: 0, freedBytes: 0 };
+  },
+  onCoverProgress(cb) {
+    const off = window.jikai?.onCoverProgress?.(cb);
+    return typeof off === 'function' ? off : () => {};
+  },
+
+  // ---- 名称索引 ----
+  async readNameIndex() {
+    return window.jikai?.readNameIndex?.() ?? null;
+  },
+  async writeNameIndex(payload) {
+    return window.jikai?.writeNameIndex?.(payload) ?? false;
+  },
+  async clearNameIndex() {
+    return window.jikai?.clearNameIndex?.() ?? false;
+  },
+
   onCommand(cb) {
     const off = window.jikai?.onCommand?.(cb);
     return typeof off === 'function' ? off : () => {};

@@ -142,4 +142,107 @@ function fetchJson({ url, timeoutMs = 12000, headers } = {}) {
   });
 }
 
-module.exports = { fetchJson, applyProxy, friendlyError, isAllowedUrl };
+/**
+ * 发一个 GET 并把响应当成二进制读回来。
+ *
+ * 为什么单独一个函数而不是复用 fetchJson：那边的 Buffer.concat(chunks)
+ * 最后要 toString('utf8')，二进制一经过 UTF-8 解码就彻底坏了 ——
+ * JPEG 里到处是 0xFF 0xD8 这类非法序列，会被换成 U+FFFD，图就废了。
+ * 所以这里直接 base64 回传：IPC 只能传字符串 / 结构化对象，Buffer 过不去。
+ *
+ * @returns {Promise<{ok, status, data?, mime?, bytes?, error?}>}
+ *   data 是 base64 字符串，渲染层拿它拼 data:URL 就能直接画。
+ */
+function fetchBinary({ url, timeoutMs = 20000, headers, maxBytes = 12 * 1024 * 1024 } = {}) {
+  return new Promise((resolve) => {
+    if (!isAllowedUrl(url)) {
+      resolve({ ok: false, status: 0, error: '这个地址不被允许（只支持 https，或本机 http）' });
+      return;
+    }
+
+    let settled = false;
+    const finish = (v) => {
+      if (!settled) { settled = true; resolve(v); }
+    };
+
+    let req;
+    try {
+      req = net.request({ method: 'GET', url, redirect: 'follow' });
+    } catch (err) {
+      finish({ ok: false, status: 0, error: friendlyError(err) });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      try { req.abort(); } catch { /* 已经结束了 */ }
+      finish({ ok: false, status: 0, error: `请求超时（${Math.round(timeoutMs / 1000)}s）` });
+    }, Math.max(1000, timeoutMs));
+
+    try {
+      req.setHeader('Accept', 'image/avif,image/webp,image/apng,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.7');
+      req.setHeader('Accept-Language', 'zh-CN,zh;q=0.9');
+      req.setHeader('User-Agent', `jikai/${require('../package.json').version} (Electron)`);
+      for (const [k, v] of Object.entries(headers ?? {})) {
+        if (v == null) continue;
+        try { req.setHeader(k, String(v)); } catch { /* 非法头名，忽略 */ }
+      }
+    } catch { /* setHeader 失败不致命 */ }
+
+    // 边收边判断体积：封面再大也就几 MB，超过上限早点收手比拖到超时好
+    let size = 0;
+    const chunks = [];
+    let tooBig = false;
+
+    req.on('response', (res) => {
+      const mime = String(res.headers?.['content-type'] ?? '').split(';')[0].trim() || 'application/octet-stream';
+
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > maxBytes) {
+          tooBig = true;
+          clearTimeout(timer);
+          try { req.abort(); } catch { /* 算了 */ }
+          finish({ ok: false, status: 0, error: `图片太大（超过 ${Math.round(maxBytes / 1024 / 1024)} MB）` });
+          return;
+        }
+        if (!tooBig) chunks.push(c);
+      });
+
+      res.on('end', () => {
+        if (tooBig) return;
+        clearTimeout(timer);
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          finish({ ok: false, status: res.statusCode, error: `HTTP ${res.statusCode}` });
+          return;
+        }
+        const buf = Buffer.concat(chunks);
+        if (!buf.length) {
+          finish({ ok: false, status: res.statusCode, error: '响应体是空的' });
+          return;
+        }
+        // 只放行图片：链接被人换成 HTML 时，不要把一个网页当图存进缓存
+        if (mime && !mime.startsWith('image/')) {
+          finish({ ok: false, status: res.statusCode, error: `返回的不是图片（Content-Type: ${mime}）` });
+          return;
+        }
+        finish({ ok: true, status: res.statusCode, data: buf.toString('base64'), mime, bytes: buf.length });
+      });
+
+      res.on('error', (err) => {
+        if (tooBig) return;
+        clearTimeout(timer);
+        finish({ ok: false, status: 0, error: friendlyError(err) });
+      });
+    });
+
+    req.on('error', (err) => {
+      if (tooBig) return;
+      clearTimeout(timer);
+      finish({ ok: false, status: 0, error: friendlyError(err) });
+    });
+
+    try { req.end(); } catch (err) { clearTimeout(timer); finish({ ok: false, status: 0, error: friendlyError(err) }); }
+  });
+}
+
+module.exports = { fetchJson, fetchBinary, applyProxy, friendlyError, isAllowedUrl };

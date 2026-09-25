@@ -171,7 +171,9 @@ npm run desktop
 
 ## 联系
 
-用出问题，或者有想法想聊，发邮件给我：liam.zhong@foxmail.com
+用出问题，或者有想法想聊，发邮件给我：`liam.zhong` + `@` + `foxmail.com`（三段连起来，中间不加空格）
+
+> 地址这样写是为了躲收地址的爬虫 —— 源码里搜不到完整串，跟 `src/core/contact.js` 里拆成几段再拼是同一个道理。要改联系方式两处一起改。
 
 也可以在 GitHub 上找我：[@liamzhong-dev](https://github.com/liamzhong-dev)
 

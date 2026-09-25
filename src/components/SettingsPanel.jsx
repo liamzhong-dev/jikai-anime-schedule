@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { THEMES, THEME_GROUPS } from '../theme/themes.js';
-import { seasonLabel } from '../core/time.js';
+import { ageText, seasonLabel } from '../core/time.js';
 import { HOTKEYS } from '../core/hotkeys.js';
 import { sourceMeta, SOURCES } from '../data/sources.js';
 import { BUILTIN_GENERATED_AT, BUILTIN_SEASONS } from '../data/builtin/index.js';
@@ -9,6 +9,7 @@ import { formatBytes as fmtBytes } from '../core/wallpaper.js';
 import { describeUpdate } from '../core/update.js';
 import { prettyKey } from './ShortcutsOverlay.jsx';
 import { platform } from '../platform/index.js';
+import LibraryPanel from './LibraryPanel.jsx';
 import {
   CONTACT_EMAIL,
   CONTACT_GITHUB_URL,
@@ -34,20 +35,14 @@ import {
 const TABS = [
   ['look', '外观'],
   ['data', '数据源'],
+  ['library', '本地库'],
   ['layout', '布局'],
   ['remind', '提醒'],
   ['system', '系统'],
   ['contact', '联系'],
 ];
 
-function ageText(ms) {
-  const m = Math.floor((Number(ms) || 0) / 60000);
-  if (m < 1) return '刚刚';
-  if (m < 60) return `${m} 分钟前`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} 小时前`;
-  return `${Math.floor(h / 24)} 天前`;
-}
+/** 「多久之前」在 core/time.js 里（ageText），那边按时间戳计，别传时长进来 */
 
 function Row({ label, hint, children }) {
   return (
@@ -91,6 +86,13 @@ export default function SettingsPanel({
   appInfo, autoLaunch, onAutoLaunch,
   hotkeyInfo, onGlobalHotkey,
   onToast,
+  /**
+   * 本地库那一页要什么都在这一包里（季度列表、名称索引、封面占用、同步进度）。
+   *
+   * 为什么不拆成十个 props：这一页是新加的一整块功能，状态和它自己的
+   * 钩子绑在一起；拆开传会让这边的签名再长十行，而中间并不需要任何一个值。
+   */
+  library = {},
 }) {
   const [tab, setTab] = useState('look');
   const [presetName, setPresetName] = useState('');
@@ -540,7 +542,7 @@ export default function SettingsPanel({
                         <span>{sourceMeta(r.source).label.split('（')[0]}</span>
                         <span>{r.count}</span>
                         <span>{formatBytes(r.bytes)}</span>
-                        <span>{ageText(r.ageMs)}</span>
+                        <span>{ageText(r.savedAt)}</span>
                         <span>
                           <button
                             type="button"
@@ -571,6 +573,22 @@ export default function SettingsPanel({
           ) : null}
 
           {/* ---------------- 布局 ---------------- */}
+          {tab === 'library' ? (
+            <LibraryPanel
+              seasons={library.seasons ?? []}
+              nameIndex={library.nameIndex ?? null}
+              coverStats={library.coverStats ?? null}
+              groups={library.groups ?? []}
+              running={library.running ?? false}
+              progress={library.progress ?? null}
+              report={library.report ?? null}
+              onRun={library.onRun}
+              onClearCovers={library.onClearCovers}
+              onClearNameIndex={library.onClearNameIndex}
+              onToast={onToast}
+            />
+          ) : null}
+
           {tab === 'layout' ? (
             <>
               <section className="ssec">
@@ -586,7 +604,7 @@ export default function SettingsPanel({
                           {p.name}
                           {p.builtin ? <em className="preset__badge">内置</em> : null}
                         </div>
-                        <div className="preset__desc">{p.desc ?? `保存于 ${ageText(Date.now() - (p.createdAt ?? Date.now()))}`}</div>
+                        <div className="preset__desc">{p.desc ?? `保存于 ${ageText(p.createdAt)}`}</div>
                       </div>
                       <div className="preset__ops">
                         <button
@@ -873,7 +891,7 @@ export default function SettingsPanel({
                       {updateState?.checking ? '检查中…' : '检查更新'}
                     </button>
                     {settings?.update?.lastCheck ? (
-                      <span className="snote snote--inline">上次检查：{ageText(Date.now() - settings.update.lastCheck)}</span>
+                      <span className="snote snote--inline">上次检查：{ageText(settings.update.lastCheck)}</span>
                     ) : null}
                   </div>
                   <div className={`report report--one${updateState?.result?.hasUpdate ? ' is-update' : ''}`}>

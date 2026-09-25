@@ -12,15 +12,30 @@ import { DEFAULT_WALLPAPER } from '../theme/applyTheme.js';
 import { DEFAULT_API } from '../data/bangumiApi.js';
 import { DEFAULT_SOURCE } from '../data/sources.js';
 import { BUILTIN_PRESETS, presetById } from './layoutPresets.js';
+import { addToGroup as addToGroupPure, defaultGroups, groupSummary, mergeSubjects, pickSubjects, removeFromGroup as removeFromGroupPure } from './library.js';
+import { makeDefaultTierlist, normalizeTierlist } from './tierlist.js';
 
 const MAX_CACHED_SEASONS = 10;
+
+/**
+ * 作品档案的容量上限。
+ *
+ * 档案里存的是精简过的条目，一条几百字节 —— 但放任它涨也会拖慢每次落盘。
+ * 上限取 2000：足够装下「追过的 + 补过的 + 搜过的」，又不至于失控。
+ * 淘汰策略按 archivedAt 丢最旧的，因为最能代表「还会用到」的就是最近碰过的。
+ */
+const MAX_SUBJECTS = 2000;
 
 const DEFAULTS = {
   following: {},      // { [id]: { status, watchedEps, notify } }
   catchup: [],        // [{ id, subjectId, deadline, watchedEps, targetEps, archived }]
+  subjects: {},       // { [id]: 番剧条目 } —— 见「作品档案」一节
+  groups: defaultGroups(0), // { [key]: { label, hint, ids, updatedAt } }
   layout: {},         // { [cardId]: { x, y, w, h } }
   layoutPresets: [],  // 用户自存预设；内置的从 layoutPresets.js 读，不落盘
   activePreset: null,
+  // { [seasonKey]: 一份 tierlist } —— 按季度各存一份，见「Tier List」一节
+  tierlists: {},
   settings: {
     dataSource: DEFAULT_SOURCE, // 'builtin' | 'bangumi-data' | 'bangumi-api'
     reminderLeadMin: 0,   // 提前多少分钟提醒
@@ -120,9 +135,12 @@ function snapshot() {
   return {
     following: state.following,
     catchup: state.catchup,
+    subjects: state.subjects,
+    groups: state.groups,
     layout: state.layout,
     layoutPresets: state.layoutPresets,
     activePreset: state.activePreset,
+    tierlists: state.tierlists, // ⚠️ 漏了这行就是「看着能用、关掉重开全没了」
     settings: state.settings,
     cache: state.cache,
   };
@@ -178,20 +196,42 @@ export function unfollow(id) {
 
 // ---------- 补番 ----------
 
-export function addCatchup(subjectId, { deadline, targetEps }) {
+/**
+ * 加入补番清单。
+ *
+ * 顺带做两件事，这也是这套改动要解决的根本问题：
+ *   1) 把条目归档进 subjects —— 否则一切季度、不在内置数据里的番，
+ *      卡片虽然还在，界面却因为没有条目对象而把它整个丢掉；
+ *   2) 把 id 记进「补番组」—— 之后离线搜索、封面预热都依赖这份名单。
+ *
+ * @param {number} subjectId
+ * @param {{deadline?:number, targetEps?:number, anime?:object}} opts
+ *   anime 可选，但**强烈建议传**：不传的话这一步只登记了 id，
+ *   番剧的名字封面要等到下次拉到它才会补上。
+ */
+export function addCatchup(subjectId, { deadline, targetEps, anime } = {}) {
+  const id = Number(subjectId);
+  let addedCard = false;
   update((s) => {
-    if (s.catchup.some((c) => c.subjectId === subjectId && !c.archived)) return s;
+    if (s.catchup.some((c) => Number(c.subjectId) === id && !c.archived)) return s;
     const card = {
-      id: `catchup-${subjectId}-${Date.now()}`,
-      subjectId,
+      id: `catchup-${id}-${Date.now()}`,
+      subjectId: id,
       deadline: deadline ?? Date.now() + 21 * 86400000,
       watchedEps: 0,
-      targetEps: targetEps ?? 12,
+      targetEps: targetEps ?? anime?.eps ?? 12,
       archived: false,
       createdAt: Date.now(),
     };
-    return { ...s, catchup: [...s.catchup, card] };
+    addedCard = true;
+
+    // 可能同 thread 改两处，先算好再一起写回，避免中间状态被 emit 出去
+    const merged = anime ? archiveSubjectsRaw(s.subjects, [anime]) : s.subjects;
+    const grouped = addToGroupPure(s.groups, 'catchup', [id], { nowMs: Date.now() }).groups;
+
+    return { ...s, catchup: [...s.catchup, card], subjects: merged, groups: grouped };
   });
+  return addedCard;
 }
 
 export function patchCatchup(id, patch) {
@@ -201,8 +241,154 @@ export function patchCatchup(id, patch) {
   }));
 }
 
+/**
+ * 删掉一张补番卡。
+ *
+ * 注意「删除」和「归档」的差别：
+ *   归档 = 还在名单里，只是不催了 → 补番组继续留着；
+ *   删除 = 真的不要了          → 补番组里也一并移掉。
+ * 两种操作共用 group 的话，用户会发现「归档之后又删掉，名单还在」，很难解释。
+ */
 export function removeCatchup(id) {
-  update((s) => ({ ...s, catchup: s.catchup.filter((c) => c.id !== id) }));
+  update((s) => {
+    const target = s.catchup.find((c) => c.id === id);
+    const catchup = s.catchup.filter((c) => c.id !== id);
+    if (!target) return { ...s, catchup };
+    // 同一部番可能有两张卡（删掉后又加回来），都删干净才移出分组
+    const stillThere = catchup.some((c) => Number(c.subjectId) === Number(target.subjectId));
+    const groups = stillThere ? s.groups : removeFromGroupPure(s.groups, 'catchup', target.subjectId, { nowMs: Date.now() });
+    return { ...s, catchup, groups };
+  });
+}
+
+// ---------- 作品档案与分组 ----------
+//
+// subjects：所有看见过的番剧条目，按 id 存一份精简副本。
+// groups：分组，只存 id 列表（补番组就是其中一组）。
+//
+// 为什么要分开存：条目本体可能几百字节，而分组只是几个数字。
+// 把它们绑在一起会让「加一组」变成「复制一遍全部条目」。
+
+export function readSubjects() {
+  return state.subjects ?? {};
+}
+
+export function subjectById(id) {
+  return state.subjects?.[Number(id)] ?? null;
+}
+
+/**
+ * 把条目写进作品档案。空值不覆盖已有内容（规则在 library.js 里，这里只管调用）。
+ * @returns {{added:number, updated:number}}
+ */
+export function archiveSubjects(items) {
+  let stats = { added: 0, updated: 0 };
+  update((s) => {
+    const r = archiveSubjectsRaw(s.subjects, items);
+    stats = { added: r.added, updated: r.updated };
+    return { ...s, subjects: r.subjects };
+  });
+  return stats;
+}
+
+/** archiveSubjects 的纯计算部分：不动 state，方便在另一个 mutator 里复用 */
+function archiveSubjectsRaw(subjects, items) {
+  const { subjects: merged, added, updated } = mergeSubjects(subjects, items);
+  // 超容量时丢最旧的：archivedAt 不存在的一律排在最前面（视为最旧）
+  const keys = Object.keys(merged);
+  if (keys.length <= MAX_SUBJECTS) return { subjects: merged, added, updated };
+  const sorted = keys.sort((a, b) => (merged[a]?.archivedAt ?? 0) - (merged[b]?.archivedAt ?? 0));
+  const trimmed = {};
+  for (const k of sorted.slice(sorted.length - MAX_SUBJECTS)) trimmed[k] = merged[k];
+  return { subjects: trimmed, added, updated };
+}
+
+export function addGroupIds(key, ids, opts = {}) {
+  let added = [];
+  update((s) => {
+    const r = addToGroupPure(s.groups, key, ids, { nowMs: Date.now(), ...opts });
+    added = r.added;
+    return r.added.length ? { ...s, groups: r.groups } : s;
+  });
+  return added;
+}
+
+export function removeGroupId(key, id) {
+  update((s) => ({ ...s, groups: removeFromGroupPure(s.groups, key, id, { nowMs: Date.now() }) }));
+}
+
+export function listGroups() {
+  return groupSummary(state.groups ?? {});
+}
+
+export function idsOfGroup(key) {
+  return ((state.groups ?? {})[String(key)]?.ids ?? []).map(Number);
+}
+
+/**
+ * 取补番组里的完整条目。
+ * @returns {{found:Array, missing:number[]}}
+ *   missing 非空说明「名单里有、档案里没有」—— 这时候要联网补全，不能假装没事。
+ */
+export function catchupGroupItems() {
+  const ids = idsOfGroup('catchup');
+  return pickSubjects(state.subjects ?? {}, ids);
+}
+
+// ---------- Tier List ----------
+//
+// 按季度各存一份，key 就是季度（'2026q3'）。
+// 不设容量上限：一份只有 7 行档位加几十个图块，一两 KB，
+// 一年也只涨四份 —— 不像 subjects 那种会随搜索无限增长的字段，用不着淘汰策略。
+//
+// 读写都过 normalizeTierlist：状态文件是手写到磁盘上的，
+// 旧版本写过、手改过、写坏了都得能在读的这一刻修好，不能让界面层去兜底。
+
+export function readTierlist(key) {
+  const k = String(key ?? '');
+  if (!k) return null;
+  const raw = (state.tierlists ?? {})[k];
+  // 没排过的季度返回 null（而不是一份空表）—— 界面要靠这个区分
+  // 「还没开始排」和「排了又全拖回池子」，两种状态的提示文案不一样。
+  if (!raw) return null;
+  return normalizeTierlist(raw, { seasonKey: k });
+}
+
+/** 取一份，没有就现场造一份（**不落盘**，要留着请用 patchTierlist） */
+export function ensureTierlist(key, { presetId } = {}) {
+  const k = String(key ?? '');
+  if (!k) return null;
+  const existing = readTierlist(k);
+  if (existing) return existing;
+  return makeDefaultTierlist(k, presetId ? { presetId } : {});
+}
+
+/**
+ * 改一份 tierlist。传进来的 patch 会先过一遍 normalize，脏数据在写入前就被拦下。
+ * @returns {object|null} 写入后的完整结构
+ */
+export function patchTierlist(key, patch, { nowMs = Date.now() } = {}) {
+  const k = String(key ?? '');
+  if (!k) return null;
+  const base = readTierlist(k) ?? makeDefaultTierlist(k, { nowMs });
+  const next = normalizeTierlist({ ...base, ...(patch ?? {}), updatedAt: nowMs }, { seasonKey: k, nowMs });
+
+  update((s) => ({ ...s, tierlists: { ...(s.tierlists ?? {}), [k]: next } }));
+  return next;
+}
+
+/** 清空一季度的排布（保留档位定义，只清图块） */
+export function resetTierlist(key, { presetId, nowMs = Date.now() } = {}) {
+  const k = String(key ?? '');
+  if (!k) return null;
+  const fresh = makeDefaultTierlist(k, { presetId, nowMs });
+  update((s) => ({ ...s, tierlists: { ...(s.tierlists ?? {}), [k]: fresh } }));
+  return fresh;
+}
+
+/** 哪些季度排过（界面上给个「已排 N 个季度」用） */
+export function listTierlists() {
+  return Object.keys(state.tierlists ?? {}).sort();
 }
 
 // ---------- 布局 ----------

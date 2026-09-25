@@ -192,6 +192,23 @@ export function sinceLabel(targetMs, nowMs = Date.now()) {
   return `${Math.max(cd.minutes, 1)} 分钟前已更新`;
 }
 
+/**
+ * 「多久之前」的简短描述（不带后缀），如 3 天前 / 5 小时前。
+ *
+ * 和 sinceLabel 的区别：那边的文案固定带「已更新」，只适合形容数据源；
+ * 这里要能接在任意名词后面（「建于 X」「同步于 X」），所以不写死后缀。
+ */
+export function ageText(ms, nowMs = Date.now()) {
+  const m = Math.floor((nowMs - (Number(ms) || 0)) / 60000);
+  if (!Number.isFinite(m)) return '未知时间';
+  if (m < 0) return '刚刚';            // 时钟前后差一点点，别显示负数
+  if (m < 1) return '刚刚';
+  if (m < 60) return `${m} 分钟前`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} 小时前`;
+  return `${Math.floor(h / 24)} 天前`;
+}
+
 /** 北京时间当天 00:00 对应的 UTC 时刻 */
 export function startOfCSTDay(nowMs = Date.now()) {
   const p = toCST(nowMs);

@@ -6,20 +6,28 @@ import SeasonView from './components/SeasonView.jsx';
 import ScheduleView from './components/ScheduleView.jsx';
 import FollowingView from './components/FollowingView.jsx';
 import CatchupView from './components/CatchupView.jsx';
+import TierListView from './components/TierListView.jsx';
 import DetailDrawer from './components/DetailDrawer.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import ShortcutsOverlay from './components/ShortcutsOverlay.jsx';
 import WallpaperLayer from './components/WallpaperLayer.jsx';
 import Toasts from './components/Toasts.jsx';
 import { useStoreState } from './core/useStore.js';
+import { searchNames } from './core/library.js';
 import {
-  addCatchup, exportLayoutPresets, flush, load as loadStore, markEpisode,
+  addCatchup, archiveSubjects, exportLayoutPresets, flush, listGroups, load as loadStore, markEpisode,
   patchCatchup, patchFollowing, patchSettingSection, patchSettings, readSeasonCacheRaw,
   removeCatchup, toggleFollow, unfollow, writeSeasonCache,
+  ensureTierlist, patchTierlist, resetTierlist,
 } from './core/store.js';
+import { autoRankByScore } from './core/tierlist.js';
+import { collectImages, exportTierlistPng } from './core/tierExport.js';
+import { DISPLAY_VARIANT, EXPORT_VARIANT, coverVariant } from './core/covers.js';
+import { useCovers } from './core/useCovers.js';
 import { platform } from './platform/index.js';
 import { allBuiltinItems, builtinItems, BUILTIN_SEASONS } from './data/builtin/index.js';
-import { availableSeasons, currentSeason } from './data/bangumiData.js';
+import { availableSeasons, currentSeason, fetchCatalog } from './data/bangumiData.js';
+import { describeSyncReport, syncLibrary } from './data/sync.js';
 import { degradedText, loadSeason } from './data/sources.js';
 import { diagnose, probeSubject } from './data/bangumiApi.js';
 import { readImageFile } from './core/wallpaper.js';
@@ -32,7 +40,9 @@ import { MS_PER_DAY, clockCST, countdown, countdownLabel, seasonLabel, watchStat
 import { buildWeek, upcomingWithin } from './core/schedule.js';
 import { deadlineStatus, progress, sortCatchup } from './core/catchup.js';
 
-const VIEWS = ['season', 'schedule', 'following', 'catchup'];
+// 这个常量和 SideNav 里的 ITEMS 是两处各写一份的 —— 加视图时两边都要改，
+// 只改一处会出现「导航能点到、但深链刷新就跳回来」。
+const VIEWS = ['season', 'schedule', 'following', 'catchup', 'tier'];
 
 /** 同步指示的最短显示时长（毫秒）：只为防「一闪而过」，不影响取数 */
 const MIN_SYNC_MS = 480;
@@ -103,6 +113,21 @@ export default function App() {
   const [apiTest, setApiTest] = useState(null);
   const [testingApi, setTestingApi] = useState(false);
 
+  // ---- 本地库 ----
+  // nameIndex 单独一个文件（约 1MB），不混进 state.json ——
+  // 每次 state 落盘都要 stringify 一遍，塞进去会让改任何设置都变重。
+  const [nameIndex, setNameIndex] = useState(null);
+  const [coverStats, setCoverStats] = useState(null);
+  const [libraryRunning, setLibraryRunning] = useState(false);
+  const [libraryProgress, setLibraryProgress] = useState(null);
+  const [libraryReport, setLibraryReport] = useState(null);
+  // 补番页顶部的「按名字搜」
+  const [catchupQuery, setCatchupQuery] = useState('');
+
+  // ---- Tier List（按季度各存一份）----
+  const [tierExporting, setTierExporting] = useState(false);
+  const [tierNote, setTierNote] = useState('');
+
   const notified = useRef(new Set());
 
   const pushToast = useCallback((title, body) => {
@@ -116,14 +141,18 @@ export default function App() {
     let alive = true;
     (async () => {
       await loadStore();
-      const [info, wp, al] = await Promise.all([
+      const [info, wp, al, ni, cs] = await Promise.all([
         platform.appInfo().catch(() => null),
         platform.readWallpaper().catch(() => null),
         platform.getAutoLaunch().catch(() => null),
+        platform.readNameIndex().catch(() => null),
+        platform.coverCacheStats().catch(() => null),
       ]);
       if (!alive) return;
       setAppInfo(info);
       setAutoLaunch(al);
+      setNameIndex(ni);
+      setCoverStats(cs);
       if (wp?.dataUrl) setWallpaper(wp);
       setReady(true);
       booted.current = true;
@@ -406,6 +435,286 @@ export default function App() {
     }
   }, [pushToast]);
 
+  // ---------- 本地库：更新 Bangumi 数据 ----------
+  //
+  // 一次点击做三件事（顺序在 src/data/sync.js 里）：
+  //   ① 拉一次全量数据集；② 派生名称索引 + 各季度分组；
+  //   ③ 补番组里「名单上有、档案里没有」的逐个回查 API 补全。
+  // 第 ③ 步是「补番名单记住了但补不出来」的唯一解 —— 不联网，
+  // 那些条目永远只剩一串数字 id。
+  const refreshCoverStats = useCallback(async () => {
+    setCoverStats(await platform.coverCacheStats().catch(() => null));
+  }, []);
+
+  const runLibrarySync = useCallback(async ({ seasonKeys = [], rebuildIndex = false } = {}) => {
+    if (libraryRunning) return;
+    setLibraryRunning(true);
+    setLibraryProgress({ pct: 4, label: '准备' });
+    setLibraryReport(null);
+
+    // 只补「确实缺」的：已经有档案的不重复发请求
+    const archive = stRef.current.subjects ?? {};
+    const missingIds = [...new Set(
+      stRef.current.catchup
+        .map((c) => Number(c.subjectId))
+        .filter((id) => Number.isFinite(id) && id > 0 && !archive[id]),
+    )];
+
+    try {
+      const rep = await syncLibrary({
+        seasonKeys,
+        rebuildIndex,
+        catchupIds: missingIds,
+        fetchCatalog: ({ signal }) => fetchCatalog({ signal, fetchJson: (url, o) => platform.fetchJson(url, o) }),
+        readNameIndex: () => platform.readNameIndex().catch(() => null),
+        writeNameIndex: async (payload) => {
+          await platform.writeNameIndex(payload);
+          setNameIndex(payload);
+        },
+        writeSeason: (key, items) => writeSeasonCache(key, {
+          savedAt: Date.now(), source: 'bangumi-data', enriched: false, enrichStats: null, items,
+        }),
+        archiveSubjects: (items) => archiveSubjects(items),
+        fetchJson: (url, opts) => platform.fetchJson(url, opts),
+        api: stRef.current.settings.api,
+        onProgress: ({ pct, label }) => setLibraryProgress({ pct, label }),
+        nowMs: Date.now(),
+      });
+
+      const text = describeSyncReport(rep);
+      setLibraryReport({ ok: rep.ok, text });
+      setNameIndex(await platform.readNameIndex().catch(() => null));
+      if (rep.ok) pushToast('已更新 Bangumi 数据', text);
+      else pushToast('更新完了，但有地方出错', text);
+    } catch (err) {
+      const text = err?.message ?? String(err);
+      setLibraryReport({ ok: false, text });
+      pushToast('更新失败', text);
+    } finally {
+      setLibraryRunning(false);
+      setLibraryProgress(null);
+    }
+  }, [libraryRunning, pushToast]);
+
+  const clearNameIndex = useCallback(async () => {
+    await platform.clearNameIndex().catch(() => false);
+    setNameIndex(null);
+  }, []);
+
+  const clearCoverCache = useCallback(async (opts = {}) => {
+    const r = await platform.clearCoverCache(opts).catch((err) => ({ error: err?.message ?? String(err) }));
+    await refreshCoverStats();
+    return r;
+  }, [refreshCoverStats]);
+
+  const searchNote = useMemo(() => {
+    if (libraryRunning) return '正在更新 Bangumi 数据…';
+    if (!nameIndex?.count) return '还没有名称索引 —— 到「设置 → 本地库」点一次更新就能搜了';
+    return `在全量 ${nameIndex.count} 部里搜`;
+  }, [nameIndex, libraryRunning]);
+
+  const catchupResults = useMemo(() => {
+    const q = catchupQuery.trim();
+    if (!q || !nameIndex?.entries?.length) return [];
+    return searchNames(nameIndex, q, { limit: 12 });
+  }, [catchupQuery, nameIndex]);
+
+  /**
+   * 从搜索结果里加一部进补番清单。
+   *
+   * 索引里只有名字，没有封面和话数 —— 所以这里先按已知信息建档，
+   * 剩下的等下次「更新 Bangumi 数据」第 ③ 步去补齐。
+   * 关键是**先把名字存下来**：这才是「记住补番名单」的意思，
+   * 卡片不会再因为切个季度就消失。
+   */
+  const addFromSearch = useCallback((hit) => {
+    const anime = {
+      id: hit.id,
+      titleZh: hit.zh || '',
+      titleJa: hit.ja || '',
+      season: hit.y && hit.q ? `${hit.y}q${hit.q}` : null,
+      eps: null,
+      cover: null,
+    };
+    addCatchup(hit.id, { anime, targetEps: 12, deadline: Date.now() + 21 * MS_PER_DAY });
+    pushToast('已加入补番清单', `${hit.zh || hit.ja} · 默认 21 天内补完 · 封面话数下次更新时补齐`);
+    setCatchupQuery('');
+  }, [pushToast]);
+
+  // ---------- Tier List ----------
+  //
+  // 素材池就是当前季度（决定 #1）。按季度各存一份，切季度互不影响；
+  // 封面按 group=季度 落在缓存里，所以切回去还是那批图，不用重下。
+  const tierlist = useMemo(
+    () => ensureTierlist(seasonKey),
+    // st.tierlists 每次 patch 都是新对象，靠它触发重算
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [seasonKey, st.tierlists],
+  );
+
+  // 只有切到 Tier 视图才预热封面 —— 而且预热的是**缩略图那一档**（约 2.6MB），
+  // 不是原图（约 45MB）。界面上的图块只有 100×120，用原图纯属浪费：
+  // 全季总量差 17 倍，还要整份经 IPC 转 base64 送过来。
+  // 原图只在「按下导出」那一次去取（见 handleExportTier）。
+  const tierCoverUrls = useMemo(() => {
+    if (view !== 'tier') return [];
+    const out = [];
+    for (const a of season) {
+      const url = coverVariant(a.cover, DISPLAY_VARIANT).url;
+      if (url) out.push(url);
+    }
+    return out;
+  }, [season, view]);
+
+  const tierCovers = useCovers({ group: seasonKey, urls: tierCoverUrls, enabled: view === 'tier' });
+
+  /**
+   * 取回来的图是按**变体地址**存的（`c` 那一档），而界面查表用的是条目上的
+   * 原始 `cover`（`l` 那一档）—— 两边键不一样，直接拿 `images[a.cover]` 永远查不到。
+   *
+   * ⚠️ 这个 bug 在浏览器壳里看不出来：那边走的是直连降级，压根不查这张表。
+   * 是桌面壳自检报出 `cached: 0` 才暴露的 —— 拿不到图时数据也就全对。
+   *
+   * 所以这里翻译一次：把变体地址上的图映射回**条目原本的 cover 字段**，
+   * 界面上就还是 `images[a.cover]` 这种自然写法。
+   */
+  const tierCoverMap = useMemo(() => {
+    const m = {};
+    if (!tierCoverUrls.length) return m;
+    for (const a of season) {
+      const variantUrl = coverVariant(a.cover, DISPLAY_VARIANT).url;
+      if (variantUrl && tierCovers.images[variantUrl]) m[a.cover] = tierCovers.images[variantUrl];
+    }
+    return m;
+  }, [season, tierCoverUrls, tierCovers.images]);
+
+  // 本地缓存通道用不了（浏览器壳），或这次一张都没取到 → 显示退回直连远端地址。
+  // 桌面壳里绝不能这么做：那会先由浏览器下一遍 45MB，主进程再下一遍进缓存。
+  //
+  // `platform.kind` 是**同步**就知道的，所以浏览器壳一上来就走这一条 ——
+  // 只等 `useCovers` 那个异步结论的话，首屏会先闪一片色块再换成图。
+  const coversRemote = platform.kind === 'web' || !tierCovers.supported || Boolean(tierCovers.error);
+
+  const coversNote = useMemo(() => {
+    if (view !== 'tier') return '';
+    if (!tierCovers.supported) return '浏览器里没有封面缓存，导出高清图请用桌面版';
+    if (tierCovers.error) return tierCovers.error;
+    if (tierCovers.progress) {
+      const { phase, done, total } = tierCovers.progress;
+      return `${phase === 'warm' ? '下载封面' : '读取封面'} ${done}/${total}`;
+    }
+    return '';
+  }, [view, tierCovers.supported, tierCovers.error, tierCovers.progress]);
+
+  const handleAutoRank = useCallback(() => {
+    const { items, ranked, unranked } = autoRankByScore(tierlist.items, season, tierlist.rows);
+    patchTierlist(seasonKey, { items });
+    if (!ranked.length) pushToast('一部都没排进去', '这一季还没有评分数据，先手动排着');
+    else pushToast('已按评分分档', `${ranked.length} 部进档 · ${unranked.length} 部没评分，留在池子里`);
+  }, [seasonKey, tierlist, season, pushToast]);
+
+  const handleResetTier = useCallback(() => {
+    resetTierlist(seasonKey, { presetId: tierlist.presetId });
+    pushToast('已清空', `${seasonLabel(seasonKey)} 的排布`);
+  }, [seasonKey, tierlist.presetId, pushToast]);
+
+  /**
+   * 导出 PNG。
+   *
+   * 图必须走主进程的缓存通道拿 **dataUrl**：直接把远端地址画进 canvas 会被 taint，
+   * `toDataURL()` 立刻抛 SecurityError —— 而这个错只在这一步才出现，
+   * 前面排得再好也白排。
+   */
+  const handleExportTier = useCallback(async () => {
+    setTierExporting(true);
+    setTierNote('');
+    try {
+      const byId = new Map(season.map((a) => [String(a.id), a]));
+      const entries = tierlist.items.map((it) => {
+        const a = byId.get(String(it.key));
+        // 导出要原图：这里是唯一会去取 `l` 的地方。
+        // 同时备一份 `c`（平时浏览缓存下来的那一档）当退路 ——
+        // 断网时原图取不到，用缩略图顶上总比整片色块强：150×212 铺进 200×280 只是略软。
+        return {
+          key: it.key,
+          url: a?.cover ? coverVariant(a.cover, EXPORT_VARIANT).url : '',
+          fallback: a?.cover ? coverVariant(a.cover, DISPLAY_VARIANT).url : '',
+        };
+      });
+
+      const fallbackOf = new Map(
+        entries.filter((e) => e.url && e.fallback && e.fallback !== e.url).map((e) => [e.url, e.fallback]),
+      );
+      /** 走了缩略图退路的张数。不说出来的话，用户会以为这张本来就是糊的 */
+      let softCount = 0;
+
+      const { images, missing } = await collectImages(entries, {
+        group: seasonKey,
+        getImage: async ({ group, url }) => {
+          let r = null;
+          try {
+            r = await platform.getCoverImage({ group, url });
+          } catch {
+            r = null;
+          }
+          if (r?.dataUrl) return r;
+
+          // 原图没拿到，退到缓存里那一档。这里**故意**用 readOnly：
+          // 原图失败多半就是断网，再联网取只会白等一轮超时。
+          const fb = fallbackOf.get(url);
+          if (!fb) return r;
+          try {
+            const alt = await platform.getCoverImage({ group, url: fb, readOnly: true });
+            if (alt?.dataUrl) softCount += 1;
+            return alt;
+          } catch {
+            return null;
+          }
+        },
+      });
+
+      if (!images.size && !tierlist.items.length) {
+        pushToast('还没排过', '先把番剧拖进档位再导出');
+        setTierExporting(false);
+        return;
+      }
+
+      const res = await exportTierlistPng({
+        rows: tierlist.rows,
+        items: tierlist.items,
+        images,
+        itemSize: tierlist.itemSize,
+        title: `${seasonLabel(seasonKey)} Tier List`,
+        subtitle: `共 ${tierlist.items.length} 部 · 次回 jikai`,
+        metaOf: (key) => {
+          const a = byId.get(String(key));
+          const name = a?.titleZh || a?.titleJa || '';
+          return { name, seed: name || key };
+        },
+      });
+
+      if (!res.ok) {
+        pushToast('导出失败', res.error ?? '渲染没成功');
+        setTierExporting(false);
+        return;
+      }
+
+      await platform.saveBinaryFile({ name: `jikai-tier-${seasonKey}.png`, dataUrl: res.dataUrl });
+
+      const parts = [];
+      if (res.degraded && res.reason) parts.push(res.reason);
+      if (softCount) parts.push(`${softCount} 张用的是缩略图（原图没取到）`);
+      if (missing.length) parts.push(`${missing.length} 张封面没取到，画成了色块`);
+      parts.push(`${res.width}×${res.height} · ${res.scale}x · 约 ${Math.round((res.bytes ?? 0) / 1024)} KB`);
+      setTierNote(parts.join(' · '));
+      pushToast('已导出 PNG', `${res.width}×${res.height} · ${res.scale}x`);
+    } catch (err) {
+      pushToast('导出失败', err?.message ?? String(err));
+    } finally {
+      setTierExporting(false);
+    }
+  }, [seasonKey, tierlist, season, pushToast]);
+
   const handleExportPresets = useCallback(async () => {
     const payload = exportLayoutPresets();
     await platform.saveTextFile({ name: 'jikai-layout-presets.json', text: JSON.stringify(payload, null, 2) });
@@ -554,11 +863,28 @@ export default function App() {
     return out;
   }, [season]);
 
+  /**
+   * 补番卡片 ⟶ 条目。
+   *
+   * 查不到的情况在过去会让整张卡消失（原来的写法是 .filter(r => r.anime)），
+   * 那正是「补番名单记不住」的根因。现在按优先级找：
+   *   季度数据（字段最新）→ 作品档案（离线也在）→ 临时占位（至少有名字可显示）
+   *
+   * 占位不是为了粉饰，是为了让入口不丢：卡片还在，上面写着「待补全」，
+   * 用户点一次「更新 Bangumi 数据」就能把它补上。
+   */
   const catchupRows = useMemo(
     () => sortCatchup(st.catchup, now)
-      .map((item) => ({ item, anime: pool.find((a) => a.id === item.subjectId) }))
-      .filter((r) => r.anime),
-    [st.catchup, pool, now],
+      .map((item) => {
+        const id = Number(item.subjectId);
+        const anime = pool.find((a) => a.id === id) ?? st.subjects?.[id] ?? null;
+        if (anime) return { item, anime };
+        return {
+          item,
+          anime: { id, titleZh: '', titleJa: `条目 ${id}`, cover: null, eps: null, __missing: true },
+        };
+      }),
+    [st.catchup, st.subjects, pool, now],
   );
 
   const activeCatchup = catchupRows.filter((r) => !r.item.archived);
@@ -807,6 +1133,11 @@ export default function App() {
                   onRemove={removeCatchup}
                   onMark={(id, eps) => patchCatchup(id, { watchedEps: eps })}
                   onExternal={(url) => url && platform.openExternal(url)}
+                  searchQuery={catchupQuery}
+                  onSearchQuery={setCatchupQuery}
+                  results={catchupResults}
+                  searchNote={searchNote}
+                  onAddHit={addFromSearch}
                 />
               </WindowCard>
 
@@ -840,6 +1171,30 @@ export default function App() {
               </WindowCard>
             </>
           )}
+          {view === 'tier' && (
+            <WindowCard
+              id="tier-board"
+              title="Tier List"
+              hint={`${seasonLabel(seasonKey)} · 已排 ${tierlist.items.length} 部`}
+              layout={st.layout}
+              defaultRect={{ x: 16, y: 16, w: 1260, h: 700 }}
+            >
+              <TierListView
+                seasonKey={seasonKey}
+                tierlist={tierlist}
+                pool={season}
+                images={tierCoverMap}
+                coversNote={coversNote}
+                coversRemote={coversRemote}
+                onPatch={(patch) => patchTierlist(seasonKey, patch)}
+                onAutoRank={handleAutoRank}
+                onReset={handleResetTier}
+                onExport={handleExportTier}
+                exporting={tierExporting}
+                exportNote={tierNote}
+              />
+            </WindowCard>
+          )}
         </div>
       </main>
 
@@ -853,7 +1208,9 @@ export default function App() {
           onToggleFollow={() => toggleFollow(drawer.id)}
           onMarkEpisode={markEpisode}
           onAddCatchup={(a) => {
-            addCatchup(a.id, { targetEps: a.eps ?? 12, deadline: Date.now() + 21 * MS_PER_DAY });
+            // 把 anime 一起交给 store：这样这一部会被归档进作品档案并记入补番组，
+            // 之后切到别的季度、甚至断网，这张卡也不会消失。
+            addCatchup(a.id, { targetEps: a.eps ?? 12, deadline: Date.now() + 21 * MS_PER_DAY, anime: a });
             pushToast('已加入补番清单', `${a.titleZh || a.titleJa} · 默认 21 天内补完`);
           }}
           onOpenExternal={(url) => url && platform.openExternal(url)}
@@ -892,6 +1249,18 @@ export default function App() {
         hotkeyInfo={hotkeyInfo}
         onGlobalHotkey={handleGlobalHotkey}
         onToast={pushToast}
+        library={{
+          seasons,
+          nameIndex,
+          coverStats,
+          groups: listGroups(),
+          running: libraryRunning,
+          progress: libraryProgress,
+          report: libraryReport,
+          onRun: runLibrarySync,
+          onClearCovers: clearCoverCache,
+          onClearNameIndex: clearNameIndex,
+        }}
       />
 
       <ShortcutsOverlay

@@ -725,6 +725,9 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .catchup--archived { opacity: 0.5; }
 
 .catchup__head { display: flex; gap: 10px; align-items: flex-start; }
+/* 顶部那条「按名字搜」：搜全量名称索引，用来把本季之外的老番加进补番清单 */
+.catchup__search { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.catchup__search .input { flex: 1; min-width: 0; }
 .catchup__cover { width: 38px; height: 54px; flex: 0 0 38px; border-radius: var(--r-sm); }
 .catchup__cover .cover__glyph { font-size: 16px; }
 .catchup__titlewrap { min-width: 0; flex: 1; }
@@ -1208,3 +1211,126 @@ html[data-scheme='light'] .select,
 html[data-scheme='light'] .iconbtn { border-color: rgba(15, 23, 42, 0.14); }
 html[data-scheme='light'] .card__badge,
 html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
+
+/* ==========================================================================
+   Tier List（v1.1）
+   --------------------------------------------------------------------------
+   图块尺寸和 JS 里的 ITEM_SIZES.poster（100×140）是对着的：
+   拖拽落点换算用的是这一对数字，CSS 里改成别的值会让「插到第几个」算歪。
+   要改就两边一起改。
+   ========================================================================== */
+
+.tier { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
+
+.tier__bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tier__spacer { flex: 1 1 auto; }
+.tier__note { font-size: 11px; color: var(--text-2); }
+.tier__select { width: auto; min-width: 168px; }
+
+.tier__body { display: flex; gap: 12px; flex: 1 1 auto; min-height: 0; }
+
+/* ---- 素材池 ---- */
+.tier-pool {
+  flex: 0 0 244px; width: 244px;
+  display: flex; flex-direction: column; gap: 8px; min-height: 0;
+  padding-right: 10px; border-right: 1px solid var(--line);
+}
+.tier-pool__head { display: flex; align-items: baseline; justify-content: space-between; }
+.tier-pool__title { font-size: 12.5px; font-weight: 600; }
+.tier-pool__count { font-size: 11px; color: var(--text-3); }
+.tier-pool__search { width: 100%; }
+.tier-pool__hint { font-size: 11px; color: var(--text-3); }
+.tier-pool__grid {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px;
+  padding: 6px; border-radius: 10px;
+  border: 1px dashed transparent;
+}
+.tier-pool__grid.is-dropping { border-color: var(--accent); background: var(--accent-soft); }
+
+/* ---- 档位表 ---- */
+.tier__board {
+  flex: 1 1 auto; min-width: 0; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 8px; padding-right: 4px;
+}
+
+.tier-row { display: flex; gap: 8px; align-items: stretch; }
+.tier-row__label {
+  flex: 0 0 96px; width: 96px;
+  border-radius: 8px; padding: 6px 4px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  font-weight: 700; font-size: 15px; text-align: center;
+  cursor: text;
+}
+.tier-row__text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tier-row__count { font-size: 10.5px; font-weight: 500; opacity: 0.72; }
+.tier-row__color {
+  width: 26px; height: 15px; padding: 0; border: none; border-radius: 4px;
+  background: transparent; cursor: pointer;
+}
+.tier-row__input {
+  width: 84px; text-align: center; font-size: 12px; font-weight: 600;
+  border-radius: 5px; border: 1px solid rgba(0, 0, 0, 0.25);
+  background: rgba(255, 255, 255, 0.9); color: #1a1d24; padding: 2px 4px;
+}
+.tier-row__body {
+  flex: 1 1 auto; min-width: 0; min-height: 140px;
+  display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px;
+  padding: 6px; border-radius: 10px;
+  border: 1px dashed var(--line); background: rgba(255, 255, 255, 0.02);
+}
+.tier-row.is-target .tier-row__body { border-color: var(--accent); background: var(--accent-soft); }
+.tier-row__insert { flex: 0 0 3px; width: 3px; align-self: stretch; border-radius: 2px; background: var(--accent); }
+.tier-row__empty { align-self: center; padding: 0 8px; font-size: 11.5px; color: var(--text-3); }
+
+/* ---- 图块 ---- */
+.tier-item {
+  position: relative; width: 100px; flex: 0 0 100px;
+  cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none;
+}
+.tier-item:active { cursor: grabbing; }
+.tier-item.is-dragging { opacity: 0.32; }
+.tier-item__art {
+  position: relative; width: 100px; height: 120px;
+  border-radius: 8px; overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
+}
+.tier-item__img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.tier-item__glyph {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 34px; font-weight: 700; color: rgba(255, 255, 255, 0.9);
+}
+.tier-item__score {
+  position: absolute; left: 4px; top: 4px;
+  padding: 1px 5px; border-radius: 5px; font-size: 10.5px; font-weight: 600;
+  background: rgba(8, 10, 14, 0.68); color: #ffd479;
+}
+.tier-item__name {
+  margin-top: 4px; font-size: 11px; line-height: 1.25; color: var(--text-2);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tier-item__x, .tier-item__add {
+  position: absolute; opacity: 0; transition: opacity 0.12s;
+  border: none; border-radius: 50%; cursor: pointer;
+  width: 20px; height: 20px; line-height: 18px; font-size: 11px; text-align: center;
+  background: rgba(8, 10, 14, 0.78); color: #fff;
+}
+.tier-item__x { right: 2px; top: 2px; }
+.tier-item__add { right: 2px; bottom: 22px; font-size: 14px; }
+.tier-item:hover .tier-item__x, .tier-item:hover .tier-item__add { opacity: 1; }
+.tier-item__x:hover { background: var(--danger); }
+.tier-item__add:hover { background: var(--accent); }
+
+/* ---- 拖起来的影子 ---- */
+.tier-ghost {
+  position: fixed; z-index: 60; pointer-events: none;
+  transform: translate(-50%, -50%) scale(1.05);
+  filter: drop-shadow(0 10px 20px rgba(0, 0, 0, 0.5));
+  opacity: 0.94;
+}
+
+@media (max-width: 1100px) {
+  .tier__body { flex-direction: column; }
+  .tier-pool { flex: 0 0 auto; width: auto; border-right: none; border-bottom: 1px solid var(--line); padding: 0 0 10px; }
+  .tier-pool__grid { max-height: 220px; }
+}

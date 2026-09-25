@@ -17,6 +17,8 @@
     "assets": "node scripts/make-icons.cjs && node scripts/make-wallpaper.cjs",
     "shoot": "vite build && node scripts/screenshot.cjs",
     "builtin": "node scripts/build-builtin.mjs",
+    "check:tier": "node scripts/tier-render-check.mjs --drag",
+    "check:tier-export": "node scripts/tier-export-check.mjs",
     "live": "node scripts/live-check.mjs",
     "live:offline": "node scripts/live-check.mjs --offline",
     "live:shot": "node scripts/live-shot.cjs",

@@ -42,6 +42,19 @@ const ITEMS = [
       </svg>
     ),
   },
+  // ⚠️ 这一项和 App.jsx 的 VIEWS 是两处各写一份的，加视图时两边都要改
+  {
+    key: 'tier',
+    label: 'Tier List',
+    icon: (
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6">
+        <rect x="2.5" y="3" width="4.5" height="14" rx="1.2" />
+        <rect x="8" y="3" width="9.5" height="4.4" rx="1.2" />
+        <rect x="8" y="8.8" width="9.5" height="4.4" rx="1.2" />
+        <rect x="8" y="14.6" width="9.5" height="2.4" rx="1" />
+      </svg>
+    ),
+  },
 ];
 
 export default function SideNav({ view, onView, counts, version, onOpenSettings }) {

@@ -57,13 +57,56 @@ function hashId(s) {
   return 700000 + h;
 }
 
+/**
+ * 拉全量原始数据集。
+ *
+ * 单独抽出来是因为它有两类消费者，而数据集有 7.5 MB：
+ *   1) 季度列表 —— filter 出某一季；
+ *   2) 名称索引 —— 要遍历全部条目。
+ * 早先每个季度各自 fetch 一次同一份 JSON，建索引会再拉一遍，
+ * 一次「更新数据」就要下十几 MB。这里改成拉一次、多方复用。
+ *
+ * @param {{signal?:AbortSignal, fetchJson?:Function}} opts
+ *   fetchJson 可注入；不传就用全局 fetch（浏览器与 Electron 渲染层都有）。
+ * @returns {Promise<Array>} 未经映射的原始条目
+ */
+export async function fetchCatalog({ signal, fetchJson } = {}) {
+  const get = fetchJson ?? (async (url, { signal: sig } = {}) => {
+    const res = await globalThis.fetch(url, { signal: sig });
+    if (!res.ok) throw new Error(`bangumi-data 拉取失败：HTTP ${res.status}`);
+    return res.json();
+  });
+
+  const raw = await get(DATA_URL, { signal, timeoutMs: 60000 });
+  const items = Array.isArray(raw) ? raw : (raw?.items ?? []);
+  if (!Array.isArray(items)) throw new Error('bangumi-data 返回的结构不对（既不是数组也没有 items）');
+  return items;
+}
+
+/** 把原始条目映射成番剧对象；begin 为空的直接丢掉（没有放送时间排不进 Calendar） */
+export function mapCatalog(items) {
+  return (items ?? []).map(mapItem).filter((a) => a.begin);
+}
+
+/**
+ * 按季度分组。
+ * keys 给定时就只保留这几季（其余丢弃）；不给定就把所有能归季的都列出来。
+ */
+export function groupBySeason(mapped, keys = null) {
+  const out = {};
+  const wanted = keys ? new Set(keys) : null;
+  for (const a of mapped ?? []) {
+    if (!a.season) continue;
+    if (wanted && !wanted.has(a.season)) continue;
+    (out[a.season] ??= []).push(a);
+  }
+  return out;
+}
+
 /** 拉取全量数据并按季度过滤；失败时抛出，由调用方降级到缓存或内置数据 */
-export async function fetchSeason(seasonKey, { signal } = {}) {
-  const res = await fetch(DATA_URL, { signal });
-  if (!res.ok) throw new Error(`bangumi-data 拉取失败：HTTP ${res.status}`);
-  const raw = await res.json();
-  const items = Array.isArray(raw) ? raw : (raw.items ?? []);
-  const mapped = items.map(mapItem).filter((a) => a.begin);
+export async function fetchSeason(seasonKey, { signal, fetchJson } = {}) {
+  const items = await fetchCatalog({ signal, fetchJson });
+  const mapped = mapCatalog(items);
   if (!seasonKey) return mapped;
   return mapped.filter((a) => a.season === seasonKey);
 }

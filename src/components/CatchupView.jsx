@@ -12,18 +12,57 @@ function toDateValue(ms) {
 /**
  * 补番清单：每部一个带 deadline 的卡片。
  * 三档配色直接对应「该不该现在动手」——逾期红、三天内黄、宽裕灰。
+ *
+ * 顶部多了「按名字搜」：补番的对象常常是当下没在播的老番，
+ * 光靠当前季度的列表永远找不到，所以走全量名称索引。
  */
-export default function CatchupView({ rows, now, onOpen, onPatch, onRemove, onMark, onExternal }) {
-  if (rows.length === 0) {
-    return (
-      <div className="empty">
-        补番清单是空的 —— 在番剧详情里点「加入补番」，就会生成一张带 deadline 的卡片
-      </div>
-    );
-  }
+export default function CatchupView({
+  rows, now, onOpen, onPatch, onRemove, onMark, onExternal,
+  searchQuery = '', onSearchQuery,
+  results = [], searching = false, searchNote = null,
+  onAddHit,
+}) {
+  const hasQuery = String(searchQuery ?? '').trim().length > 0;
+  const showResults = hasQuery && results.length > 0;
 
   return (
-    <div className="board">
+    <div>
+      <div className="catchup__search">
+        <input
+          className="input"
+          data-search-input="catchup"
+          placeholder={searchNote ? String(searchNote) : '按名字搜番并加入补番清单（支持中文名与原名）'}
+          value={searchQuery}
+          onChange={(e) => onSearchQuery?.(e.target.value)}
+        />
+        {searching ? <span className="tag tag--normal">搜中…</span> : null}
+      </div>
+
+      {showResults ? (
+        <div className="mini-list" style={{ marginBottom: 10 }}>
+          {results.map((hit) => (
+            <div className="mini-row" key={hit.id}>
+              <div className="mini-row__main">
+                <div className="mini-row__title">{hit.zh || hit.ja}</div>
+                <div className="mini-row__meta">
+                  {hit.zh && hit.ja && hit.zh !== hit.ja ? `${hit.ja} · ` : ''}
+                  {hit.y ? `${hit.y} 年 ${hit.q ? `第 ${hit.q} 季` : ''}` : '放送时间未知'}
+                </div>
+              </div>
+              <button type="button" className="btn btn--mini" onClick={() => onAddHit?.(hit)}>
+                加入补番
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {rows.length === 0 ? (
+        <div className="empty">
+          补番清单是空的 —— 在上面搜一部番加进来，或者在番剧详情里点「加入补番」
+        </div>
+      ) : (
+        <div className="board">
       {rows.map(({ item, anime }) => {
         const st = deadlineStatus(item.deadline, now);
         const pg = progress(item);
@@ -52,6 +91,11 @@ export default function CatchupView({ rows, now, onOpen, onPatch, onRemove, onMa
               <span className={`tag tag--${pg.remaining === 0 ? 'normal' : st.level}`}>
                 {item.archived ? '已归档' : pg.remaining === 0 ? '已完成' : st.label}
               </span>
+              {anime.__missing ? (
+                // 只有 id、没拿到条目资料。卡片必须留着（丢掉等于用户记的名单丢了），
+                // 但要说清楚为什么没封面 —— 否则看起来像程序坏了。
+                <span className="tag tag--urgent">待补全</span>
+              ) : null}
               <span className="catchup__hint">{dateCST(item.deadline)} 前补完</span>
             </div>
 
@@ -84,6 +128,8 @@ export default function CatchupView({ rows, now, onOpen, onPatch, onRemove, onMa
           </div>
         );
       })}
+        </div>
+      )}
     </div>
   );
 }

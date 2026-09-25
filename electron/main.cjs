@@ -14,18 +14,49 @@ const path = require('node:path');
 
 const netBridge = require('./net.cjs');
 const { createTray } = require('./tray.cjs');
+const { CoverCache } = require('./covers.cjs');
 
 const DEV_URL = process.env.JIKAI_DEV_URL || '';
+
+/**
+ * 自检模式：`JIKAI_SMOKE=<绝对路径>` —— 加载完截一张图、打一行 JSON 然后退出。
+ * 无头环境里这是唯一能区分「窗口开着」和「界面真的画出来了」的办法。
+ */
+const SMOKE_PNG = process.env.JIKAI_SMOKE || '';
+
+/**
+ * 自检模式下把 GPU 关掉。
+ *
+ * 这台机器（以及大多数无头/远程会话）的 GPU 进程起不来，表现是
+ * 「`GPU process exited unexpectedly` 连刷九次 → `FATAL: GPU process isn't usable. Goodbye.`」，
+ * 进程活不到截那一刻。正常启动**不关** —— 正常机器上没理由降级。
+ */
+if (SMOKE_PNG) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+}
 const ICON_PNG = path.join(__dirname, '..', 'build', 'icons', 'icon.png');
 
 const stateFile = () => path.join(app.getPath('userData'), 'state.json');
 const wallpaperFile = () => path.join(app.getPath('userData'), 'wallpaper.json');
+/**
+ * 名称索引单独一个文件，跟壁纸是同一个理由。
+ *
+ * 它构建完大约 1 MB（实测 8833 条、每条 112 字节），如果混进 state.json，
+ * 那每次 flush 都要 stringify 并重写这 1 MB —— 而 state 是 400ms 防抖、
+ * 改一次状态就写一遍的。壁纸就是因为 base64 太大被单独拎出去的，
+ * 这里不该再犯一次。
+ */
+const nameIndexFile = () => path.join(app.getPath('userData'), 'nameIndex.json');
 
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let lastTrayState = {};
 let currentHotkey = '';
+
+/** 封面缓存实例：等 whenReady 之后才知道 userData 在哪，所以先留空 */
+let coverCache = null;
 
 // 从托盘启动（开机自启）时不弹窗，直接蹲在托盘里
 const START_HIDDEN = process.argv.includes('--hidden');
@@ -95,10 +126,54 @@ function createWindow() {
     if (!START_HIDDEN && !process.argv.includes('--tray')) win.show();
   });
 
+  // ---------- 自检：JIKAI_SMOKE=<png 绝对路径> ----------
+  //
+  // 看不见画面的时候，「窗口开着」不等于「界面画出来了」——
+  // 渲染进程可能早就崩了，进程还活得好好的。所以让它自己截一张图再退。
+  //
+  // 这一段顺带把**主进程那条 IPC 链**也验了：截图前先真的调一次封面缓存，
+  // 否则「渲染层拿得到封面」这件事在桌面壳里没有任何自动化覆盖。
+  if (SMOKE_PNG) {
+    win.webContents.once('did-finish-load', async () => {
+      try {
+        // 等久一点可以顺便观察封面缓存有没有真的长起来（预热是后台跑的）
+        const waitMs = Number(process.env.JIKAI_SMOKE_WAIT || 3000);
+        await new Promise((r) => setTimeout(r, Number.isFinite(waitMs) ? waitMs : 3000));
+        const st = await coverCache?.stats?.();
+        const probe = await win.webContents.executeJavaScript(
+          `JSON.stringify({
+             view: (globalThis.location?.hash || '').replace(/^#\\//, ''),
+             rows: document.querySelectorAll('.tier-row__label').length,
+             tiles: document.querySelectorAll('.tier-item__art').length,
+             pool: document.querySelectorAll('.tier-pool__grid .tier-item').length,
+             cached: document.querySelectorAll('.tier-item[data-cover="cache"]').length,
+             remote: document.querySelectorAll('.tier-item[data-cover="remote"]').length,
+             library: (window.jikai && typeof window.jikai.getCover === 'function') ? 'yes' : 'no',
+             coverGroups: ${JSON.stringify((st?.groups ?? []).length)},
+             coverBytes: ${JSON.stringify(st?.totalBytes ?? 0)},
+           })`,
+        ).catch((e) => `{"error":${JSON.stringify(String(e?.message ?? e))}}`);
+        const img = await win.webContents.capturePage();
+        fs.writeFileSync(SMOKE_PNG, img.toPNG());
+        console.log(`SMOKE_OK ${probe}`);
+      } catch (err) {
+        console.log(`SMOKE_FAIL ${err?.message ?? String(err)}`);
+      } finally {
+        isQuitting = true;
+        app.exit(0);
+      }
+    });
+  }
+
+  // 自检时会指定视图（hash 路由），不然只会停在默认的本季番剧页
+  const smokeView = SMOKE_PNG ? (process.env.JIKAI_SMOKE_VIEW || 'tier') : '';
+  const smokeSeason = process.env.JIKAI_SMOKE_SEASON || '';
+  const hash = smokeView ? `/${smokeView}${smokeSeason ? `?q=${smokeSeason}` : ''}` : null;
+
   if (DEV_URL) {
-    win.loadURL(DEV_URL);
+    win.loadURL(hash ? `${DEV_URL.replace(/\/$/, '')}/#${hash}` : DEV_URL);
   } else {
-    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), hash ? { hash } : undefined);
   }
 
   // 关窗不退进程：提醒要能继续跑，所以先藏到托盘
@@ -252,6 +327,58 @@ if (!app.requestSingleInstanceLock()) {
     });
 
     ipcMain.handle('http:json', (_e, payload = {}) => netBridge.fetchJson(payload));
+    ipcMain.handle('http:binary', (_e, payload = {}) => netBridge.fetchBinary(payload));
+
+    // ---- 封面缓存 ----
+    coverCache = new CoverCache(app.getPath('userData'), {
+      fetchBinary: (opts) => netBridge.fetchBinary(opts),
+    });
+
+    ipcMain.handle('cover:get', (_e, payload = {}) => coverCache.get(payload));
+    ipcMain.handle('cover:stats', () => coverCache.stats());
+    ipcMain.handle('cover:clear', (_e, payload = {}) => coverCache.clear(payload || {}));
+    ipcMain.handle('cover:warm', async (_e, payload = {}) => {
+      return coverCache.warm({
+        ...payload,
+        // 预热一季动辄几十张，一次性 invoke 会让界面干等；
+        // 这里把进度推回去，界面才有得显示。
+        onProgress: (p) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('cover:warm-progress', p);
+          }
+        },
+      });
+    });
+
+    // ---- 名称索引（单独文件） ----
+    ipcMain.handle('nameindex:read', () => readJsonFile(nameIndexFile()));
+    ipcMain.handle('nameindex:write', (_e, payload) => writeJsonFile(nameIndexFile(), payload));
+    ipcMain.handle('nameindex:clear', () => writeJsonFile(nameIndexFile(), null));
+
+    // 保存二进制文件：导出 PNG 用。渲染层给的是 dataURL，这里剥掉前缀再解码。
+    ipcMain.handle('file:save-binary', async (_e, { name = 'jikai.png', dataUrl = '' } = {}) => {
+      const m = /^data:([^;,]+)?(;charset=[^;,]+)?;base64,(.*)$/s.exec(String(dataUrl));
+      if (!m) return { ok: false, error: '不是合法的 dataURL' };
+      const mime = m[1] || 'application/octet-stream';
+      const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' })[mime] || 'png';
+      const fallback = name.includes('.') ? name : `${name}.${ext}`;
+      try {
+        const { canceled, filePath } = await dialog.showSaveDialog(mainWindow ?? undefined, {
+          title: '导出图片',
+          defaultPath: path.join(app.getPath('downloads'), fallback),
+          filters: [
+            { name: 'PNG 图片', extensions: ['png'] },
+            { name: 'JPEG 图片', extensions: ['jpg'] },
+            { name: '所有文件', extensions: ['*'] },
+          ],
+        });
+        if (canceled || !filePath) return { ok: false, error: '已取消' };
+        fs.writeFileSync(filePath, Buffer.from(m[3], 'base64'));
+        return { ok: true, path: filePath, bytes: fs.statSync(filePath).size };
+      } catch (err) {
+        return { ok: false, error: err?.message ?? String(err) };
+      }
+    });
 
     // 检查更新：只负责把更新源 JSON 取回来，比版本号在渲染层（core/update.js）
     ipcMain.handle('update:check', (_e, payload = {}) => updater.checkUpdate(payload));
