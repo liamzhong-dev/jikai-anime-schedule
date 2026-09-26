@@ -16,7 +16,11 @@ import SettingsPanel from '../../src/components/SettingsPanel.jsx';
 import TierListView from '../../src/components/TierListView.jsx';
 import DiaryView from '../../src/components/DiaryView.jsx';
 import DiaryRatingInput from '../../src/components/DiaryRatingInput.jsx';
+import Cover from '../../src/components/Cover.jsx';
+import { CoverProvider } from '../../src/components/CoverContext.jsx';
+import ReportView from '../../src/components/ReportView.jsx';
 import { makeDefaultTierlist } from '../../src/core/tierlist.js';
+import { makeDefaultReport } from '../../src/core/report.js';
 import { load, seedInitialState } from '../../src/core/store.js';
 import { SAMPLE_ITEMS, SAMPLE_SEASON, buildSampleUserState } from './sample-state.js';
 
@@ -138,4 +142,47 @@ export async function renderCatchupWithDiary(rows = [], { ratingOf = () => null,
       )}
     />,
   );
+}
+
+/**
+ * 单独渲染一张封面 —— 验的是「同一张图，缓存里有 / 没有 / 不许直连时会怎样」。
+ *
+ * 为什么要专门一个入口：封面现在从上下文里按**条目 id** 取图，而这件事
+ * 在桌面壳和浏览器壳里的行为**故意不一样**（桌面壳不许退回直连，否则会下两遍）。
+ * 这个分叉只能靠真的渲一遍才看得出来。
+ */
+export async function renderCover({ anime, images = {}, allowRemote = true } = {}) {
+  await prepare();
+  return renderToStaticMarkup(
+    <CoverProvider images={images} allowRemote={allowRemote}>
+      <Cover anime={anime} />
+    </CoverProvider>,
+  );
+}
+
+/**
+ * 单独渲染季度报告画布。
+ *
+ * 块的内容用 props 直接喂（上层拼 `report.blocks`），不经过 store：
+ * 报告这一层是「纯函数 + 受控组件」，块在不在、顺序对不对、空画布有没有出口，
+ * 只跟 props 有关；走整个 App 反而要绕开异步取数和封面预热。
+ *
+ * 但**接通 App 那一步另外要验**（见 render.test.mjs 的深链用例）——
+ * 组件自己好用 ≠ 它接进了 App，而 v1.1 在桌面端翻车翻的正是接通那一步。
+ */
+export async function renderReport(props = {}) {
+  await prepare();
+  const base = {
+    report: makeDefaultReport(SAMPLE_SEASON),
+    seasonKey: SAMPLE_SEASON,
+    seasonLabel: '2026 秋',
+    pool: SAMPLE_ITEMS,
+    // 查不到就给占位条目（和 App 里 diaryLookup 的约定一致），返回 null 会让
+    // 「查不到的作品」在两种渲染路径下表现不一样。
+    lookup: (id) => SAMPLE_ITEMS.find((a) => String(a.id) === String(id))
+      ?? { id: Number(id), titleZh: '', titleJa: `条目 ${id}`, cover: null, __missing: true },
+    onExportPdf: () => {},
+    onExportPng: () => {},
+  };
+  return renderToStaticMarkup(<ReportView {...base} {...props} />);
 }

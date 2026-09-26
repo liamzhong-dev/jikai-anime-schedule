@@ -23,6 +23,12 @@ const { CoverCache } = require('./covers.cjs');
  * 这就是「没跑过的代码」最典型的形状：不是没写，是从没执行。
  */
 const updater = require('./updater.cjs');
+/**
+ * ⚠️ 同一个坑踩第二次：上面那条注释写完的当天，`report:export` 又在用
+ * `reportExport.renderPdf` 而忘了在这一行 require。所以这次把「IPC 里用到的
+ * 模块名」和「顶部 require 的模块名」一起写下来，改这里的时候对着数一遍。
+ */
+const reportExport = require('./reportExport.cjs');
 
 const DEV_URL = process.env.JIKAI_DEV_URL || '';
 
@@ -33,13 +39,21 @@ const DEV_URL = process.env.JIKAI_DEV_URL || '';
 const SMOKE_PNG = process.env.JIKAI_SMOKE || '';
 
 /**
+ * IPC 冒烟开关。定义在这么前面，是因为它也要参与下面那个「关不关 GPU」的判断 ——
+ * 声明在函数区（原来在 90 行附近），这里就用不上了。
+ */
+const IPC_SMOKE = process.env.JIKAI_IPC_SMOKE === '1';
+
+/**
  * 自检模式下把 GPU 关掉。
  *
  * 这台机器（以及大多数无头/远程会话）的 GPU 进程起不来，表现是
  * 「`GPU process exited unexpectedly` 连刷九次 → `FATAL: GPU process isn't usable. Goodbye.`」，
  * 进程活不到截那一刻。正常启动**不关** —— 正常机器上没理由降级。
  */
-if (SMOKE_PNG) {
+// IPC 冒烟也算自检：它现在要开隐藏窗口跑一次长图导出（`report:export`），
+// 而那股「GPU 进程起不来 → 窗口全白 → 进程退出」的毛病在无头环境里照样会撞上。
+if (SMOKE_PNG || IPC_SMOKE) {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu-sandbox');
 }
@@ -78,7 +92,8 @@ if (process.env.JIKAI_USERDATA) {
  *   另写一份只能证明「那份复制品是对的」。这里调的就是 ipcMain 真正注册的那个函数。
  */
 const CRASH_TEST = process.env.JIKAI_CRASH_TEST === '1';
-const IPC_SMOKE = process.env.JIKAI_IPC_SMOKE === '1';
+// `IPC_SMOKE` 声明在文件顶部（它要参与「关不关 GPU」的判断），这里不再重复定义 ——
+// 两处各写一份的话，改了一处就会出现「文档说关了、其实没关」。
 
 /**
  * 测试用轨迹标记（只在 `JIKAI_CRASH_TEST=1` 时生效）。
@@ -264,6 +279,61 @@ function writeJsonFile(file, value) {
   }
 }
 
+/**
+ * 启动崩溃记忆器用的轨迹文件（见下面的 `trace`）之外，还有这一组给长图导出兜底的小工具。
+ */
+
+/**
+ * 正在被使用的「隐藏窗口」数量（长图导出时 +1）。
+ *
+ * 为什么需要它 —— 这是一条**报错完全指向错方向**的坑（2026-09-26 撞上）：
+ * `window-all-closed` 的语义是「用户把所有窗口都关了」，而导出长图是「开一个隐藏窗口、
+ * 用完就销毁」。在自检模式里恰好没有别的窗口，于是第一个导出（PDF）销毁窗口的那一刻
+ * 触发了「所有窗口都关了」→ `app.quit()`，紧接着第二个导出（PNG）刚建好窗口就
+ * 加载失败，报
+ *   `ERR_FAILED (-2) loading 'file:///C:\...\jikai-report-png-*.html'`
+ * —— 看上去像「临时文件路径不对」，跟真正的原因（进程正在退出）毫无关系。
+ *
+ * 顺带说明：正常运行时因为托盘常驻，不会走到这条分支；但「导出时用户恰好关了主窗口」
+ * 是能出现的，所以修在这里、而不是只改冒烟脚本。
+ */
+let hiddenExportWindows = 0;
+
+/**
+ * 给送进来的导出 HTML 补上样式。
+ *
+ * 为什么需要兜底：渲染层是从 `document.styleSheets` 里展开 `cssRules` 拿样式的，
+ * 而打包后样式是外链、页面走 `file://` —— Chromium 在这个组合下可能把每份文件
+ * 当成独立源，读 `cssRules` 直接抛 SecurityError。那条路一断，导出的就是一张
+ * **有字没样式**的长图，而窗口里预览完全正常（预览用的是同一份 DOM，
+ * 样式由文档自己加载，根本不经过这个函数）。所以这里宁可再读一次磁盘。
+ *
+ * 判据不用「长度够不够」而用「关键选择器在不在」：样式长度没有可靠阈值，
+ * 而 `.report__canvas {` 一定出现在我们的 CSS 里。
+ */
+function withReportStyles(html) {
+  if (/\.report__canvas\s*\{/.test(html)) return html;
+
+  const dir = path.join(__dirname, '..', 'dist', 'assets');
+  let files = [];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.css')).map((f) => path.join(dir, f));
+  } catch {
+    return html; // 开发模式（vite 注入 <style>）或还没构建，交给上面那条判据兜着
+  }
+
+  let css = '';
+  for (const f of files) {
+    try {
+      css += `\n${fs.readFileSync(f, 'utf8')}`;
+    } catch { /* 读不了就跳过这一份 */ }
+  }
+  if (!css.trim()) return html;
+
+  // 只替换第一处：导出页里只有我们注入的那一个 <style>
+  return html.replace('</style>', `${css}\n</style>`);
+}
+
 /** 壁纸单独一个文件：它是 base64 大字符串，混进 state.json 会让每次落盘都很重 */
 function writeWallpaper(payload) {
   if (!payload) return writeJsonFile(wallpaperFile(), {});
@@ -410,6 +480,12 @@ function createWindow() {
              pool: document.querySelectorAll('.tier-pool__grid .tier-item').length,
              cached: document.querySelectorAll('.tier-item[data-cover="cache"]').length,
              remote: document.querySelectorAll('.tier-item[data-cover="remote"]').length,
+             // 通用封面计数（本季 / 时间表 / 追番 / 补番 / 日记都用 <Cover>，不是 tier-item）。
+             // 分三档数：缓存 / 直连 / 色块 —— 「图还没加载完」和「压根没取到」长得一样，
+             // 只有分开数才能判断降级路径到底走没走。
+             coverCache: document.querySelectorAll('.cover[data-cover="cache"]').length,
+             coverRemote: document.querySelectorAll('.cover[data-cover="remote"]').length,
+             coverNone: document.querySelectorAll('.cover[data-cover="none"]').length,
              library: (window.jikai && typeof window.jikai.getCover === 'function') ? 'yes' : 'no',
              coverGroups: ${JSON.stringify((st?.groups ?? []).length)},
              coverBytes: ${JSON.stringify(st?.totalBytes ?? 0)},
@@ -422,6 +498,16 @@ function createWindow() {
              diaryAvgBgm: document.querySelector('[data-diary-avg-bgm]')?.getAttribute('data-diary-avg-bgm') ?? null,
              diaryRowTitles: [...document.querySelectorAll('[data-diary-row] .diary__title')].map((e) => e.textContent),
              diaryLastRating: (document.querySelector('.diary-input__cmp .diary-input__mine')?.textContent ?? '').replace(/[^0-9]/g, '') || null,
+             // 季度报告：块数 / 封面墙的图块数 / 素材面板行数。
+             // 这三样在截图里「空白」和「没渲染」长得一模一样，只有数得出来才判得了。
+             reportNav: document.querySelectorAll('.sidenav__item[data-nav="report"]').length,
+             reportView: document.querySelectorAll('[data-report-view]').length,
+             reportCanvas: document.querySelectorAll('[data-report-canvas]').length,
+             reportCanvasWidth: document.querySelector('[data-report-canvas]')?.getAttribute('data-report-canvas-width') ?? null,
+             reportBlocks: document.querySelectorAll('[data-report-block]').length,
+             reportWallTiles: document.querySelectorAll('[data-report-wall-tile]').length,
+             reportPool: Number(document.querySelector('[data-report-pool-rows]')?.getAttribute('data-report-pool-rows') ?? -1),
+             reportAddButtons: document.querySelectorAll('[data-report-add]').length,
            })`,
         ).catch((e) => `{"error":${JSON.stringify(String(e?.message ?? e))}}`);
         const img = await win.webContents.capturePage();
@@ -937,6 +1023,57 @@ async function runIpcSmoke() {
       record('autolaunch:set(写回原值)', r !== undefined, `原值=${cur?.enabled} 返回=${JSON.stringify(r).slice(0, 40)}`);
     });
 
+    await step('report:export(隐藏窗口出 PDF 与 PNG)', async () => {
+      // 这是桌面专属里最"新"的一条链路：渲染层拼自包含 HTML → 隐藏窗口重新排版 →
+      // printToPDF / 分片拼图 → 落盘。链路里任何一环断了都只表现为「点了导出没反应」，
+      // 而浏览器壳碰不到它，所以只有在这里真跑一遍才算验过。
+      //
+      // 喂的是一份最小报告：排版对不对由渲染层的 SSR 断言守着（`render.test.mjs`），
+      // 这里要证的只有「真能产出文件，且文件是那个格式」。
+      const css = 'body.print{margin:0;background:#101820}'
+        + '.report__canvas{width:1220px;box-sizing:border-box;background:#101820;color:#eef2f8;padding:40px;font-size:18px}'
+        + '.rb-wall__grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}'
+        + 'h1{font-size:40px}div.t{height:60px;background:#23324a}';
+      const tiles = Array.from({ length: 12 }, () => '<div class="t"></div>').join('');
+      const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>冒烟</title>`
+        + `<style>${css}</style></head><body class="print"><div class="report">`
+        + `<div class="report__canvas" data-report-canvas="1"><h1>季度报告冒烟</h1>`
+        + `<div class="rb-wall__grid">${tiles}</div></div></div></body></html>`;
+
+      const prev = process.env.JIKAI_EXPORT_PATH;
+      try {
+        for (const kind of ['pdf', 'png']) {
+          const out = path.join(tmp, `report.${kind}`);
+          process.env.JIKAI_EXPORT_PATH = out;
+          const r = await call('report:export', { kind, html, width: 1220, name: 'smoke-report' });
+          let buf = null;
+          try {
+            buf = r?.ok ? fs.readFileSync(out) : null;
+          } catch { /* 没写出来，下面按失败记 */ }
+
+          // 只看「文件存在且够大」是不够的：写了一半的、或者写成了别的东西，
+          // 都能过那一条。文件头才是「这确实是那个格式」的证据。
+          const sigOk = kind === 'pdf'
+            ? Boolean(buf && buf.subarray(0, 5).toString('latin1') === '%PDF-')
+            : Boolean(buf && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47);
+          const size = buf?.length ?? 0;
+          record(
+            `report:export(${kind})`,
+            Boolean(r?.ok) && sigOk && size > 1000,
+            r?.ok
+              ? `${size} 字节 · 文件头${sigOk ? '对' : '不对'} · ${kind === 'pdf'
+                ? `内容高 ${r.contentHeight}px`
+                : `${r.width}×${r.height} · ${r.slices} 片`}`
+              : (r?.error ?? '没有返回'),
+          );
+        }
+      } finally {
+        // 这个变量会让**所有**保存跳过对话框，留着会污染后面的步骤
+        if (prev === undefined) delete process.env.JIKAI_EXPORT_PATH;
+        else process.env.JIKAI_EXPORT_PATH = prev;
+      }
+    });
+
     await new Promise((resolve) => server.close(resolve));
   }
 
@@ -1071,6 +1208,68 @@ if (!app.requestSingleInstanceLock()) {
     // 检查更新：只负责把更新源 JSON 取回来，比版本号在渲染层（core/update.js）
     handle('update:check', (_e, payload = {}) => updater.checkUpdate(payload));
 
+    // ---- 季度报告长图导出 ----
+    // 渲染层负责把「画布那份 DOM + 全部样式」拼成一份自包含的 HTML（图都是 dataURL），
+    // 这里负责在隐藏窗口里重新渲染、出 PDF 或 PNG，然后落到磁盘。
+    // 真正的活在同目录的 `reportExport.cjs`，主进程只做参数校验与存盘。
+    handle('report:export', async (_e, { kind = 'pdf', html = '', width = 1220, name = 'jikai-report' } = {}) => {
+      const text = String(html);
+      if (text.length < 200) return { ok: false, error: '报告内容为空，没什么可导出的' };
+      const w = Number(width);
+      if (!Number.isFinite(w) || w < 200 || w > 4000) return { ok: false, error: `画布宽度不合理：${width}` };
+
+      try {
+        const isPdf = kind === 'pdf';
+        const full = withReportStyles(text);
+        // 这一段会开隐藏窗口，销毁时不能让「所有窗口都关闭」把整个应用带走
+        hiddenExportWindows += 1;
+        let out;
+        try {
+          out = isPdf
+            ? await reportExport.renderPdf({ html: full, width: w })
+            : await reportExport.renderPng({ html: full, width: w });
+        } finally {
+          hiddenExportWindows -= 1;
+        }
+
+        const ext = isPdf ? 'pdf' : 'png';
+        const base = String(name).replace(/[\\/:*?"<>|]/g, '_');
+        const fallback = `${base}.${ext}`;
+
+        // 自检用的一次性出口：有它就跳过保存对话框，直接写到指定路径。
+        // 没这个口子的话，「导出真的能出图」这件事只能靠人手点一遍。
+        const forced = process.env.JIKAI_EXPORT_PATH;
+        let target = forced ? path.resolve(forced) : '';
+        if (!target) {
+          const { canceled, filePath } = await dialog.showSaveDialog(mainWindow ?? undefined, {
+            title: isPdf ? '导出报告 PDF' : '导出报告 PNG',
+            defaultPath: path.join(app.getPath('downloads'), fallback),
+            filters: isPdf
+              ? [{ name: 'PDF 文档', extensions: ['pdf'] }, { name: '所有文件', extensions: ['*'] }]
+              : [{ name: 'PNG 图片', extensions: ['png'] }, { name: '所有文件', extensions: ['*'] }],
+          });
+          if (canceled || !filePath) return { ok: false, error: '已取消' };
+          target = filePath;
+        }
+
+        fs.writeFileSync(target, out.buffer);
+        return {
+          ok: true,
+          path: target,
+          bytes: out.buffer.length,
+          kind,
+          width: out.width,
+          height: out.height,
+          contentHeight: out.contentHeight ?? null,
+          scale: out.scale ?? null,
+          degraded: Boolean(out.degraded),
+          slices: out.slices ?? null,
+        };
+      } catch (err) {
+        return { ok: false, error: err?.message ?? String(err) };
+      }
+    });
+
     // 代理变了要立刻生效，同时把结果回给设置面板
     handle('net:proxy', async (_e, proxy) => netBridge.applyProxy(proxy));
 
@@ -1163,6 +1362,9 @@ if (!app.requestSingleInstanceLock()) {
 
   // 托盘常驻是有意为之：关掉所有窗口也不退出
   app.on('window-all-closed', () => {
+    // 导出长图用的隐藏窗口也会走到这里，那不算「用户把窗口关光了」。
+    // 不排掉的话，连续导出两次时第二次必挂（见 hiddenExportWindows 的注释）。
+    if (hiddenExportWindows > 0) return;
     if (!tray && process.platform !== 'darwin') app.quit();
   });
 

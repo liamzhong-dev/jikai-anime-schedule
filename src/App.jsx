@@ -9,6 +9,8 @@ import CatchupView from './components/CatchupView.jsx';
 import TierListView from './components/TierListView.jsx';
 import DiaryView from './components/DiaryView.jsx';
 import DiaryRatingInput from './components/DiaryRatingInput.jsx';
+import ReportView from './components/ReportView.jsx';
+import { CoverProvider } from './components/CoverContext.jsx';
 import DetailDrawer from './components/DetailDrawer.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import ShortcutsOverlay from './components/ShortcutsOverlay.jsx';
@@ -22,11 +24,17 @@ import {
   removeCatchup, toggleFollow, unfollow, writeSeasonCache,
   ensureTierlist, patchTierlist, resetTierlist,
   addDiaryEntry, removeDiaryEntry, readDiary, myRatingOf, readLatestRated, readDiaryOf,
+  ensureReport, setReportBlocks, resetReport,
 } from './core/store.js';
 import { compareToBangumi } from './core/diary.js';
 import { autoRankByScore } from './core/tierlist.js';
 import { collectImages, exportTierlistPng } from './core/tierExport.js';
-import { DISPLAY_VARIANT, EXPORT_VARIANT, coverEntries, coverVariant } from './core/covers.js';
+import {
+  WALL_DEFAULT_COUNT, WALL_MAX,
+  addBlock, autoWallSubjects, blockById, makeBlock, moveBlock, nextBlockId, patchBlock, removeBlock,
+} from './core/report.js';
+import { buildReportHtml, canvasHtmlOf, collectStyles } from './core/reportHtml.js';
+import { DISPLAY_VARIANT, EXPORT_VARIANT, coverCoverage, coverEntries, coverVariant } from './core/covers.js';
 import { useCovers } from './core/useCovers.js';
 import { platform } from './platform/index.js';
 import { allBuiltinItems, builtinItems, BUILTIN_SEASONS } from './data/builtin/index.js';
@@ -46,7 +54,7 @@ import { deadlineStatus, progress, sortCatchup } from './core/catchup.js';
 
 // 这个常量和 SideNav 里的 ITEMS 是两处各写一份的 —— 加视图时两边都要改，
 // 只改一处会出现「导航能点到、但深链刷新就跳回来」。
-const VIEWS = ['season', 'schedule', 'following', 'catchup', 'diary', 'tier'];
+const VIEWS = ['season', 'schedule', 'following', 'catchup', 'diary', 'tier', 'report'];
 
 /** 同步指示的最短显示时长（毫秒）：只为防「一闪而过」，不影响取数 */
 const MIN_SYNC_MS = 480;
@@ -131,6 +139,14 @@ export default function App() {
   // ---- Tier List（按季度各存一份）----
   const [tierExporting, setTierExporting] = useState(false);
   const [tierNote, setTierNote] = useState('');
+
+  // ---- 季度报告长图（同样按季度各存一份）----
+  // 选中块与素材搜索都提到这里：SSR 断言要能指定「选中一块之后属性面板显示什么」，
+  // 组件内部 state 外面灌不进去，怎么测都是初始态。
+  const [reportExporting, setReportExporting] = useState(false);
+  const [reportNote, setReportNote] = useState('');
+  const [reportSel, setReportSel] = useState(null);
+  const [reportKeyword, setReportKeyword] = useState('');
 
   const notified = useRef(new Set());
 
@@ -563,15 +579,15 @@ export default function App() {
   // ⚠️ 键是**条目 id**，不是封面地址。地址分变体（界面 `c`、导出 `l`），
   // 拿地址当键的话，存的一侧和查的一侧各推一次，推错一次就是一整屏色块，
   // 而 JS 只给 undefined 不报错。见 `coverEntries` 的注释。
-  const tierCoverEntries = useMemo(
-    () => (view === 'tier' ? coverEntries(season, DISPLAY_VARIANT) : []),
-    [season, view],
+  const poolCoverEntries = useMemo(
+    () => coverEntries(season, DISPLAY_VARIANT),
+    [season],
   );
 
-  const tierCovers = useCovers({
+  const poolCovers = useCovers({
     group: seasonKey,
-    entries: tierCoverEntries,
-    enabled: view === 'tier',
+    entries: poolCoverEntries,
+    enabled: poolCoverEntries.length > 0,
   });
 
   // 本地缓存通道用不了（浏览器壳），或这次一张都没取到 → 显示退回直连远端地址。
@@ -579,18 +595,18 @@ export default function App() {
   //
   // `platform.kind` 是**同步**就知道的，所以浏览器壳一上来就走这一条 ——
   // 只等 `useCovers` 那个异步结论的话，首屏会先闪一片色块再换成图。
-  const coversRemote = platform.kind === 'web' || !tierCovers.supported || Boolean(tierCovers.error);
+  const coversRemote = platform.kind === 'web' || !poolCovers.supported || Boolean(poolCovers.error);
 
   const coversNote = useMemo(() => {
-    if (view !== 'tier') return '';
-    if (!tierCovers.supported) return '浏览器里没有封面缓存，导出高清图请用桌面版';
-    if (tierCovers.error) return tierCovers.error;
-    if (tierCovers.progress) {
-      const { phase, done, total } = tierCovers.progress;
+    // 封面预热已改成全视图共用，进度提示在任何视图都显示
+    if (!poolCovers.supported) return '浏览器里没有封面缓存，导出高清图请用桌面版';
+    if (poolCovers.error) return poolCovers.error;
+    if (poolCovers.progress) {
+      const { phase, done, total } = poolCovers.progress;
       return `${phase === 'warm' ? '下载封面' : '读取封面'} ${done}/${total}`;
     }
     return '';
-  }, [view, tierCovers.supported, tierCovers.error, tierCovers.progress]);
+  }, [view, poolCovers.supported, poolCovers.error, poolCovers.progress]);
 
   const handleAutoRank = useCallback(() => {
     const { items, ranked, unranked } = autoRankByScore(tierlist.items, season, tierlist.rows);
@@ -907,7 +923,175 @@ export default function App() {
 
   const handleRemoveDiary = useCallback((id, at) => {
     removeDiaryEntry(id, at);
-  }, []);  const overdueCount = activeCatchup.filter(
+  }, []);
+
+  // ---------- 季度报告长图 ----------
+  //
+  // 存法跟 Tier List 一样：按季度各存一份在 `state.json` 的 `reports` 里，
+  // 读的时候过一遍 `normalizeReport`（`readReport` 里做的），所以磁盘上被旧版
+  // 写脏、被手改坏的块都进不到界面层。
+  //
+  // 块的增删改序全部在 `core/report.js` 的纯函数里算完，再用 `setReportBlocks`
+  // 一步写回 —— 不用「patchReport({ blocks })」是因为「先读、改、再写」这两步
+  // 之间如果被别的地方插进来一次写，改动就悄悄丢了。
+  const report = useMemo(
+    () => ensureReport(seasonKey),
+    // st.reports 每次 patch 都是新对象，靠它触发重算
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [seasonKey, st.reports],
+  );
+
+  /**
+   * 报告里真正用到的作品（封面墙 + 奖项关联）。
+   *
+   * 门槛必须按**报告自己用到的**算，不能拿整季去算：整季 82 部里总有几张
+   * 还没缓存，那样每一份报告都会被判成「缺图」而永远导不出去。
+   */
+  const reportCoverEntries = useMemo(() => {
+    const ids = new Set();
+    for (const b of report?.blocks ?? []) {
+      if (b.type === 'wall') for (const id of b.subjectIds) ids.add(id);
+      if (b.type === 'award' && b.subjectId) ids.add(b.subjectId);
+    }
+    return [...ids].map((key) => {
+      const a = diaryLookup(key);
+      return { key, url: a?.cover ? coverVariant(a.cover, DISPLAY_VARIANT).url : '' };
+    });
+  }, [report, diaryLookup]);
+
+  // 没有封面地址的作品（查不到的条目）本来就不该算进缺图 —— 它们画出来就是占位块，
+  // 跟「有地址但没缓存下来」是两回事。
+  const reportCoverage = useMemo(
+    () => coverCoverage(reportCoverEntries.filter((e) => e.url), poolCovers.images),
+    [reportCoverEntries, poolCovers.images],
+  );
+
+  /**
+   * 加一块。
+   *
+   * 每类都给一个「不那么空」的初值：加一块封面墙出来是 0 张的话，
+   * 「空态」和「还没挑」在界面上一模一样，用户不知道该干什么。
+   */
+  const handleAddBlock = useCallback((type) => {
+    const list = report?.blocks ?? [];
+    const id = nextBlockId(list);
+    const seed = {
+      header: { title: `${seasonLabel(seasonKey)} 季度报告`, subtitle: `共 ${season.length} 部 · 次回 jikai` },
+      wall: { title: '本季封面墙', subjectIds: autoWallSubjects(season, WALL_DEFAULT_COUNT) },
+      award: { title: '最佳作画', body: '' },
+      text: { body: '' },
+    }[type] ?? {};
+    const block = makeBlock(type, { id, ...seed });
+    if (!block) return null;
+    setReportBlocks(seasonKey, addBlock(list, block));
+    setReportSel(block.id);
+    return block.id;
+  }, [report, seasonKey, season]);
+
+  const handleRemoveBlock = useCallback((id) => {
+    setReportBlocks(seasonKey, removeBlock(report?.blocks ?? [], id));
+    setReportSel((cur) => (cur === id ? null : cur));
+  }, [seasonKey, report]);
+
+  const handlePatchBlock = useCallback((id, patch) => {
+    setReportBlocks(seasonKey, patchBlock(report?.blocks ?? [], id, patch));
+  }, [seasonKey, report]);
+
+  const handleMoveBlock = useCallback((from, to) => {
+    setReportBlocks(seasonKey, moveBlock(report?.blocks ?? [], from, to));
+  }, [seasonKey, report]);
+
+  /**
+   * 素材面板点一下 = 进封面墙。
+   *
+   * `wallId` 为空表示「此刻没有选中任何一块封面墙」，那就**新建一堵**再放进去 ——
+   * 比弹一句「请先选中一块封面墙」友好得多，而后者正是最常见的第一次点击。
+   */
+  const handleAddToWall = useCallback((subjectId, wallId) => {
+    const list = report?.blocks ?? [];
+    const id = String(subjectId);
+    const target = wallId ? blockById(list, wallId) : null;
+
+    if (target) {
+      if (target.subjectIds.includes(id)) return; // 已经在这堵墙里，点了不该重复
+      if (target.subjectIds.length >= WALL_MAX) {
+        pushToast('这一墙满了', `一堵最多 ${WALL_MAX} 部，再开一块吧`);
+        return;
+      }
+      setReportBlocks(seasonKey, patchBlock(list, target.id, { subjectIds: [...target.subjectIds, id] }));
+      return;
+    }
+
+    const block = makeBlock('wall', { id: nextBlockId(list), title: '本季封面墙', subjectIds: [id] });
+    if (!block) return;
+    setReportBlocks(seasonKey, addBlock(list, block));
+    setReportSel(block.id);
+  }, [seasonKey, report, pushToast]);
+
+  const handleResetReport = useCallback(() => {
+    resetReport(seasonKey);
+    setReportSel(null);
+    pushToast('已清空', `${seasonLabel(seasonKey)} 的季度报告`);
+  }, [seasonKey, pushToast]);
+
+  // 换季度要把选中清掉。不清的话，块的 id 是按「现有最大值 +1」发的 ——
+  // 换个季度第一块又是 `b-1`，于是新季度一开局就有一块莫名其妙是选中态。
+  useEffect(() => { setReportSel(null); }, [seasonKey]);
+
+  /**
+   * 导出长图。
+   *
+   * 这里只做两件事：把画布那份 DOM + 全部样式拼成一份自包含 HTML，
+   * 然后交给主进程。**排版不在这一步发生** —— 导出窗口里渲染的就是画布本身，
+   * 所以「预览好看、导出走样」在结构上就不可能。
+   *
+   * 缺图不让导（按钮直接是灰的，见 ReportView 的 `canExport`）：一张缺了十几张
+   * 封面的墙看着只是「没那么好看」，用户会直接发出去，然后被人指出来。
+   */
+  const handleExportReport = useCallback(async (kind) => {
+    setReportExporting(true);
+    setReportNote('');
+    try {
+      const canvas = canvasHtmlOf(document);
+      if (!canvas) {
+        pushToast('找不到画布', '切到「季度报告」再试一次');
+        return;
+      }
+      const { css, unread } = collectStyles();
+      const width = report?.width ?? 1220;
+      const html = buildReportHtml({
+        canvasHtml: canvas,
+        css,
+        width,
+        title: `${seasonLabel(seasonKey)} 季度报告`,
+      });
+
+      const res = await platform.reportExport({ kind, html, width, name: `jikai-report-${seasonKey}` });
+      if (!res?.ok) {
+        pushToast('导出失败', res?.error ?? '主进程没给出结果');
+        return;
+      }
+
+      const bits = [`${Math.round((res.bytes ?? 0) / 1024)} KB`];
+      if (kind === 'png') {
+        bits.push(`${res.width}×${res.height}`);
+        // 「降过比例」必须说出来：否则用户拿到一张糊图会以为是 bug，
+        // 而实际上是因为长图撞了 canvas 的单边上限。
+        if (res.degraded) bits.push(`撞到画布单边上限，降到 ${Number(res.scale).toFixed(2)}x`);
+      } else {
+        bits.push(`${res.contentHeight}px 高 · 单页`);
+      }
+      if (unread.length) bits.push(`没带上 ${unread.length} 份外链样式`);
+      setReportNote([res.path, ...bits].filter(Boolean).join(' · '));
+      pushToast(kind === 'png' ? '已导出 PNG' : '已导出 PDF', bits.join(' · '));
+    } catch (err) {
+      pushToast('导出失败', err?.message ?? String(err));
+    } finally {
+      setReportExporting(false);
+    }
+  }, [report, seasonKey, pushToast]);
+
+  const overdueCount = activeCatchup.filter(
     (r) => deadlineStatus(r.item.deadline, now).level === 'overdue',
   ).length;
 
@@ -925,6 +1109,9 @@ export default function App() {
   );
 
   return (
+    // 封面解析走上下文：七个用到 <Cover> 的地方不用各自去接缓存，
+    // 也就不用各自决定「该用哪一档地址」—— 那正是 v1.1 桌面端出错的机制。
+    <CoverProvider images={poolCovers.images} allowRemote={coversRemote}>
     <div className="app">
       <WallpaperLayer wallpaper={{ ...st.settings.wallpaper, dataUrl: wallpaper?.dataUrl ?? null }} />
 
@@ -1233,7 +1420,7 @@ export default function App() {
                 seasonKey={seasonKey}
                 tierlist={tierlist}
                 pool={season}
-                images={tierCovers.images}
+                images={poolCovers.images}
                 coversNote={coversNote}
                 coversRemote={coversRemote}
                 onPatch={(patch) => patchTierlist(seasonKey, patch)}
@@ -1242,6 +1429,40 @@ export default function App() {
                 onExport={handleExportTier}
                 exporting={tierExporting}
                 exportNote={tierNote}
+              />
+            </WindowCard>
+          )}
+          {view === 'report' && (
+            <WindowCard
+              id="report-board"
+              title="季度报告"
+              hint={`${seasonLabel(seasonKey)} · ${report?.blocks?.length ?? 0} 块`}
+              layout={st.layout}
+              defaultRect={{ x: 16, y: 16, w: 1280, h: 780 }}
+            >
+              <ReportView
+                report={report}
+                seasonKey={seasonKey}
+                seasonLabel={seasonLabel(seasonKey)}
+                pool={season}
+                // 复用日记那份「id ⟶ 条目」：范围是全量内置数据 + 作品档案，
+                // 所以报告里挂上一季的番也查得到；查不到的给占位条目，不返回 null
+                lookup={diaryLookup}
+                coverage={reportCoverage}
+                note={reportNote}
+                exporting={reportExporting}
+                keyword={reportKeyword}
+                onKeyword={setReportKeyword}
+                selectedId={reportSel}
+                onSelectedId={setReportSel}
+                onAddBlock={handleAddBlock}
+                onRemoveBlock={handleRemoveBlock}
+                onPatchBlock={handlePatchBlock}
+                onMoveBlock={handleMoveBlock}
+                onAddToWall={handleAddToWall}
+                onExportPdf={() => handleExportReport('pdf')}
+                onExportPng={() => handleExportReport('png')}
+                onReset={handleResetReport}
               />
             </WindowCard>
           )}
@@ -1337,5 +1558,6 @@ export default function App() {
 
       <Toasts toasts={toasts} />
     </div>
+    </CoverProvider>
   );
 }

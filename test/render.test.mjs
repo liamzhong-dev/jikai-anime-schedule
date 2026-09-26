@@ -7,6 +7,7 @@ import { build } from 'esbuild';
 
 import { SAMPLE_ITEMS, SAMPLE_SEASON } from './fixtures/sample-state.js';
 import { makeDefaultTierlist } from '../src/core/tierlist.js';
+import { makeBlock, makeDefaultReport } from '../src/core/report.js';
 
 /**
  * 没有浏览器也要能验证界面确实渲染得出来：
@@ -33,7 +34,7 @@ await build({
   logLevel: 'silent',
 });
 
-const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary } = await import(pathToFileURL(outfile).href);
+const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport } = await import(pathToFileURL(outfile).href);
 
 const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const titles = SAMPLE_ITEMS.map((a) => escapeHtml(a.titleZh || a.titleJa));
@@ -470,4 +471,161 @@ test('补番清单卡片上要出现打分控件（入口在清单上，不藏�
   const rated = await renderCatchupWithDiary(rows, { ratingOf: () => 9 });
   assert.ok(rated.includes('BGM 7.4'), '卡片上要直接显示出 Bangumi 的分');
   assert.ok(rated.includes('+1.6'), '卡片上要直接给出差值，而不是让人去别的页面查');
+});
+
+/* ── 封面：同一张图，缓存里有 / 没有 / 不许直连 ────────────── */
+
+const COVER_DATA_URL = 'data:image/jpeg;base64,AAAA';
+const FIRST_ID = String(SAMPLE_ITEMS[0].id);
+
+test('封面：缓存里有图就用缓存，并标明来源', async () => {
+  const html = await renderCover({ anime: SAMPLE_ITEMS[0], images: { [FIRST_ID]: COVER_DATA_URL } });
+  assert.ok(html.includes('data-cover="cache"'), '应当标成 cache');
+  assert.ok(html.includes(COVER_DATA_URL), 'src 应当是缓存里的 dataUrl');
+});
+
+test('封面：缓存没有、且允许直连时退回远端地址（浏览器壳）', async () => {
+  const html = await renderCover({ anime: SAMPLE_ITEMS[0], images: {}, allowRemote: true });
+  assert.ok(html.includes('data-cover="remote"'));
+  assert.ok(html.includes(SAMPLE_ITEMS[0].cover), 'src 应当是条目自己的封面地址');
+});
+
+test('封面：桌面壳不许直连 —— 取不到就退回色块，而不是偷着连网', async () => {
+  const html = await renderCover({ anime: SAMPLE_ITEMS[0], images: {}, allowRemote: false });
+  assert.ok(html.includes('data-cover="none"'));
+  assert.ok(!html.includes(SAMPLE_ITEMS[0].cover), '关掉直连之后不该还留着远端地址');
+  assert.ok(html.includes('cover__glyph'), '应当退回由标题派生的色块');
+});
+
+test('封面：两边都有时优先缓存（断网时才有图）', async () => {
+  const html = await renderCover({
+    anime: SAMPLE_ITEMS[0],
+    images: { [FIRST_ID]: COVER_DATA_URL },
+    allowRemote: true,
+  });
+  assert.ok(html.includes('data-cover="cache"'));
+  assert.ok(!html.includes(SAMPLE_ITEMS[0].cover), '有缓存时不该再去碰远端地址');
+});
+
+test('封面：本季视图里每一张封面都写明「图是从哪来的」', async () => {
+  const html = await render({ view: 'season' });
+  const covers = (html.match(/class="cover[ "]/g) || []).length;
+  const marked = countOf(html, 'data-cover="');
+  assert.ok(covers > 5, `本季应当渲染出几张封面，实际 ${covers}`);
+  assert.equal(marked, covers, '每张封面都要带来源标记，否则自动化没法判断降级路径走没走');
+});
+
+/*
+ * 这里刻意**没有**「App 里缓存命中」的用例：
+ * `renderToStaticMarkup` 不跑 useEffect，而封面是 useCovers 在 effect 里去取的，
+ * 所以从 `<App />` 这一层永远拿不到缓存结果 —— 硬写就成了「验了个恒为空的东西」。
+ * 缓存分支由 `renderCover`（直接喂 images）和桌面壳自检各守一半。
+ */
+
+/* ── 季度报告长图 ────────────────────────────────────────────
+ *
+ * 这一层刻意用 props 直接喂块，不走 store：块的排序/归一化在 report.test.mjs
+ * 里由纯函数守着，这里守的是「块真的渲出来了、顺序跟数据一致、空态有出口」——
+ * 三类问题在截图里长得一模一样（一片空白），只有数得出来的东西能区分。
+ */
+
+const A0 = SAMPLE_ITEMS[0];
+const A1 = SAMPLE_ITEMS[1];
+
+/** 造一份带块的报告；块都过 makeBlock 归一化，跟运行时的形状一致 */
+const reportOf = (blocks, extra = {}) => ({
+  ...makeDefaultReport(SAMPLE_SEASON),
+  blocks,
+  ...extra,
+});
+
+const FULL_COVERAGE = { total: 3, cached: 3, missing: 0, ratio: 1, missingKeys: [] };
+
+test('季度报告：空画布要给出四个入口，且导出按钮是灰的', async () => {
+  const html = await renderReport();
+  assert.ok(html.includes('data-report-view="1"'), '报告视图的根节点标记');
+  assert.ok(html.includes('data-report-empty="1"'), '空画布要有空态');
+  for (const t of ['header', 'wall', 'award', 'text']) {
+    assert.ok(html.includes(`data-report-add="${t}"`), `空态要有「加一块 ${t}」的入口`);
+  }
+  // 空报告底下那些按钮也都在（两个位置各一份，是故意的：空态里在画布中间，
+  // 有内容时在底部工具条里）
+  assert.ok(countOf(html, 'data-report-add="wall"') >= 2, '加块入口在空态和工具条里各有一份');
+  assert.ok(html.includes('disabled'), '没内容时导出按钮必须是灰的，不能点了没反应');
+  assert.ok(html.includes('data-report-no-selection="1"'), '没选中任何块时属性面板要有指路文案');
+});
+
+test('季度报告：四类块都渲得出来，且顺序跟数据一致', async () => {
+  const blocks = [
+    makeBlock('header', { id: 'b-1', title: '2026 秋 · 本季', subtitle: '共 82 部' }),
+    makeBlock('wall', { id: 'b-2', title: '封面墙', subjectIds: [String(A0.id), String(A1.id)] }),
+    makeBlock('award', { id: 'b-3', title: '最佳作画', body: '线条克制，动作戏不出戏', subjectId: String(A0.id) }),
+    makeBlock('text', { id: 'b-4', body: '第一段\n第二段' }),
+  ];
+  const html = await renderReport({ report: reportOf(blocks), coverage: FULL_COVERAGE });
+
+  for (const [id, type] of [['b-1', 'header'], ['b-2', 'wall'], ['b-3', 'award'], ['b-4', 'text']]) {
+    assert.ok(
+      html.includes(`data-report-block="${id}" data-block-type="${type}"`),
+      `应当渲出 ${id}（${type}）`,
+    );
+  }
+
+  // 顺序：块的先后就是产物的先后，错了长图上下颠倒，截图上完全看不出来
+  const at = (id) => html.indexOf(`data-report-block="${id}"`);
+  assert.ok(at('b-1') < at('b-2') && at('b-2') < at('b-3') && at('b-3') < at('b-4'), '块的顺序要与 blocks 一致');
+
+  assert.ok(html.includes('2026 秋 · 本季'), '标题块要出现标题文字');
+  assert.ok(html.includes('共 82 部'), '副标题也要出来');
+  assert.ok(html.includes('data-report-wall-tiles="2"'), '封面墙要有两张图块');
+  assert.ok(html.includes('data-report-body'), '正文块要有正文节点');
+  assert.ok(countOf(html, 'data-report-wall-tile="') === 2, '图块数量要跟 subjectIds 一致');
+  assert.ok(html.includes('最佳作画'), '奖项块的标题要出来');
+});
+
+test('季度报告：墙上查不到的作品要留占位，不能静默少一格', async () => {
+  const ghost = '99999999';
+  const blocks = [makeBlock('wall', { id: 'b-1', subjectIds: [String(A0.id), ghost] })];
+  const html = await renderReport({ report: reportOf(blocks), coverage: FULL_COVERAGE });
+  // 静默丢掉的话，用户会以为「这堵墙本来就只放了一部」—— 找不到的必须看得见
+  assert.ok(html.includes(`data-report-wall-missing="${ghost}"`), '查不到的条目要有显式占位');
+  assert.ok(html.includes('查不到'), '占位上要写清楚为什么是个问号');
+  assert.ok(html.includes(`data-report-wall-tiles="1"`), '真实条目只算查得到的那一张');
+});
+
+test('季度报告：缺封面时拦住导出，并且说明原因', async () => {
+  const blocks = [makeBlock('wall', { id: 'b-1', subjectIds: [String(A0.id), String(A1.id)] })];
+  const html = await renderReport({
+    report: reportOf(blocks),
+    coverage: { total: 2, cached: 1, missing: 1, ratio: 0.5, missingKeys: [String(A1.id)] },
+  });
+  assert.ok(html.includes('data-report-gate="1"'), '缺图要说出来');
+  assert.ok(html.includes('data-report-cover-cached="1" data-report-cover-total="2"'), '要给出缓存进度');
+  // 两个导出按钮都必须是灰的 —— 一张缺了封面的墙，用户会直接发出去再被人指出来
+  const pdfBtn = html.slice(html.indexOf('data-report-export-pdf="1"') - 260, html.indexOf('data-report-export-pdf="1"'));
+  assert.ok(pdfBtn.includes('disabled'), '缺图时 PDF 按钮要灰掉');
+});
+
+test('季度报告：素材面板能筛，并且能看出哪些已经在墙里', async () => {
+  const blocks = [makeBlock('wall', { id: 'b-1', subjectIds: [String(A0.id)] })];
+  const html = await renderReport({ report: reportOf(blocks), pool: SAMPLE_ITEMS, coverage: FULL_COVERAGE });
+  assert.ok(html.includes(`data-report-pool-rows="${SAMPLE_ITEMS.length}"`), '不带关键字时池子要给全部素材');
+  assert.ok(
+    html.includes(`data-report-pool-item="${A0.id}" data-report-pool-used="1"`),
+    '已经在墙里的那一部要标出来，否则用户会一直点、以为是没生效',
+  );
+
+  // 关键字是受控的：组件内部 state 外面灌不进去，这一类「筛完剩几部」就只能这么测
+  const none = await renderReport({ report: reportOf(blocks), pool: SAMPLE_ITEMS, keyword: '这个关键字肯定没有' });
+  assert.ok(none.includes('data-report-pool-rows="0"'), '筛不到时应当是 0 行');
+  assert.ok(none.includes('这个关键字下没有作品'), '筛不到要给一句人话');
+});
+
+test('季度报告：深链 #/report 能进到画布（组件好用 ≠ 接进了 App）', async () => {
+  const html = await render({ view: 'report' });
+  assert.ok(html.includes('data-nav="report"'), '侧栏要有季度报告这一项');
+  assert.ok(html.includes('data-report-view="1"'), 'App 得把报告视图真的渲出来');
+  assert.ok(html.includes('data-report-canvas="1"'), '画布节点要在');
+  assert.ok(html.includes('data-report-canvas-width="1220"'), '画布宽度的默认值应当是 1220');
+  assert.ok(html.includes('季度报告'), '窗口卡片标题要在');
 });

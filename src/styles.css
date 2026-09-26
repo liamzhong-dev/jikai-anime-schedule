@@ -1434,3 +1434,217 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
 @media (max-width: 1100px) {
   .diary__gap { margin-left: 0; flex-basis: 100%; }
 }
+/* ==========================================================================
+   季度报告长图（v1.2）
+   --------------------------------------------------------------------------
+   几个刻意的决定：
+
+   1. **画布上的配色不走 app 主题变量**，用的是这一节里自己的一套（`--rp-*`）。
+      理由：长图是**产出物**，要发出去给别人看。跟着 app 主题变的话，
+      用户换个主题，上周导出的那张和今天这张就不一样了。
+   2. **画布 1:1 显示、外面横向滚动**，不做缩放适配。
+      缩放（transform / zoom）看着聪明，但一旦「预览的排版」和「导出的排版」
+      不是同一份计算，迟早会分叉 —— 这一版导出用的就是同一个 DOM，
+      靠的就是这里不搞花样。
+   3. **编辑期的把手/描边用 `body.print` 关掉**，不用 `@media print`。
+      导出是在一个隐藏窗口里、给 body 打上 `print` 类再跑的，
+      所以「哪些是编辑器痕迹」由类名决定，一目了然，也不用猜打印媒体查询有没有生效。
+   ========================================================================== */
+
+.report {
+  --rp-bg: #101820;
+  --rp-bg-2: #1b2a41;
+  --rp-ink: #eef2f8;
+  --rp-ink-2: #a9b6c9;
+  --rp-accent: #8b7cf6;
+  --rp-tile: #23324a;
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr) 248px;
+  gap: 12px;
+  align-items: start;
+}
+
+/* ---------- 左：素材面板 ---------- */
+.report__side, .report__inspector {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px; min-width: 0;
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--panel-2);
+  max-height: 70vh; overflow: auto;
+}
+.report__side-head { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; }
+.report__dim { font-size: 11px; color: var(--text-3); }
+.report__warn { font-size: 11px; color: var(--warn); }
+.report__hint { font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+
+.report__search {
+  width: 100%; padding: 6px 8px; font-size: 12px;
+  color: var(--text); background: var(--bg-2);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.report__search:focus { outline: none; border-color: var(--accent); }
+
+.report__pool { display: flex; flex-direction: column; gap: 4px; }
+.report__pool-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px; width: 100%; text-align: left; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-sm);
+  color: var(--text);
+}
+.report__pool-item:hover { background: var(--panel); border-color: var(--line-2); }
+/* 已经在墙里的要看得出来，否则用户会一直点、以为是没生效 */
+.report__pool-item.is-used { opacity: 0.45; }
+.report__pool-item.is-used::after { content: '✓'; margin-left: auto; color: var(--ok); font-size: 11px; }
+.report__pool-cover { width: 34px; height: 48px; flex: 0 0 auto; border-radius: 4px; }
+.report__pool-name {
+  font-size: 11.5px; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ---------- 中：画布 ---------- */
+.report__stage { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.report__stage-head {
+  display: flex; align-items: baseline; gap: 12px;
+  font-size: 12px; color: var(--text-2);
+}
+.report__stage-head .report__ghost { margin-left: auto; }
+
+.report__scroll {
+  overflow: auto; padding: 12px;
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--bg-2);
+  max-height: 70vh;
+}
+.report__canvas {
+  position: relative; margin: 0 auto; padding: 56px;
+  background: linear-gradient(180deg, var(--rp-bg) 0%, var(--rp-bg-2) 42%,
+              #3a1f3d 74%, var(--rp-bg) 100%);
+  color: var(--rp-ink);
+  box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column; gap: 36px;
+  /* 排版由画布自己定，跟界面主题无关 —— 所以字号写死，不继承面板的 */
+  font-size: 18px; line-height: 1.75;
+}
+
+/* 导出那一步的隐藏窗口：只留画布，编辑器痕迹一律不出现 */
+body.print { margin: 0; background: var(--rp-bg, #101820); }
+body.print .report__canvas { margin: 0; box-shadow: none; }
+body.print .rb__grip, body.print .rb__x { display: none; }
+body.print .rb { border-color: transparent !important; }
+/* ⚠️ 还有两条「只在导出页成立」的规矩（把三栏网格塌成一栏、页面零留白）
+   写在 `src/core/reportHtml.js` 里，由它拼进导出页的 <style>。
+   放那儿是因为那是导出页自己的事，跟 app 长什么样无关 —— 找的时候别只搜这里。 */
+
+.report__empty {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 60px 0; text-align: center;
+}
+.report__empty-title { font-size: 20px; font-weight: 600; margin: 0; }
+
+.report__add-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.report__add, .report__ghost, .report__primary, .report__danger {
+  padding: 5px 10px; font-size: 11.5px; cursor: pointer;
+  border-radius: var(--r-sm); border: 1px solid var(--line-2);
+  background: var(--panel); color: var(--text);
+}
+.report__add:hover, .report__ghost:hover { border-color: var(--accent); color: var(--accent); }
+.report__primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+.report__primary:hover { filter: brightness(1.08); }
+.report__danger { color: var(--danger); }
+.report__danger:hover { border-color: var(--danger); }
+.report__ghost:disabled, .report__primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.report__bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding-top: 2px;
+}
+.report__bar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.report__cover-stat { font-size: 11.5px; color: var(--text-2); }
+.report__gate {
+  margin: 0; padding: 6px 10px; font-size: 11.5px; line-height: 1.6;
+  color: var(--warn); background: var(--warn-soft);
+  border: 1px solid var(--warn); border-radius: var(--r-sm);
+}
+.report__note { margin: 0; font-size: 11.5px; color: var(--text-3); }
+
+/* ---------- 右：属性 ---------- */
+.report__field { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--text-2); }
+.report__field input, .report__field textarea, .report__field select {
+  width: 100%; padding: 5px 7px; font: inherit; font-size: 12px;
+  color: var(--text); background: var(--bg-2);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.report__field textarea { resize: vertical; line-height: 1.6; }
+.report__field input:focus, .report__field textarea:focus, .report__field select:focus {
+  outline: none; border-color: var(--accent);
+}
+.report__wall-ops, .report__order { display: flex; flex-wrap: wrap; gap: 6px; }
+.report__order { padding-top: 8px; border-top: 1px solid var(--line); }
+.report__wall-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.report__chip {
+  display: inline-flex; align-items: center; gap: 2px; max-width: 100%;
+  padding: 2px 6px 2px 2px; font-size: 11px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--bg-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.report__chip-x {
+  padding: 0 3px; border: none; background: transparent;
+  color: var(--text-3); font-size: 10px; cursor: pointer; line-height: 1;
+}
+.report__chip-x:hover { color: var(--danger); }
+
+/* ---------- 画布上的块（这些样式直接决定产物的长相）---------- */
+.rb {
+  position: relative; padding: 10px 12px;
+  border: 1px dashed transparent; border-radius: var(--r);
+}
+.rb.is-sel { border-color: var(--rp-accent); background: rgba(139,124,246,0.07); }
+.rb.is-dragging { opacity: 0.42; }
+.rb.is-drop-before::before {
+  content: ''; position: absolute; left: 0; right: 0; top: -8px; height: 2px;
+  background: var(--rp-accent); border-radius: 2px;
+}
+.rb__grip {
+  position: absolute; left: -26px; top: 8px;
+  color: var(--rp-ink-2); font-size: 14px; cursor: grab; user-select: none;
+}
+.rb__x {
+  position: absolute; right: -6px; top: 4px;
+  padding: 2px 6px; border: none; border-radius: var(--r-sm);
+  background: rgba(242,100,122,0.16); color: #f2647a; font-size: 11px; cursor: pointer;
+}
+
+.rb-head__title { margin: 0; font-size: 58px; line-height: 1.18; font-weight: 700; letter-spacing: 1px; }
+.rb-head__sub { margin: 10px 0 0; font-size: 26px; color: var(--rp-ink-2); }
+
+.rb-wall__title, .rb-award__title {
+  margin: 0 0 14px; font-size: 30px; font-weight: 600;
+  padding-left: 12px; border-left: 4px solid var(--rp-accent);
+}
+.rb-wall__grid { display: grid; gap: 14px; }
+.rb-wall__tile { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+/* 比例必须统一：`l` 档原图从 1:1.40 到 1:1.56 都有，不统一裁切版面会参差不齐 */
+.rb-wall__cover { width: 100%; aspect-ratio: 1 / 1.4; border-radius: 8px; }
+.rb-wall__cover--missing {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--rp-tile); color: var(--rp-ink-2); font-size: 22px;
+}
+.rb-wall__cap {
+  font-size: 13px; line-height: 1.35; color: var(--rp-ink-2);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+.rb-award__row { display: flex; gap: 14px; align-items: flex-start; }
+.rb-award__cover { width: 96px; flex: 0 0 96px; aspect-ratio: 1 / 1.4; border-radius: 8px; }
+.rb-award__body { margin: 0; font-size: 19px; line-height: 1.85; white-space: pre-wrap; }
+
+.rb-text__line { margin: 0 0 10px; font-size: 19px; line-height: 1.9; }
+.rb-text__line:last-child { margin-bottom: 0; }
+
+.rb__hint { margin: 6px 0 0; font-size: 12px; color: var(--rp-ink-2); }
+
+/* 属性栏窄下来时把三栏堆成一栏，否则在 13 寸屏上画布会被挤成一条缝 */
+@media (max-width: 1180px) {
+  .report { grid-template-columns: 1fr; }
+  .report__side, .report__inspector { max-height: 32vh; }
+}

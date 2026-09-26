@@ -54,6 +54,9 @@ contextBridge.exposeInMainWorld('jikai', {
   saveTextFile: (payload) => ipcRenderer.invoke('file:save-text', payload),
   saveBinaryFile: (payload) => ipcRenderer.invoke('file:save-binary', payload),
 
+  // 季度报告长图：渲染层拼好自包含 HTML，主进程在隐藏窗口里出 PDF / PNG 再落盘
+  reportExport: (payload) => ipcRenderer.invoke('report:export', payload),
+
   /** 主进程 → 渲染层的命令（托盘点击、检查更新等） */
   onCommand: (cb) => {
     const handler = (_e, cmd) => cb?.(cmd);

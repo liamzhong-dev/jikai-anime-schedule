@@ -65,6 +65,16 @@ const ITEMS = [
       </svg>
     ),
   },
+  {
+    key: 'report',
+    label: '季度报告',
+    icon: (
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6">
+        <rect x="5" y="2.5" width="10" height="15" rx="1.8" />
+        <path d="M7.6 6.4h4.8M7.6 9.4h4.8M7.6 12.4h3" />
+      </svg>
+    ),
+  },
 ];
 
 export default function SideNav({ view, onView, counts, version, onOpenSettings }) {

@@ -167,3 +167,38 @@ export function mapCoversByKey(entries, byUrl) {
   }
   return out;
 }
+
+/**
+ * 算一批封面「拿到手了没有」。
+ *
+ * 存在的理由：一张缺了 12 个封面的封面墙，看着只是「没那么好看」，
+ * 用户会直接导出、发出去、然后被人指出来。所以导出前必须能算一次覆盖率并**拦住**。
+ *
+ * 和日记那边「有多少部没法比要明说」是同一条原则：**产出不完整时必须显式标注**。
+ *
+ * ⚠️ 空清单算 **100% 覆盖**（`ratio: 1`）。这不是取巧：没有作品要放图的报告
+ * 本来就不缺图，不该被自己拦住。真正缺图的判据是 `missing > 0`。
+ *
+ * @param {Array<{key:string,url:string}>} entries
+ * @param {Object<string,string>} images  key -> dataUrl
+ * @returns {{total:number, cached:number, missing:number, ratio:number, missingKeys:string[]}}
+ */
+export function coverCoverage(entries, images) {
+  const list = Array.isArray(entries) ? entries : [];
+  const map = images && typeof images === 'object' ? images : {};
+  const missingKeys = [];
+  let cached = 0;
+  for (const e of list) {
+    const key = e?.key != null ? String(e.key) : '';
+    if (key && map[key]) cached += 1;
+    else missingKeys.push(key);
+  }
+  const total = list.length;
+  return {
+    total,
+    cached,
+    missing: missingKeys.length,
+    ratio: total ? cached / total : 1,
+    missingKeys,
+  };
+}

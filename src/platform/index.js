@@ -174,6 +174,16 @@ const webAdapter = {
     }
   },
 
+  /**
+   * 季度报告长图的导出通道。**桌面专属**：它靠主进程开一个隐藏窗口重新渲染，
+   * 浏览器里没有等价物（也就没有「图片本地缓存」，封面全是跨域地址，
+   * 画进 canvas 直接 taint）。所以这里明确说不支持，界面据此把按钮灰掉 ——
+   * 一个点了没反应的按钮比一个灰按钮坏得多。
+   */
+  async reportExport() {
+    return unsupported('季度报告长图导出', '浏览器环境不支持，导出长图请用桌面版');
+  },
+
   // ---- 名称索引 ----
   async readNameIndex() {
     return readJson(NAME_INDEX_KEY);
@@ -279,6 +289,17 @@ const electronAdapter = {
   onCoverProgress(cb) {
     const off = window.jikai?.onCoverProgress?.(cb);
     return typeof off === 'function' ? off : () => {};
+  },
+
+  /**
+   * 长图导出。`html` 由渲染层拼好（样式内联、图都是 dataURL），
+   * 主进程只负责在隐藏窗口里渲染并落盘。
+   * @returns {{ok:boolean, path?:string, bytes?:number, kind?:string, error?:string}}
+   */
+  async reportExport({ kind = 'pdf', html = '', width = 1220, name = 'jikai-report' } = {}) {
+    const r = await window.jikai?.reportExport?.({ kind, html, width, name });
+    if (!r) return unsupported('长图导出', '主进程没有提供导出通道（preload 没更新？）');
+    return r;
   },
 
   // ---- 名称索引 ----

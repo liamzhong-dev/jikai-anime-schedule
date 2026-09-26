@@ -14,6 +14,7 @@ import { DEFAULT_SOURCE } from '../data/sources.js';
 import { BUILTIN_PRESETS, presetById } from './layoutPresets.js';
 import { addToGroup as addToGroupPure, defaultGroups, groupSummary, mergeSubjects, pickSubjects, removeFromGroup as removeFromGroupPure } from './library.js';
 import { makeDefaultTierlist, normalizeTierlist } from './tierlist.js';
+import { makeDefaultReport, normalizeReport } from './report.js';
 import {
   addDiaryEntry as addDiaryEntryPure,
   removeDiaryEntry as removeDiaryEntryPure,
@@ -47,6 +48,8 @@ const DEFAULTS = {
   tierlists: {},
   // { [番剧id]: { entries: [{at, rating, note}], updatedAt } } —— 见「补番日记」一节
   diary: {},
+  // { [seasonKey]: 一份季度报告 } —— 见「季度报告」一节。和 tierlists 一样按季度各存一份
+  reports: {},
   settings: {
     dataSource: DEFAULT_SOURCE, // 'builtin' | 'bangumi-data' | 'bangumi-api'
     reminderLeadMin: 0,   // 提前多少分钟提醒
@@ -155,6 +158,7 @@ function snapshot() {
     activePreset: state.activePreset,
     tierlists: state.tierlists, // ⚠️ 漏了这行就是「看着能用、关掉重开全没了」
     diary: state.diary,         // 同上：漏一行，日记写得再认真也是白写
+    reports: state.reports,     // 季度报告：漏一行就是「排了一晚上的长图，关掉重开全没了」
     settings: state.settings,
     cache: state.cache,
   };
@@ -403,6 +407,69 @@ export function resetTierlist(key, { presetId, nowMs = Date.now() } = {}) {
 /** 哪些季度排过（界面上给个「已排 N 个季度」用） */
 export function listTierlists() {
   return Object.keys(state.tierlists ?? {}).sort();
+}
+
+// ---------- 季度报告 ----------
+//
+// 和 tierlists 完全同一套规矩，不另立一份：
+//   - 按季度各存一份，key 是季度（'2026q3'）；
+//   - **读的时候**过 normalizeReport，而不是在 load() 里统一修 ——
+//     一年四份、每份几十个块，没必要每次启动都把所有季度修一遍；
+//   - 没排过的季度返回 null（而不是一份空报告），界面靠它区分
+//     「还没开始做」和「删空了」，两种状态的提示文案不一样。
+
+export function readReport(key) {
+  const k = String(key ?? '');
+  if (!k) return null;
+  const raw = (state.reports ?? {})[k];
+  if (!raw) return null;
+  return normalizeReport(raw, { seasonKey: k });
+}
+
+/** 取一份，没有就现场造一份（**不落盘**，要留着请用 patchReport） */
+export function ensureReport(key) {
+  const k = String(key ?? '');
+  if (!k) return null;
+  return readReport(k) ?? makeDefaultReport(k);
+}
+
+/**
+ * 改一份报告。patch 会先过一遍 normalize，脏数据在写入前就被拦下。
+ * @returns {object|null} 写入后的完整结构
+ */
+export function patchReport(key, patch, { nowMs = Date.now() } = {}) {
+  const k = String(key ?? '');
+  if (!k) return null;
+  const base = readReport(k) ?? makeDefaultReport(k, { nowMs });
+  const next = normalizeReport({ ...base, ...(patch ?? {}), updatedAt: nowMs }, { seasonKey: k, nowMs });
+
+  update((s) => ({ ...s, reports: { ...(s.reports ?? {}), [k]: next } }));
+  return next;
+}
+
+/**
+ * 整份换掉。块的增删改序都在纯函数层算完，这里只负责写。
+ *
+ * 为什么单独开一个而不是让调用方拼 `patchReport({ blocks })`：
+ * 「先读、改、再写」这两步之间如果被别的地方插进来一次写，改动就丢了。
+ * 一步到位能少掉一整类「点了没反应」的玄学。
+ */
+export function setReportBlocks(key, blocks, { nowMs = Date.now() } = {}) {
+  return patchReport(key, { blocks }, { nowMs });
+}
+
+/** 清空一季度的报告（连标题一起清掉，回到空画布） */
+export function resetReport(key, { nowMs = Date.now() } = {}) {
+  const k = String(key ?? '');
+  if (!k) return null;
+  const fresh = makeDefaultReport(k, { nowMs });
+  update((s) => ({ ...s, reports: { ...(s.reports ?? {}), [k]: fresh } }));
+  return fresh;
+}
+
+/** 哪些季度有报告 */
+export function listReports() {
+  return Object.keys(state.reports ?? {}).sort();
 }
 
 // ---------- 补番日记 ----------

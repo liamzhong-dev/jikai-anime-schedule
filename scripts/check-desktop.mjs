@@ -20,6 +20,11 @@
  *   node scripts/check-desktop.mjs                       # tier 视图，真实 profile（封面缓存是热的）
  *   node scripts/check-desktop.mjs --view=diary --profile=<空目录> --season=2026q3
  *   node scripts/check-desktop.mjs --view=catchup --profile=<空目录> --season=2026q3 --click=8
+ *   node scripts/check-desktop.mjs --view=report --profile=<空目录> --season=2026q3
+ *
+ * 报告视图跑两次各有意义：带 `--profile` 那次的 reports 是我们自己塞的（断言的是
+ * 「磁盘 → 画布」这条接线），不带 `--profile` 那次断言的是「封面真的走缓存」。
+ * `check:desktop:report` 只跑前者（后者要热缓存，放进 npm script 会看运行环境脸色）。
  *
  * `--profile` 给这次运行指定一个一次性的存档目录（主进程的 JIKAI_USERDATA），
  * 并往里**播种**好这次要验的数据：要验「磁盘上的数据能不能一路走到界面上」，
@@ -104,6 +109,34 @@ function seedProfile(dir, forView) {
       createdAt: Date.UTC(2026, 8, 1),
     }];
     expectation = { cards: 1, subjectId: it.id, title: titleOf(it), click: click > 0 ? click : null };
+  } else if (forView === 'report') {
+    /*
+     * 报告是**按季度存在 state.reports 里**的，所以这里塞的 key 必须跟界面当前季度一致，
+     * 差一位（2026q3 vs 2026q4）就会看到一张空画布 —— 而「空画布」也是一个合法状态，
+     * 断言会以「块数不对」的形式红出来，看着像渲染坏了。所以 key 就用 --season。
+     */
+    const key = season || '2026q3';
+    const picks = SEEDS.slice(0, 6);
+    const blocks = [
+      { id: 'b-1', type: 'header', title: '季度报告（冒烟）', subtitle: '四类块各放一块' },
+      { id: 'b-2', type: 'wall', title: '封面墙', subjectIds: picks.map((it) => String(it.id)), columns: 6 },
+      { id: 'b-3', type: 'award', title: '最佳作画', body: '线条克制', subjectId: String(picks[0].id) },
+      { id: 'b-4', type: 'text', body: '第一段\n第二段' },
+    ];
+    state.reports = {
+      [key]: { seasonKey: key, width: 1220, theme: 'default', updatedAt: Date.UTC(2026, 9, 5), blocks },
+    };
+    // 期望值全部从上面那份 seed 推出来，不另写一遍数字。
+    // 「奖项块也画一张封面」就是漏算出来的那一次：88 vs 89，差一张，
+    // 看上去像渲染多了，其实是断言少算了一处。
+    const wallIds = blocks.filter((b) => b.type === 'wall').flatMap((b) => b.subjectIds);
+    const awardIds = blocks.filter((b) => b.type === 'award' && b.subjectId).map((b) => b.subjectId);
+    expectation = {
+      blocks: blocks.length,
+      tiles: wallIds.length,
+      pool: builtinItems(key).length,
+      covers: builtinItems(key).length + wallIds.length + awardIds.length,
+    };
   }
 
   /*
@@ -254,6 +287,75 @@ if (view === 'catchup') {
   }
 }
 
+// ---- 本季番剧：封面缓存不能只有 tier 视图才用得上 ----
+// 阶段 A 之前，封面缓存只接在 Tier List 上；本季 / 时间表 / 追番 / 补番 / 日记
+// 的封面走的是远端直链，断网一律退成色块。这条是那次改动的守门员。
+if (view === 'season') {
+  const total = Number(report.coverCache) + Number(report.coverRemote) + Number(report.coverNone);
+  check(total > 5, `本季应当渲染出几张封面，实际 ${total}`);
+  if (!profile) {
+    check(
+      Number(report.coverCache) > 0,
+      `本季的封面一张都没走缓存（coverCache=${report.coverCache}）—— 说明 <Cover> 没接上上下文，断网就是一片色块`,
+    );
+    check(
+      Number(report.coverRemote) === 0,
+      `本季的封面在直连远端（coverRemote=${report.coverRemote}）—— 桌面壳会先下一遍再进缓存，等于下两遍`,
+    );
+  }
+}
+
+// ---- 季度报告：磁盘上的块能不能一路走到画布上 ----
+// 这一条守的是「store.reports → App → ReportView → 画布」这条接线。
+// 组件本身由 SSR 断言守着（render.test.mjs），但**接通那一步只有桌面壳能验** ——
+// v1.1 的 82 张色块就是「每层都写了、接线没接」的典型。
+if (view === 'report') {
+  check(Number(report.reportNav) === 1, `侧栏没有季度报告的导航项（reportNav=${report.reportNav}）`);
+  check(Number(report.reportView) === 1, `报告视图没渲染出来（reportView=${report.reportView}）`);
+  check(Number(report.reportCanvas) === 1, `画布没渲染出来（reportCanvas=${report.reportCanvas}）`);
+  check(
+    String(report.reportCanvasWidth) === '1220',
+    `画布宽度应当是 1220，实际 ${report.reportCanvasWidth} —— 宽度错了，导出的长图就不是预览的那个版式`,
+  );
+  check(Number(report.reportAddButtons) >= 4, `四种块的「加一块」按钮都要在（实际 ${report.reportAddButtons} 个）`);
+
+  if (expected) {
+    check(
+      Number(report.reportBlocks) === expected.blocks,
+      `画布上应有 ${expected.blocks} 块，实际 ${report.reportBlocks} —— 磁盘上的 reports 没读进来，或者读进来又被丢了`,
+    );
+    check(
+      Number(report.reportWallTiles) === expected.tiles,
+      `封面墙应有 ${expected.tiles} 张图块，实际 ${report.reportWallTiles}`,
+    );
+    check(
+      Number(report.reportPool) === expected.pool,
+      `素材面板应当列出 ${expected.pool} 部，实际 ${report.reportPool}`,
+    );
+    // 每一张封面都得是个真的 <img>（或色块占位），不能是空壳。
+    // 一次性 profile 里没有封面缓存 → 全都应当是色块；但它们**必须存在**。
+    const coverTotal = Number(report.coverCache) + Number(report.coverRemote) + Number(report.coverNone);
+    check(
+      coverTotal === expected.covers,
+      `画布+素材面板应有 ${expected.covers} 张封面节点（素材 ${expected.pool} + 墙 ${expected.tiles} + 奖项 1），实际 ${coverTotal}`,
+    );
+  }
+
+  if (profile) {
+    // 冷存档里没有封面缓存。这时**绝不能**退回直连（桌面的规矩），只能是色块。
+    check(
+      Number(report.coverRemote) === 0,
+      `一次性存档里出现了直连封面（coverRemote=${report.coverRemote}）—— 桌面壳不许退回远端`,
+    );
+  } else {
+    check(
+      Number(report.coverCache) > 0,
+      `报告里的封面一张都没走缓存（coverCache=${report.coverCache}）—— 长图会带着一片色块被导出去`,
+    );
+    check(Number(report.coverRemote) === 0, `报告里的封面在直连远端（coverRemote=${report.coverRemote}）`);
+  }
+}
+
 // ---- 内置数据在（离线开箱可用的前提）----
 check(report.library === 'yes', `内置作品库没加载（library=${report.library}），离线就开不了箱了`);
 
@@ -276,11 +378,21 @@ if (view === 'tier' && !profile) {
   console.log(`  档位 ${report.rows} 行 · 素材池 ${report.pool} 个`);
   console.log(`  封面：缓存 ${report.cached} · 直连 ${report.remote}（必须为 0）· 已存 ${(Number(report.coverBytes) / 1048576).toFixed(1)} MB`);
 }
+if (view === 'season') {
+  console.log(`  封面：缓存 ${report.coverCache} · 直连 ${report.coverRemote}（必须为 0）· 色块 ${report.coverNone}`);
+}
 if (view === 'diary') {
   console.log(`  日记：导航 ${report.diaryNav} · 视图 ${report.diaryView} · 比对行 ${report.diaryRows}`);
   if (expected) {
     console.log(`  统计：我的均分 ${report.diaryAvgMine} / BGM 均分 ${report.diaryAvgBgm}（期望 ${expected.avgMine} / ${expected.avgBgm}）`);
   }
+}
+if (view === 'report') {
+  console.log(
+    `  报告：导航 ${report.reportNav} · 画布 ${report.reportCanvas}（宽 ${report.reportCanvasWidth}）`
+    + ` · ${report.reportBlocks} 块（其中封面墙 ${report.reportWallTiles} 张）· 素材 ${report.reportPool} 部`,
+  );
+  console.log(`  封面：缓存 ${report.coverCache} · 直连 ${report.coverRemote}（必须为 0）· 色块 ${report.coverNone}`);
 }
 if (view === 'catchup') {
   console.log(`  补番卡片 ${report.diaryInputs} 张带打分控件`);
