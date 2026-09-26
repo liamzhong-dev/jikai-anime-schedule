@@ -52,6 +52,18 @@ const ITEMS = [
       </svg>
     ),
   },
+  {
+    key: 'history',
+    label: '追番历程',
+    icon: (
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6">
+        <path d="M5 3v14" />
+        <circle cx="5" cy="6.2" r="1.7" />
+        <circle cx="5" cy="13.8" r="1.7" />
+        <path d="M8.6 6.2h7M8.6 13.8h5" />
+      </svg>
+    ),
+  },
   // ⚠️ 这一项和 App.jsx 的 VIEWS 是两处各写一份的，加视图时两边都要改
   {
     key: 'tier',

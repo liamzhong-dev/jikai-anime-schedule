@@ -34,7 +34,7 @@ await build({
   logLevel: 'silent',
 });
 
-const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport } = await import(pathToFileURL(outfile).href);
+const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport, renderHistory } = await import(pathToFileURL(outfile).href);
 
 const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const titles = SAMPLE_ITEMS.map((a) => escapeHtml(a.titleZh || a.titleJa));
@@ -628,4 +628,90 @@ test('季度报告：深链 #/report 能进到画布（组件好用 ≠ 接进�
   assert.ok(html.includes('data-report-canvas="1"'), '画布节点要在');
   assert.ok(html.includes('data-report-canvas-width="1220"'), '画布宽度的默认值应当是 1220');
   assert.ok(html.includes('季度报告'), '窗口卡片标题要在');
+});
+
+// ---------- 追番历程 ----------
+
+const DAY_MS = 86400000;
+const T_HIST = Date.UTC(2026, 8, 1); // 2026-09-01
+const histLookup = (id) => SAMPLE_ITEMS.find((a) => String(a.id) === String(id)) ?? null;
+
+test('追番历程：一部都没有时，空态要说清「从今天起会自己长出来」', async () => {
+  const html = await renderHistory();
+  assert.ok(html.includes('data-history-view="1"'), '历程视图的根节点标记');
+  assert.ok(html.includes('data-history-total="0"'));
+  assert.ok(html.includes('还没有追番'), '一句话说清去哪儿才有内容');
+  assert.ok(html.includes('去本季番剧'), '空态要有出口，不能只留一块空白');
+  assert.ok(!html.includes('data-history-events'), '没有事件时不该渲染列表容器');
+});
+
+test('追番历程：开始追与看完了都画得出来，耗时按天算', async () => {
+  // ⚠️ 必须挑**真的有集数**的条目：`isFinished` 只认「已看 ≥ 总集数」，
+  // 而内置数据里不少条目没有 eps —— 拿它去测会得到「看完了 0 部」，
+  // 看着像渲染坏了，其实是测试挑错了素材。筛不出来就是数据出了问题，要红。
+  const pool = SAMPLE_ITEMS.filter((a) => Number(a.eps) > 0);
+  assert.ok(pool.length >= 2, `内置数据里挑不出两部有集数的番（只有 ${pool.length} 部），历程断言没法验`);
+  const [A, B] = pool;
+
+  const html = await renderHistory({
+    following: {
+      [A.id]: { status: 'watching', watchedEps: A.eps, followedAt: T_HIST, lastAt: T_HIST + 5 * DAY_MS },
+      [B.id]: { status: 'watching', watchedEps: 1, followedAt: T_HIST + 3 * DAY_MS, lastAt: T_HIST + 4 * DAY_MS },
+    },
+    lookup: histLookup,
+  });
+
+  assert.ok(html.includes('data-history-total="2"'), '两部都要算进总数');
+  assert.ok(html.includes('data-history-finished="1"'), '只看完了 A 一部');
+  assert.ok(html.includes('data-history-events="3"'), 'A 两条 + B 一条');
+  assert.equal(countOf(html, 'data-history-event="follow"'), 2);
+  assert.equal(countOf(html, 'data-history-event="finish"'), 1);
+  assert.ok(html.includes('data-history-finish-days="5"'), '耗时算出来了');
+  assert.ok(html.includes('用了 5 天'), '耗时要有中文说法 —— 光一个数字看不出单位');
+  assert.ok(html.includes('data-history-avg="5"'));
+  assert.ok(html.includes('data-history-untimed="0"'), '两部都有时间戳');
+  assert.ok(html.includes('开始追') && html.includes('看完了'), '两类事件都要有标签');
+});
+
+test('追番历程：没有时间戳的作品算进总数，但要明说它排不进时间轴', async () => {
+  const A = SAMPLE_ITEMS[0];
+  const html = await renderHistory({
+    following: { [A.id]: { status: 'watching', watchedEps: 1 } },
+    lookup: histLookup,
+  });
+
+  assert.ok(html.includes('data-history-total="1"'), '没有时间戳也要算进追番总数');
+  assert.ok(html.includes('data-history-tracking="0"'));
+  assert.ok(html.includes('data-history-untimed="1"'));
+  assert.ok(html.includes('没有时间戳'), '得说清为什么时间轴是空的，否则会被当成功能坏了');
+  assert.ok(!html.includes('data-history-events'), '没有事件就不该有列表');
+});
+
+test('追番历程：写过笔记的点出「你为它写得最多」，没写字的绝不硬凑', async () => {
+  const A = SAMPLE_ITEMS[0];
+  const long = '这一部的节奏我很喜欢'.repeat(2);
+  const html = await renderHistory({
+    diary: { [A.id]: { entries: [{ at: 1, rating: 9, note: long }] } },
+    lookup: histLookup,
+  });
+  assert.ok(html.includes(`data-history-highlight="${A.id}"`));
+  assert.ok(html.includes('你为它写得最多'));
+  assert.ok(html.includes(`${long.length} 字`), '要给个用户自己能核对的理由，而不是一个凭空的分数');
+
+  const none = await renderHistory({
+    diary: { [A.id]: { entries: [{ at: 1, rating: 9, note: '' }] } },
+    lookup: histLookup,
+  });
+  assert.ok(!none.includes('data-history-highlight'), '只有评分没写字，不算「写得最多」');
+});
+
+test('App 的 history 视图与侧栏导航都挂上了（组件好用 ≠ 接进了 App）', async () => {
+  const html = await render({ view: 'history' });
+  assert.ok(html.includes('data-nav="history"'), '侧栏要有追番历程这一项');
+  assert.ok(html.includes('data-history-view="1"'), 'App 得把历程视图真的渲出来');
+  assert.ok(html.includes('追番历程'), '窗口卡片标题要在');
+  // 播种的 6 部追番**没有时间戳** —— 这正是老用户升级后的第一眼。
+  // 数字要对（6 部都在总数里），但不能假装它们有时间。
+  assert.ok(html.includes('data-history-total="6"'), '播种的 6 部要算进总数');
+  assert.ok(html.includes('data-history-untimed="6"'), '没有时间戳就如实说 6 部都未知');
 });

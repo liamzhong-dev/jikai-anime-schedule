@@ -21,6 +21,7 @@
  *   node scripts/check-desktop.mjs --view=diary --profile=<空目录> --season=2026q3
  *   node scripts/check-desktop.mjs --view=catchup --profile=<空目录> --season=2026q3 --click=8
  *   node scripts/check-desktop.mjs --view=report --profile=<空目录> --season=2026q3
+ *   node scripts/check-desktop.mjs --view=history --profile=<空目录> --season=2026q3
  *
  * 报告视图跑两次各有意义：带 `--profile` 那次的 reports 是我们自己塞的（断言的是
  * 「磁盘 → 画布」这条接线），不带 `--profile` 那次断言的是「封面真的走缓存」。
@@ -137,6 +138,47 @@ function seedProfile(dir, forView) {
       pool: builtinItems(key).length,
       covers: builtinItems(key).length + wallIds.length + awardIds.length,
     };
+  } else if (forView === 'history') {
+    /*
+     * 历程要的输入是**时间戳**，所以这里塞的是 following。
+     *
+     * 故意混进一部「没有时间戳」的：老用户升级之后打开这一页就是这副样子 ——
+     * 数字必须对（它算在追番总数里），但不能假装它有时间。
+     * total / tracking / untimed 三条是配套的，少了 untimed 那条，
+     * 「时间戳一条都没落盘」就查不出来了（总数照样是 3）。
+     */
+    const DAY = 86400000;
+    const T = Date.UTC(2026, 8, 1);
+    // ⚠️ 必须挑**真有集数**的条目：`isFinished` 只认「已看 ≥ 总集数」，
+    // 挑到没有 eps 的，期望值会写成「看完 1 部」而实际永远是 0 部 ——
+    // 那是脚本自己造出来的红，会让人去改本来正确的代码。
+    const withEps = SEEDS.filter((it) => Number(it.eps) > 0);
+    if (withEps.length < 2) {
+      console.error(`✗ 内置数据里有集数的作品不足两部（只有 ${withEps.length} 部），历程的耗时断言没法验`);
+      process.exit(2);
+    }
+    const [a, b] = withEps;
+    const used = new Set([a.id, b.id]);
+    const c = SEEDS.find((it) => !used.has(it.id) && !(Number(it.eps) > 0))
+      ?? SEEDS.find((it) => !used.has(it.id));
+    if (!c) {
+      console.error('✗ 内置数据里凑不出第三部作品来测「没有时间戳」那条路径');
+      process.exit(2);
+    }
+
+    state.following = {
+      [a.id]: { status: 'watching', watchedEps: a.eps, notify: true, followedAt: T, lastAt: T + 12 * DAY },
+      [b.id]: { status: 'watching', watchedEps: 1, notify: true, followedAt: T + 4 * DAY, lastAt: T + 6 * DAY },
+      [c.id]: { status: 'watching', watchedEps: 0, notify: true }, // 没有时间戳
+    };
+    expectation = {
+      total: 3,
+      tracking: 2,
+      untimed: 1,
+      finished: 1, // 只有 a 看完了
+      events: 3,   // a 两条（开始追 + 看完）+ b 一条
+      days: [12],
+    };
   }
 
   /*
@@ -168,7 +210,27 @@ let expected = null;
 let profileDir = '';
 if (profile) {
   profileDir = path.resolve(profile);
-  fs.rmSync(profileDir, { recursive: true, force: true });
+  /**
+   * 清掉上一轮留下的存档。
+   *
+   * ⚠️ 「整个目录递归删」在某些环境里会被拦下来（WorkBuddy 沙盒的 safe-delete shim）：
+   * 一次删超过 50 个文件就要人工确认，报
+   *   [safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":64,"threshold":50,…}
+   * 而 Electron 的 userData 目录里光 Cache/GPUCache 就六七十个文件，必然超线。
+   * 结果就是**第二次跑 `check:all` 必挂**，报的却是「脚本自己删不掉目录」，
+   * 跟被测的功能毫无关系 —— 属于会教人忽略这个脚本的那种红。
+   *
+   * 所以降级：删不动就只删 `state.json`。对这次自检来说 state.json 就是全部 ——
+   * 「干净的一次性 profile」要的是「没有上一轮的数据」，不是「没有缓存目录」。
+   * （封面缓存留着也影响不到断言：带 --profile 的那几组只禁「直连远端」，不禁缓存命中。）
+   */
+  try {
+    fs.rmSync(profileDir, { recursive: true, force: true });
+  } catch (err) {
+    fs.mkdirSync(profileDir, { recursive: true });
+    try { fs.rmSync(path.join(profileDir, 'state.json'), { force: true }); } catch { /* 本来就没有 */ }
+    console.warn(`! 存档目录删不掉（${err?.code ?? err?.name ?? 'ERR'}），已降级为只清 state.json`);
+  }
   expected = seedProfile(profileDir, view);
   env.JIKAI_USERDATA = profileDir;
 }
@@ -356,6 +418,45 @@ if (view === 'report') {
   }
 }
 
+// ---- 追番历程：磁盘上的时间戳能不能一路走到时间轴上 ----
+// 这一条守的是「记时间戳 → 落盘 → 读回来 → 摊成时间线」整条链。
+// 组件与纯函数由 SSR 和单测守着，但**时间戳到底有没有落进 state.json**
+// 只有桌面壳能回答 —— 而它一旦断了就是永久损失（过去的日期补不回来）。
+if (view === 'history') {
+  check(Number(report.historyNav) === 1, `侧栏没有追番历程的导航项（historyNav=${report.historyNav}）`);
+  check(Number(report.historyView) === 1, `历程视图没渲染出来（historyView=${report.historyView}）`);
+
+  if (expected) {
+    check(
+      Number(report.historyTotal) === expected.total,
+      `追番总数应当是 ${expected.total}，实际 ${report.historyTotal} —— following 没读进来`,
+    );
+    check(
+      Number(report.historyTracking) === expected.tracking,
+      `有时间戳的应当是 ${expected.tracking} 部，实际 ${report.historyTracking} —— 时间戳没落盘，或者落盘后被丢掉了`,
+    );
+    check(
+      Number(report.historyUntimed) === expected.untimed,
+      `没有时间戳的应当是 ${expected.untimed} 部，实际 ${report.historyUntimed}`
+        + ' —— 这个数错说明「有时间戳」和「没有」被混成了一类，界面就没法说清哪些数字是准的',
+    );
+    check(
+      Number(report.historyFinished) === expected.finished,
+      `看完的应当是 ${expected.finished} 部，实际 ${report.historyFinished}`,
+    );
+    check(
+      Number(report.historyEvents) === expected.events,
+      `时间轴上应当有 ${expected.events} 条事件，实际 ${report.historyEvents}`,
+    );
+    check(
+      JSON.stringify(report.historyDays) === JSON.stringify(expected.days),
+      `耗时应当是 ${JSON.stringify(expected.days)} 天，实际 ${JSON.stringify(report.historyDays)}`,
+    );
+  } else {
+    warnings.push('没有 --profile 播种，历程里的时间戳自然是空的（断言只在播种的那次才有意义）');
+  }
+}
+
 // ---- 内置数据在（离线开箱可用的前提）----
 check(report.library === 'yes', `内置作品库没加载（library=${report.library}），离线就开不了箱了`);
 
@@ -393,6 +494,15 @@ if (view === 'report') {
     + ` · ${report.reportBlocks} 块（其中封面墙 ${report.reportWallTiles} 张）· 素材 ${report.reportPool} 部`,
   );
   console.log(`  封面：缓存 ${report.coverCache} · 直连 ${report.coverRemote}（必须为 0）· 色块 ${report.coverNone}`);
+}
+if (view === 'history') {
+  console.log(
+    `  历程：追番 ${report.historyTotal} 部 · 有时间戳 ${report.historyTracking} · 未知 ${report.historyUntimed}`
+    + ` · 看完 ${report.historyFinished} · 时间轴 ${report.historyEvents} 条`,
+  );
+  if (expected) {
+    console.log(`  耗时：${JSON.stringify(report.historyDays)} 天（期望 ${JSON.stringify(expected.days)}）`);
+  }
 }
 if (view === 'catchup') {
   console.log(`  补番卡片 ${report.diaryInputs} 张带打分控件`);

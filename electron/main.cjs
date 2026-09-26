@@ -508,6 +508,17 @@ function createWindow() {
              reportWallTiles: document.querySelectorAll('[data-report-wall-tile]').length,
              reportPool: Number(document.querySelector('[data-report-pool-rows]')?.getAttribute('data-report-pool-rows') ?? -1),
              reportAddButtons: document.querySelectorAll('[data-report-add]').length,
+             // 追番历程：总数 / 有时间戳的 / 没时间戳的 / 事件条数。
+             // 「时间轴是空的」和「时间戳一条都没记上」在截图里长得一模一样 ——
+             // 只有把 untimed 单独数出来，才分得清是「还没到那天」还是「记漏了」。
+             historyNav: document.querySelectorAll('.sidenav__item[data-nav="history"]').length,
+             historyView: document.querySelectorAll('[data-history-view]').length,
+             historyTotal: Number(document.querySelector('[data-history-total]')?.getAttribute('data-history-total') ?? -1),
+             historyTracking: Number(document.querySelector('[data-history-tracking]')?.getAttribute('data-history-tracking') ?? -1),
+             historyUntimed: Number(document.querySelector('[data-history-untimed]')?.getAttribute('data-history-untimed') ?? -1),
+             historyFinished: Number(document.querySelector('[data-history-finished]')?.getAttribute('data-history-finished') ?? -1),
+             historyEvents: document.querySelectorAll('[data-history-event]').length,
+             historyDays: [...document.querySelectorAll('[data-history-finish-days]')].map((e) => Number(e.getAttribute('data-history-finish-days'))),
            })`,
         ).catch((e) => `{"error":${JSON.stringify(String(e?.message ?? e))}}`);
         const img = await win.webContents.capturePage();

@@ -9,6 +9,7 @@ import CatchupView from './components/CatchupView.jsx';
 import TierListView from './components/TierListView.jsx';
 import DiaryView from './components/DiaryView.jsx';
 import DiaryRatingInput from './components/DiaryRatingInput.jsx';
+import HistoryView from './components/HistoryView.jsx';
 import ReportView from './components/ReportView.jsx';
 import { CoverProvider } from './components/CoverContext.jsx';
 import DetailDrawer from './components/DetailDrawer.jsx';
@@ -54,7 +55,7 @@ import { deadlineStatus, progress, sortCatchup } from './core/catchup.js';
 
 // 这个常量和 SideNav 里的 ITEMS 是两处各写一份的 —— 加视图时两边都要改，
 // 只改一处会出现「导航能点到、但深链刷新就跳回来」。
-const VIEWS = ['season', 'schedule', 'following', 'catchup', 'diary', 'tier', 'report'];
+const VIEWS = ['season', 'schedule', 'following', 'catchup', 'diary', 'history', 'tier', 'report'];
 
 /** 同步指示的最短显示时长（毫秒）：只为防「一闪而过」，不影响取数 */
 const MIN_SYNC_MS = 480;
@@ -1405,6 +1406,25 @@ export default function App() {
                 onOpen={setDrawer}
                 onRemove={handleRemoveDiary}
                 onGoCatchup={() => goView('catchup')}
+              />
+            </WindowCard>
+          )}
+          {view === 'history' && (
+            <WindowCard
+              id="history-board"
+              title="追番历程"
+              hint="加入追番与推进进度时顺手记下的"
+              layout={st.layout}
+              defaultRect={{ x: 16, y: 16, w: 1000, h: 720 }}
+            >
+              <HistoryView
+                following={st.following}
+                diary={diaryData}
+                // 复用日记那份「id ⟶ 条目」：历程里的番可能来自任意一季
+                lookup={diaryLookup}
+                now={now}
+                onOpen={setDrawer}
+                onGoSeason={() => goView('season')}
               />
             </WindowCard>
           )}

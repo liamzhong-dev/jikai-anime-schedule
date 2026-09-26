@@ -1643,6 +1643,84 @@ body.print .rb { border-color: transparent !important; }
 
 .rb__hint { margin: 6px 0 0; font-size: 12px; color: var(--rp-ink-2); }
 
+/* ---------- 追番历程 ---------- */
+/*
+ * 时间轴用 grid 四列：日期 / 轴 / 封面 / 内容。
+ * 用 grid 而不是 flex，是因为「日期列右对齐、轴列居中」这两件事在 flex 里
+ * 都得靠固定宽度去凑，凑出来在窄窗口上就会错位。
+ */
+.history { display: flex; flex-direction: column; gap: 12px; }
+
+.history__stats { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end; }
+.history__stat { display: flex; flex-direction: column; gap: 1px; min-width: 54px; }
+.history__stat b { font-size: 17px; line-height: 1.15; }
+.history__stat span { font-size: 11px; color: var(--text-3); }
+
+.history__summary { font-size: 12px; color: var(--text-2); line-height: 1.6; }
+.history__note { font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+
+.history__highlight {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 12px; border-radius: 10px;
+  background: var(--accent-soft); border: 1px solid var(--line);
+}
+.history__hl-label { font-size: 11px; color: var(--text-2); }
+.history__hl-title {
+  border: 0; background: none; padding: 0; cursor: pointer;
+  font: inherit; font-size: 13.5px; font-weight: 600; color: var(--text);
+}
+.history__hl-title:hover { color: var(--accent); }
+.history__hl-meta { margin-left: auto; font-size: 11px; color: var(--text-2); }
+
+.history__list { display: flex; flex-direction: column; }
+
+.history__row {
+  display: grid;
+  grid-template-columns: 74px 16px 40px 1fr;
+  gap: 10px;
+  align-items: stretch;
+  padding: 6px 0;
+}
+.history__when {
+  display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 1px;
+  font-size: 11.5px; color: var(--text-2);
+}
+.history__year { font-size: 10px; color: var(--text-3); }
+
+/* 竖轴：每行自己画一段，首尾两行各砍掉半截，看上去就连成一条贯穿的线 */
+.history__spine { position: relative; display: flex; align-items: center; justify-content: center; }
+.history__spine::before {
+  content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+  background: var(--line-2);
+}
+.history__row:first-child .history__spine::before { top: 50%; }
+.history__row:last-child .history__spine::before { bottom: 50%; }
+.history__dot {
+  position: relative; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--text-3);
+  /* 用面板色把它盖在竖线上，否则线会从圆点里透出来 */
+  box-shadow: 0 0 0 3px var(--panel);
+}
+.history__dot--follow { background: var(--accent); }
+.history__dot--finish { background: var(--accent-2); }
+
+.history__cover { width: 40px; height: 56px; border-radius: 6px; overflow: hidden; align-self: center; }
+.history__main { display: flex; flex-direction: column; gap: 4px; justify-content: center; min-width: 0; }
+.history__title {
+  align-self: flex-start; border: 0; background: none; padding: 0; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600; color: var(--text); text-align: left;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.history__title:hover { color: var(--accent); }
+.history__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11.5px; }
+.history__kind { font-weight: 600; }
+.history__kind--follow { color: var(--accent); }
+.history__kind--finish { color: var(--accent-2); }
+.history__span { color: var(--text-2); }
+.history__span--muted { color: var(--text-3); }
+
+.history__empty-hint { margin-top: 8px; font-size: 11.5px; color: var(--text-3); line-height: 1.7; }
+
 /* 属性栏窄下来时把三栏堆成一栏，否则在 13 寸屏上画布会被挤成一条缝 */
 @media (max-width: 1180px) {
   .report { grid-template-columns: 1fr; }

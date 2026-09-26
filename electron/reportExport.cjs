@@ -73,7 +73,26 @@ async function openHidden({ html, width, height, offscreen, tag }) {
     height: Math.max(1, Math.round(height)),
     show: false,
     paintWhenInitiallyHidden: true,
-    webPreferences: { offscreen: Boolean(offscreen), backgroundThrottling: false },
+    webPreferences: {
+      offscreen: Boolean(offscreen),
+      backgroundThrottling: false,
+      /**
+       * ⚠️ **必须关掉渲染进程沙盒**，跟主窗口保持一致。
+       *
+       * 沙盒化的渲染进程在本机（以及任何带 AppContainer 式限制的环境）里
+       * 加载 `file://` 会被直接拦掉，报的是
+       *   ERR_FAILED (-2) loading 'file:///C:\...\jikai-report-pdf-*.html'
+       * —— 看上去像「临时文件没写成功 / 路径不对」，跟真正的原因（沙盒拦了协议）
+       * 毫无关系。实测（2026-09-26）：同一份内容、同一个 `loadFile`，
+       * 项目内路径和临时目录路径**都**失败，而主窗口（`sandbox: false`）加载
+       * `dist/index.html` 一切正常 —— 差别只在这个开关上。
+       * 症状是「导出功能整个不能用」，所以别把它当成环境噪音放过。
+       *
+       * 关掉是安全的：这个窗口只加载我们自己拼的自包含 HTML（图全是 dataURL），
+       * 不碰任何外部内容，也没有 preload / nodeIntegration。
+       */
+      sandbox: false,
+    },
   });
   if (offscreen) win.webContents.setFrameRate?.(30);
   await win.loadFile(file);

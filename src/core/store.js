@@ -37,7 +37,11 @@ const MAX_CACHED_SEASONS = 10;
 const MAX_SUBJECTS = 2000;
 
 const DEFAULTS = {
-  following: {},      // { [id]: { status, watchedEps, notify } }
+  // { [id]: { status, watchedEps, notify, followedAt, lastAt } }
+  // ⚠️ followedAt / lastAt 是 2026-09-26 之后才有的字段：在那之前加进追番的
+  //    作品**没有时间**。读取的一侧绝不许用「现在」把空填上 —— 那会把整段
+  //    历史都标成今天。空着、由 core/history.js 按「时间未知」处理。
+  following: {},
   catchup: [],        // [{ id, subjectId, deadline, watchedEps, targetEps, archived }]
   subjects: {},       // { [id]: 番剧条目 } —— 见「作品档案」一节
   groups: defaultGroups(0), // { [key]: { label, hint, ids, updatedAt } }
@@ -171,25 +175,39 @@ export function isFollowing(id) {
 }
 
 export function toggleFollow(id, seed = {}) {
+  // `now` 只取一次。两次 Date.now() 能差几毫秒，于是「当天加入、当天看完」
+  // 会算成 0.0001 天而不是 0 天 —— 取一次就没有这条缝。
+  const now = Date.now();
   update((s) => {
     const following = { ...s.following };
     if (following[id]) delete following[id];
-    else following[id] = { status: 'watching', watchedEps: 0, notify: true, ...seed };
+    // followedAt / lastAt 是「追番历程」的**全部**数据来源，写在这里而不是界面层：
+    // 界面不该关心时间，而且漏传一次就少一个点 —— 那个点永远补不回来。
+    // 放在 `...seed` 前面，测试要用 seed 把时间钉死。
+    else following[id] = { status: 'watching', watchedEps: 0, notify: true, followedAt: now, lastAt: now, ...seed };
     return { ...s, following };
   });
 }
 
-export function setWatched(id, eps) {
+/**
+ * 改已看集数。
+ *
+ * `lastAt` 每次进度变动都刷新 —— 它是「看完」那一刻的时间来源：
+ * 看完了那次推进就是完成时间，不用再单独存一个 finishedAt
+ * （单独存就会有两处真相，改进度没改完后二者必然打架）。
+ */
+export function setWatched(id, eps, { nowMs = Date.now() } = {}) {
   update((s) => {
-    const cur = s.following[id] ?? { status: 'watching', watchedEps: 0, notify: true };
-    return { ...s, following: { ...s.following, [id]: { ...cur, watchedEps: Math.max(0, eps) } } };
+    const cur = s.following[id] ?? { status: 'watching', watchedEps: 0, notify: true, followedAt: nowMs };
+    return { ...s, following: { ...s.following, [id]: { ...cur, watchedEps: Math.max(0, eps), lastAt: nowMs } } };
   });
 }
 
-export function markEpisode(id, episodeNumber) {
+/** 和 setWatched 同一套规矩，只是集数直接给 */
+export function markEpisode(id, episodeNumber, { nowMs = Date.now() } = {}) {
   update((s) => {
-    const cur = s.following[id] ?? { status: 'watching', watchedEps: 0, notify: true };
-    return { ...s, following: { ...s.following, [id]: { ...cur, watchedEps: episodeNumber } } };
+    const cur = s.following[id] ?? { status: 'watching', watchedEps: 0, notify: true, followedAt: nowMs };
+    return { ...s, following: { ...s.following, [id]: { ...cur, watchedEps: episodeNumber, lastAt: nowMs } } };
   });
 }
 

@@ -19,6 +19,7 @@ import DiaryRatingInput from '../../src/components/DiaryRatingInput.jsx';
 import Cover from '../../src/components/Cover.jsx';
 import { CoverProvider } from '../../src/components/CoverContext.jsx';
 import ReportView from '../../src/components/ReportView.jsx';
+import HistoryView from '../../src/components/HistoryView.jsx';
 import { makeDefaultTierlist } from '../../src/core/tierlist.js';
 import { makeDefaultReport } from '../../src/core/report.js';
 import { load, seedInitialState } from '../../src/core/store.js';
@@ -185,4 +186,24 @@ export async function renderReport(props = {}) {
     onExportPng: () => {},
   };
   return renderToStaticMarkup(<ReportView {...base} {...props} />);
+}
+
+/**
+ * 单独渲染追番历程视图。
+ *
+ * 时间戳用固定值喂进去，不经过 store：这一层要验的是「把时间戳摊成时间线」
+ * 这件事本身，跟「时间戳是怎么记下来的」无关 —— 后者由 history-store.test.mjs
+ * 守着。混在一起测的话，时间轴画错了会先让人怀疑是记时间戳记错了。
+ */
+export async function renderHistory(props = {}) {
+  await prepare();
+  const base = {
+    following: {},
+    diary: {},
+    lookup: () => null,
+    now: Date.UTC(2026, 9, 10),
+    onOpen: () => {},
+    onGoSeason: () => {},
+  };
+  return renderToStaticMarkup(<HistoryView {...base} {...props} />);
 }
