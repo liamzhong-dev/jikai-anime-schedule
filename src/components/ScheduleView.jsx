@@ -115,7 +115,7 @@ export default function ScheduleView({ season, following, now, onOpen }) {
         <div className="queue">
           {night.map((it) => (
             <div key={`${it.anime.id}-${it.episode}`} className="queue__row">
-              <Cover anime={it.anime} className="queue__cover" />
+              <Cover anime={it.anime} className="queue__cover" onOpen={onOpen} />
               <div className="queue__info">
                 <div className="queue__title">{it.anime.titleZh || it.anime.titleJa}</div>
                 <div className="queue__sub">

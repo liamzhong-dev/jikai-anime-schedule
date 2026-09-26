@@ -9,7 +9,9 @@ import { clockCST, isLateNight, weekdayJST } from '../core/time.js';
  *
  * 封面**整块**都是「打开详情」的热区（曾经只有下面那行标题能点，
  * 但 `.card__cover` 的 `cursor: pointer` 一直写着 —— 设计意图本来就是这样，
- * 只是漏了接处理函数）。
+ * 只是漏了接处理函数）。热区由 `<Cover onOpen={...}>` 自己铺，
+ * 见 Cover.jsx 里那段注释：这样时间表 / 追番 / 补番 / 日记 / 历程
+ * 也能用同一套，不用每个视图各写一遍。
  */
 export default function AnimeCard({ anime, following, state, onToggle, onOpen }) {
   const beginMs = Date.parse(anime.begin ?? '');
@@ -19,22 +21,7 @@ export default function AnimeCard({ anime, following, state, onToggle, onOpen })
 
   return (
     <div className="card">
-      <Cover anime={anime} className="card__cover">
-        {/*
-          用一个铺满封面的透明 <button> 做热区，而不是给 <Cover> 挂 onClick：
-          ① `Cover` 是本季 / 时间表 / 追番 / 补番 / 日记 / 抽屉等**七个地方共用**的，
-             把行为做进组件里会顺带改掉其余六处；
-          ② 真的按钮才吃得到 Tab 与回车，`div + onClick` 吃不到。
-          它在 DOM 里排在徽标与星标**前面**，所以那两样仍压在它上面
-          （星标 click 里已经 stopPropagation，点星标不会连带开详情）。
-        */}
-        <button
-          type="button"
-          className="card__open"
-          data-card-open={anime.id}
-          aria-label={`打开《${title}》的详情`}
-          onClick={() => onOpen(anime)}
-        />
+      <Cover anime={anime} className="card__cover" onOpen={onOpen}>
         <span className="card__badge">
           {weekday}
           {late ? <em className="card__badge-late">深夜</em> : null}

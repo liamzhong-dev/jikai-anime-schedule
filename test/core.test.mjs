@@ -14,7 +14,7 @@ import {
   positionToPercent, resolvePosition,
 } from '../src/core/wallpaper.js';
 import {
-  CARD_MIN, RESIZE_CURSOR, RESIZE_DIRS, clampCardMin, fitRect, resizeRect,
+  CARD_MIN, FONT_SCALE, clampCardMin, clampFontScale, fitRect,
 } from '../src/core/layout.js';
 import { bangumiIdOf, mapItem, availableSeasons, currentSeason } from '../src/data/bangumiData.js';
 import { buildMockArchive, buildMockSeason, buildMockUserState } from './fixtures/fictional-data.js';
@@ -530,84 +530,45 @@ test('位置说人话：三档 × 三档，坏值不吐 NaN', () => {
 });
 
 /* ═══════════════════════════════════════════════════════════
- * 卡片窗口的缩放几何
+ * 卡片内容的显示档位（封面尺寸 / 文字大小）
+ *
+ * ⚠️ 这一段原来是「窗口八方向缩放的几何」。那套几何连同它的测试一起删掉了：
+ * 窗口不再可缩放，用户要的是**内容**的比例。留着一个已经不用的换算函数，
+ * 下次改布局的人会先花时间读它、再发现没有任何地方调用它。
  * ═══════════════════════════════════════════════════════════ */
 
-test('缩放把手：八个方向齐、指针样式齐（斜角的命名是反的）', () => {
-  assert.equal(RESIZE_DIRS.length, 8);
-  assert.equal(new Set(RESIZE_DIRS).size, 8, '不能有重复方向');
-  for (const d of RESIZE_DIRS) assert.ok(RESIZE_CURSOR[d], `${d} 没有配鼠标指针`);
-  // ↗↙ 是一条对角线（ne / sw），↖↘ 是另一条（nw / se）—— 按直觉写必错
-  assert.equal(RESIZE_CURSOR.ne, RESIZE_CURSOR.sw);
-  assert.equal(RESIZE_CURSOR.nw, RESIZE_CURSOR.se);
-  assert.notEqual(RESIZE_CURSOR.ne, RESIZE_CURSOR.nw);
+test('文字大小档位：越界夹回、认不出的值给默认', () => {
+  assert.equal(clampFontScale(1.2), 1.2);
+  assert.equal(clampFontScale(0.1), FONT_SCALE.min, '太小夹到下限');
+  assert.equal(clampFontScale(9), FONT_SCALE.max, '太大夹到上限');
+  assert.equal(clampFontScale('1.05'), 1.05, '字符串数字要认');
+  // 滑块步进 0.05，浮点累加会攒出 1.0000000000000002 —— 存进 state.json 又脏又难比对
+  assert.equal(clampFontScale(1.0000000000000002), 1);
+  // 取整到两位：⚠️ 例子必须落在区间**内**（0.12345 比下限还小，它该被夹到 0.85 而不是取整成 0.12）
+  assert.equal(clampFontScale(1.23456), 1.23, '区间内的值取整到两位');
+  // 取整发生在夹之后，理论上能把值顶出上限 —— 这条钉住它不会
+  for (const v of [1.395, 1.399, 1.3999]) {
+    assert.ok(clampFontScale(v) <= FONT_SCALE.max, `${v} 取整后跑到上限外面去了（${clampFontScale(v)}）`);
+  }
+  assert.ok(FONT_SCALE.def >= FONT_SCALE.min && FONT_SCALE.def <= FONT_SCALE.max, '默认值要在区间里');
 });
 
-test('缩放：八条边各拖一次，方向都要对', () => {
-  const base = { x: 100, y: 100, w: 400, h: 300 };
-  assert.deepEqual(resizeRect({ base, dx: 50, dy: 30, dir: 'se' }), { x: 100, y: 100, w: 450, h: 330 });
-  assert.deepEqual(resizeRect({ base, dx: 50, dir: 'e' }), { x: 100, y: 100, w: 450, h: 300 }, 'e 只改宽');
-  assert.deepEqual(resizeRect({ base, dy: 30, dir: 's' }), { x: 100, y: 100, w: 400, h: 330 }, 's 只改高');
-
-  // 西侧：往左拖是变大，而且**右边缘必须钉住**（400+100=500）
-  const westOut = resizeRect({ base, dx: -50, dir: 'w' });
-  assert.deepEqual(westOut, { x: 50, y: 100, w: 450, h: 300 });
-  assert.equal(westOut.x + westOut.w, 500, '右边缘不动才是「往外拉」');
-  const westIn = resizeRect({ base, dx: 50, dir: 'w' });
-  assert.deepEqual(westIn, { x: 150, y: 100, w: 350, h: 300 }, '往右拖是变小，右边缘仍在 500');
-
-  // 北侧同理：100+300=400 是钉住的下边缘
-  const northOut = resizeRect({ base, dy: -50, dir: 'n' });
-  assert.deepEqual(northOut, { x: 100, y: 50, w: 400, h: 350 });
-  assert.equal(northOut.y + northOut.h, 400);
-
-  assert.deepEqual(resizeRect({ base, dx: -50, dy: -50, dir: 'nw' }), { x: 50, y: 50, w: 450, h: 350 });
-  assert.deepEqual(resizeRect({ base, dx: 50, dy: -50, dir: 'ne' }), { x: 100, y: 50, w: 450, h: 350 });
-  assert.deepEqual(resizeRect({ base, dx: -50, dy: 50, dir: 'sw' }), { x: 50, y: 100, w: 450, h: 350 });
-});
-
-test('缩放：夹到最小尺寸时，西 / 北侧的边缘不许跟着飘', () => {
-  const base = { x: 100, y: 100, w: 400, h: 300 };
-
-  const narrow = resizeRect({ base, dx: 500, dir: 'w' });
-  assert.equal(narrow.w, 300, '宽度到最小就该停住');
-  // ⚠️ 这是本段的重点：只写 `Math.max(minW, ...)` 而没把吃掉的那部分还给 x，
-  //    会得到 x=600 —— 表现成「宽度已经到底了，卡片还在往左飘」
-  assert.equal(narrow.x, 200, 'x 要正好等于「原右边缘 - 最小宽」');
-  assert.equal(narrow.x + narrow.w, 500, '任何时候右边缘都不该动');
-
-  const short = resizeRect({ base, dy: 500, dir: 'n' });
-  assert.equal(short.h, 160);
-  assert.equal(short.y, 240);
-  assert.equal(short.y + short.h, 400);
-
-  // 东南两侧不需要还 x / y：拉过头只是回到最小尺寸、原位不动
-  assert.deepEqual(resizeRect({ base, dx: -500, dy: -500, dir: 'se' }), { x: 100, y: 100, w: 300, h: 160 });
-});
-
-test('缩放：西 / 北侧不许越过画布左上角，东 / 南侧不限', () => {
-  const base = { x: 0, y: 0, w: 500, h: 400 };
-
-  const west = resizeRect({ base, dx: -300, dir: 'w' });
-  assert.equal(west.x, 0, 'x 不能变成负数（卡片会跑到画布外面去）');
-  assert.equal(west.w, 500, 'x 到 0 之后宽度就不该再涨');
-  assert.equal(west.x + west.w, 500, '右边缘始终不动');
-
-  const north = resizeRect({ base, dy: -300, dir: 'n' });
-  assert.equal(north.y, 0);
-  assert.equal(north.h, 400);
-
-  // 反向：东 / 南侧**不能**被夹 —— 用户就是要更大的卡片，画布会跟着滚。
-  // 顺手在这里也夹一刀的话，表现成「怎么拖都到不了底」，很难联想到是这里
-  const big = resizeRect({ base, dx: 2000, dy: 2000, dir: 'se' });
-  assert.deepEqual(big, { x: 0, y: 0, w: 2500, h: 2400 });
-});
-
-test('缩放：缺参数不崩，坏方向退化成右下角', () => {
-  assert.equal(resizeRect({}).w, 300, '没有 base 时给一套最小值，别吐 undefined');
-  const base = { x: 10, y: 10, w: 400, h: 300 };
-  assert.deepEqual(resizeRect({ base, dx: 50, dy: 50 }), resizeRect({ base, dx: 50, dy: 50, dir: 'se' }));
-  assert.deepEqual(resizeRect({ base, dx: 50, dy: 50, dir: '乱七八糟' }), resizeRect({ base, dx: 50, dy: 50, dir: 'se' }));
+/*
+ * ⚠️ 「没设」和「设成 0」必须分开 —— 这一条是 `Number(null) === 0` 那个坑的正身。
+ * 照直写的话 null 会被夹到**下限**（0.85 / 76），而下限是个有意义的值：
+ * 界面上只是「字有点小、封面有点密」，谁也不会想到是设置读错了。
+ * 而 `undefined`（NaN）走的是默认值那条路 —— 一半对一半错，随手试一次还测不出来。
+ */
+test('没设过的档位要给默认值，而不是被抬到下限', () => {
+  for (const empty of [null, undefined, '']) {
+    assert.equal(clampFontScale(empty), FONT_SCALE.def, `clampFontScale(${JSON.stringify(empty)}) 应当是默认值`);
+    assert.equal(clampCardMin(empty), CARD_MIN.def, `clampCardMin(${JSON.stringify(empty)}) 应当是默认值`);
+  }
+  assert.equal(clampFontScale(NaN), FONT_SCALE.def);
+  assert.equal(clampCardMin(NaN), CARD_MIN.def);
+  // 真的给了 0 也别当成没设 —— 它会被正常夹到下限（那是「越界」而不是「没设」）
+  assert.equal(clampFontScale(0), FONT_SCALE.min);
+  assert.equal(clampCardMin(0), CARD_MIN.min);
 });
 
 test('首次适配：装不下就缩进来，装得下就一个字段都不动', () => {

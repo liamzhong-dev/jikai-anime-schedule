@@ -23,6 +23,14 @@ export default function TierRow({
   onRemove,
   onRename,
   onRecolor,
+  /*
+   * 删档只在「自定义」下露出来。
+   * 预设档位是成套的，随便删掉中间一档会让 items 里的 rowId 悬空；
+   * 而用户选自定义的时候，他心里想的就是「这张表由我定」。
+   */
+  editable = false,
+  canDelete = false,
+  onDelete,
   remote = false,
 }) {
   const [editing, setEditing] = useState(false);
@@ -70,6 +78,22 @@ export default function TierRow({
           onChange={(e) => onRecolor?.(row.id, e.target.value)}
           title="改颜色"
         />
+        {editable ? (
+          <button
+            type="button"
+            className="tier-row__del"
+            data-row-del={row.id}
+            disabled={!canDelete}
+            title={canDelete
+              ? '删掉这一档（里面的图块会回到素材池，不会丢）'
+              : '只剩最后一档了，至少留两个'}
+            // 双击按钮不该顺带把上面那层「双击改名」的输入框叫出来
+            onDoubleClick={(e) => e.stopPropagation()}
+            onClick={() => onDelete?.(row.id)}
+          >
+            ✕
+          </button>
+        ) : null}
       </div>
 
       <div

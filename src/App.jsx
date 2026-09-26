@@ -27,8 +27,10 @@ import {
   ensureTierlist, patchTierlist, resetTierlist,
   addDiaryEntry, removeDiaryEntry, readDiary, myRatingOf, readLatestRated, readDiaryOf,
   ensureReport, setReportBlocks, resetReport,
+  exportableState, importState,
 } from './core/store.js';
 import { compareToBangumi } from './core/diary.js';
+import { buildTransfer, describeCounts, parseTransfer, transferCounts, transferFileName } from './core/transfer.js';
 import { autoRankByScore } from './core/tierlist.js';
 import { collectImages, exportTierlistPng } from './core/tierExport.js';
 import {
@@ -149,6 +151,14 @@ export default function App() {
   const [reportNote, setReportNote] = useState('');
   const [reportSel, setReportSel] = useState(null);
   const [reportKeyword, setReportKeyword] = useState('');
+  /*
+   * 备份与迁移的三个状态。
+   * `transferPending` 是「文件读进来了、但还没覆盖」的那一步 ——
+   * 覆盖是破坏性的，中间停下来让用户看一眼两边的条数，比事后道歉管用。
+   */
+  const [transferBusy, setTransferBusy] = useState('');
+  const [transferNote, setTransferNote] = useState('');
+  const [transferPending, setTransferPending] = useState(null);
 
   const notified = useRef(new Set());
 
@@ -196,6 +206,21 @@ export default function App() {
       panelAlpha: st.settings.panelAlpha,
     });
   }, [st.settings.theme, st.settings.wallpaper, st.settings.panelAlpha, wallpaper]);
+
+  /*
+   * 卡片里文字的大小。
+   *
+   * 写在 root 上而不是某一处卡片上：「显示多大」这件事得全局一致 ——
+   * 用户调一次，本季 / 时间表 / 追番 / 日记里的字都该跟着变。挂在某个视图上，
+   * 表现就是「在这页调好了，翻一页又回去了」，而用户只会觉得是设置没生效。
+   *
+   * 封面画多大由 `--card-min` 管（在网格那边设），两者分开：
+   * 有人想一屏塞更多封面（图和字一起小），也有人只想把字放大看清（图不动）。
+   */
+  useEffect(() => {
+    const root = globalThis.document?.documentElement;
+    if (root) root.style.setProperty('--fs', String(st.settings.fontScale ?? 1));
+  }, [st.settings.fontScale]);
 
   // ---------- 代理：设置里一改就让主进程立刻生效 ----------
   useEffect(() => {
@@ -628,9 +653,11 @@ export default function App() {
   }, [seasonKey, tierlist, season, pushToast]);
 
   const handleResetTier = useCallback(() => {
-    resetTierlist(seasonKey, { presetId: tierlist.presetId });
+    // 不传 presetId：档位定义要**留着**（自定义模板下尤其重要），
+    // 这个按钮清的是排布，不是模板。
+    resetTierlist(seasonKey);
     pushToast('已清空', `${seasonLabel(seasonKey)} 的排布`);
-  }, [seasonKey, tierlist.presetId, pushToast]);
+  }, [seasonKey, pushToast]);
 
   /**
    * 导出 PNG。
@@ -733,6 +760,112 @@ export default function App() {
     const payload = exportLayoutPresets();
     await platform.saveTextFile({ name: 'jikai-layout-presets.json', text: JSON.stringify(payload, null, 2) });
   }, []);
+
+  /**
+   * 导出备份。
+   *
+   * 走和「导出布局预设」同一条通道（弹保存框、渲染层给内容），
+   * 所以这里不需要任何新的系统能力；真正要多一条通道的是**导入**（读文件）。
+   */
+  const handleExportBackup = useCallback(async () => {
+    setTransferBusy('export');
+    setTransferNote('');
+    try {
+      const snapshotState = exportableState();
+      const payload = buildTransfer(snapshotState, { appVersion: appInfo?.version ?? '' });
+      const name = transferFileName();
+      await platform.saveTextFile({ name, text: JSON.stringify(payload, null, 2) });
+      const line = `已导出 ${name}：${describeCounts(payload.counts)}`;
+      setTransferNote(line);
+      pushToast('备份已导出', `${describeCounts(payload.counts)} · 在另一台机器上导入即可`);
+    } catch (err) {
+      const msg = err?.message ?? String(err);
+      // 「已取消」不是错误：用户只是改了主意，弹一条红色提示反而莫名其妙
+      if (msg.includes('取消')) { setTransferNote('已取消导出'); return; }
+      setTransferNote(`导出失败：${msg}`);
+      pushToast('导出失败', msg);
+    } finally {
+      setTransferBusy('');
+    }
+  }, [appInfo?.version, pushToast]);
+
+  /**
+   * 选一份备份读进来。**这一步只读到「待确认」为止，不动数据。**
+   *
+   * 覆盖是破坏性的，所以拆成两步：先把两边各有多少条摆给用户看（confirmImport），
+   * 他点确认才真的写。中途任何一步出问题都停在原地，本机的记录一条不动。
+   */
+  const handlePickBackup = useCallback(async () => {
+    setTransferBusy('import');
+    setTransferNote('');
+    try {
+      const picked = await platform.pickTextFile();
+      if (!picked?.ok) {
+        if (picked?.error !== '已取消') {
+          setTransferNote(`读文件失败：${picked?.error ?? '未知原因'}`);
+          pushToast('没能读取这个文件', picked?.error ?? '');
+        }
+        return;
+      }
+      const parsed = parseTransfer(picked.text);
+      if (!parsed.ok) {
+        setTransferNote(`「${picked.name}」不是能用的备份：${parsed.error}`);
+        pushToast('这不是一份能用的备份', parsed.error);
+        return;
+      }
+      setTransferPending({
+        fileName: picked.name,
+        incoming: parsed.payload,
+        mine: transferCounts(exportableState()),
+        theirs: transferCounts(parsed.payload.state),
+      });
+    } catch (err) {
+      const msg = err?.message ?? String(err);
+      setTransferNote(`读文件失败：${msg}`);
+      pushToast('读文件失败', msg);
+    } finally {
+      setTransferBusy('');
+    }
+  }, [pushToast]);
+
+  /** 用户确认之后才真的写：先自动备份现在的记录，再整份替换 */
+  const handleConfirmImport = useCallback(async () => {
+    const pending = transferPending;
+    if (!pending) return;
+    setTransferBusy('import');
+    try {
+      const snapshotState = exportableState();
+      const backup = await platform.writeStateBackup({
+        name: `backup-import-${Date.now()}.json`,
+        text: JSON.stringify(buildTransfer(snapshotState, { appVersion: appInfo?.version ?? '' }), null, 2),
+      });
+      if (!backup?.ok) {
+        /*
+         * ⚠️ 备份没成功就**不许往下走**。
+         * 这一步是这次覆盖唯一的退路；退路没铺好还把数据盖掉，
+         * 那就是真的丢了。宁可让用户再点一次。
+         */
+        const msg = backup?.error ?? '写不进去';
+        setTransferNote(`导入中止：自动备份没成功（${msg}）—— 记录一条没动，换个地方再试`);
+        pushToast('导入中止', '自动备份没成功，为保险起见没有覆盖你的记录');
+        return;
+      }
+
+      importState(pending.incoming.state);
+      setTransferPending(null);
+      const where = backup.where ?? backup.path ?? '程序的数据目录';
+      const line = `已从「${pending.fileName}」导入：${describeCounts(pending.theirs)}`
+        + ` · 覆盖前的记录已另存：${where}`;
+      setTransferNote(line);
+      pushToast('记录已导入', `${describeCounts(pending.theirs)} · 覆盖前的记录已另存一份`);
+    } catch (err) {
+      const msg = err?.message ?? String(err);
+      setTransferNote(`导入失败：${msg}`);
+      pushToast('导入失败', msg);
+    } finally {
+      setTransferBusy('');
+    }
+  }, [transferPending, appInfo?.version, pushToast]);
 
   // ---------- 托盘摘要：每次数据或视图变化就推给主进程 ----------
   useEffect(() => {
@@ -1608,6 +1741,14 @@ export default function App() {
         appInfo={appInfo}
         autoLaunch={autoLaunch}
         onAutoLaunch={handleAutoLaunch}
+        /*
+         * 点了之后主进程会清掉降级标记再自己重启，所以这里不需要做任何收尾 ——
+         * 但失败（比如浏览器壳）得让用户看见原因，不然就是「按了没反应」。
+         */
+        onRetryHardware={async () => {
+          const r = await platform.retryHardware?.();
+          if (r && r.ok === false) pushToast('没能换回硬件加速', r.error || '这个环境不支持');
+        }}
         hotkeyInfo={hotkeyInfo}
         onGlobalHotkey={handleGlobalHotkey}
         onToast={pushToast}
@@ -1622,6 +1763,15 @@ export default function App() {
           onRun: runLibrarySync,
           onClearCovers: clearCoverCache,
           onClearNameIndex: clearNameIndex,
+        }}
+        transfer={{
+          busy: transferBusy,
+          note: transferNote,
+          pending: transferPending,
+          onExport: handleExportBackup,
+          onImport: handlePickBackup,
+          onConfirmImport: handleConfirmImport,
+          onCancelImport: () => { setTransferPending(null); setTransferNote('已取消导入，本机记录一条没动'); },
         }}
       />
 

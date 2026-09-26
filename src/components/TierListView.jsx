@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import TierPicker from './TierPicker.jsx';
 import TierRow from './TierRow.jsx';
 import TierItem from './TierItem.jsx';
-import { ITEM_SIZES, PRESET_ROW_GROUPS, moveItem } from '../core/tierlist.js';
+import { ITEM_SIZES, PRESET_ROW_GROUPS, CUSTOM_PRESET_ID, ROW_LIMITS, addRow, isCustomPreset, moveItem, removeRow, unassignRow } from '../core/tierlist.js';
 import { useDragSort } from '../core/useDragSort.js';
 
 /**
@@ -76,7 +76,34 @@ export default function TierListView({
     ? { rowId: drag.toRow, index: drag.index }
     : null;
 
-  const patchRows = (nextRows) => onPatch?.({ rows: nextRows });
+  /*
+   * 自定义模板。
+   *
+   * ⚠️ 「改一行」和「换一套」是两件事，这里靠 `presetId` 分开：
+   * 只要用户动过任何一行（改名、改色、加档、删档），这份表就**不再是那个预设**了，
+   * 于是把 presetId 标成 custom —— 否则下拉里一直写着「Masterpiece ~ E」，
+   * 而表上挂的是用户自己起的名，下次换回同一套预设还会把他的改动冲掉。
+   * 已经是 custom 的就别覆盖（那会把「自定义」标成别的预设）。
+   */
+  const custom = isCustomPreset(tierlist.presetId);
+  const markCustom = (patch) => onPatch?.({ ...patch, presetId: CUSTOM_PRESET_ID });
+
+  const handleAddRow = () => {
+    const { rows: next, added } = addRow(rows);
+    if (!added) return;
+    markCustom({ rows: next });
+  };
+
+  /**
+   * 删一档：行和它里面的图块**必须一起改**。
+   * 只删行的话，items 里那批图块会变成指向不存在档位的悬空引用 ——
+   * 界面当场看着像没事（渲染时按 rowId 过滤掉了），下次读盘 normalize 时被静默丢掉。
+   */
+  const handleRemoveRow = (rowId) => {
+    const { rows: next, removed } = removeRow(rows, rowId);
+    if (!removed) return;
+    markCustom({ rows: next, items: unassignRow(items, rowId) });
+  };
 
   const dragAnime = drag ? lookup[drag.key] : null;
 
@@ -88,6 +115,15 @@ export default function TierListView({
           className="input tier__select"
           value={tierlist.presetId ?? ''}
           onChange={(e) => {
+            /*
+             * 选「自定义」**不动任何一行** —— 它只是把这份表标成自定义，
+             * 好让下面那些加档/删档的按钮出现。用户选它的时候，
+             * 表上正摆着他自己的档位，这时候拿一份默认行去覆盖是最糟的反应。
+             */
+            if (e.target.value === CUSTOM_PRESET_ID) {
+              onPatch?.({ presetId: CUSTOM_PRESET_ID });
+              return;
+            }
             const preset = PRESET_ROW_GROUPS.find((p) => p.id === e.target.value);
             if (!preset) return;
             // 三套预设的行 id 都是 r1~r7，换组只换名字和颜色，
@@ -98,7 +134,25 @@ export default function TierListView({
           {PRESET_ROW_GROUPS.map((p) => (
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
+          <option value={CUSTOM_PRESET_ID}>自定义</option>
         </select>
+
+        {custom ? (
+          <>
+            <button
+              type="button"
+              className="btn btn--mini"
+              onClick={handleAddRow}
+              disabled={rows.length >= ROW_LIMITS.max}
+              title={rows.length >= ROW_LIMITS.max ? `最多 ${ROW_LIMITS.max} 档` : '在最下面加一档'}
+            >
+              + 加一档
+            </button>
+            <span className="tier__note">
+              双击档位名改字 · 点色块改色 · 每档右边的 ✕ 删档（里面的图块会回到素材池）
+            </span>
+          </>
+        ) : null}
 
         <button type="button" className="btn btn--mini" onClick={() => onAutoRank?.()}>
           按评分自动分档
@@ -146,8 +200,11 @@ export default function TierListView({
               registerRow={registerRow}
               onBeginDrag={begin}
               onRemove={(key) => onPatch?.({ items: moveItem(items, { key, toRow: null }) })}
-              onRename={(rowId, label) => patchRows(rows.map((r) => (r.id === rowId ? { ...r, label } : r)))}
-              onRecolor={(rowId, color) => patchRows(rows.map((r) => (r.id === rowId ? { ...r, color } : r)))}
+              onRename={(rowId, label) => markCustom({ rows: rows.map((r) => (r.id === rowId ? { ...r, label } : r)) })}
+              onRecolor={(rowId, color) => markCustom({ rows: rows.map((r) => (r.id === rowId ? { ...r, color } : r)) })}
+              editable={custom}
+              canDelete={rows.length > ROW_LIMITS.min}
+              onDelete={handleRemoveRow}
               remote={coversRemote}
             />
           ))}

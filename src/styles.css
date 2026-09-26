@@ -471,46 +471,9 @@ html:not([data-frost='on']) .modal {
 .window__body { flex: 1; overflow: auto; padding: 14px; }
 
 /*
- * 八条边的缩放把手。
- *
- * 原来只有 `se` 一个角，想把卡片加宽必须先把鼠标摸到那个角上 ——
- * 卡片比画布宽的时候那个角还在滚动条外面。八条边都能拖，就近就行。
- *
- * ⚠️ 左右两条只留 4px：卡片内容区右边就是它自己的滚动条，
- * 边条一宽就会把滚动条最外侧几条像素抢走 —— 表现成「拖滚动条突然变成在缩放」。
- * 上下两条不跟垂直滚动条抢，可以给到 5px 好点一些。
- * 四个角 16px 见方，写在后面压住边条，免得拖到角上时吃的却是边条。
+ * 卡片窗口**不再有**缩放把手（八条边那套已经删掉）。
+ * 窗口能拉大而内容不变，不是用户要的 —— 见 WindowCard.jsx 顶部那段说明。
  */
-.window__edge {
-  position: absolute;
-  z-index: 4;
-  touch-action: none;
-  transition: background 0.12s ease;
-}
-.window__edge:hover { background: rgba(var(--accent-rgb), 0.35); }
-.window__edge--n,
-.window__edge--s { left: 12px; right: 12px; height: 5px; }
-.window__edge--n { top: 0; }
-.window__edge--s { bottom: 0; }
-.window__edge--e,
-.window__edge--w { top: 12px; bottom: 12px; width: 4px; }
-.window__edge--e { right: 0; }
-.window__edge--w { left: 0; }
-.window__edge--ne,
-.window__edge--nw,
-.window__edge--se,
-.window__edge--sw { width: 16px; height: 16px; }
-.window__edge--ne { top: 0; right: 0; }
-.window__edge--nw { top: 0; left: 0; }
-.window__edge--se { right: 0; bottom: 0; }
-.window__edge--sw { left: 0; bottom: 0; }
-/* 右下角那撮斜纹留着：它是最容易被发现的把手，也算个「这里能拖」的记号 */
-.window__edge--se {
-  background: linear-gradient(135deg, transparent 52%, var(--line-2) 52%, var(--line-2) 60%, transparent 60%);
-}
-.window__edge--se:hover {
-  background: linear-gradient(135deg, transparent 46%, rgba(var(--accent-rgb), 0.6) 46%, rgba(var(--accent-rgb), 0.6) 62%, transparent 62%);
-}
 
 /* ---------- 通用控件 ---------- */
 .btn {
@@ -788,6 +751,24 @@ html:not([data-frost='on']) .modal {
 /* ---------- 番剧卡片 ---------- */
 .cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-min, 112px), 1fr)); gap: 14px 12px; }
 
+/*
+ * 「文字大小」这一档（`--fs`）的唯一落点：**基准字号交给容器，里面的字一律相对 em 派生**。
+ * 加一档就整体放大，不用逐个元素改字号 —— 上一版是每个元素各写各的 px，改一档要动二十处。
+ *
+ * 基准取 12.5px，因为那本来就是 `.card__title` 的字号：
+ * 默认档（1）看上去和以前**一模一样**，不存在「升级完字变大了」这种惊吓。
+ *
+ * `--fs` 是**倍率**不是像素：设置面板给的区间就 0.85–1.4，
+ * 而且各处的 line-height 都是无单位数值，才会跟着字号一起长。
+ *
+ * 时间表的周视图（`.weekgrid`）也在名单里。那一列本来就 7 等分、宽度固定，
+ * 字调大之后名字会被省略号截掉 —— 那是用户自己调大的，不是布局坏了。
+ */
+.cardgrid,
+.queue,
+.board,
+.weekgrid { font-size: calc(12.5px * var(--fs, 1)); }
+
 /* 工具栏里的「一格留多宽」滑块：比 .slider 窄一档，塞得进一行 */
 .toolbar__range {
   -webkit-appearance: none;
@@ -822,9 +803,14 @@ html:not([data-frost='on']) .modal {
 /*
  * 封面上的「打开详情」热区：铺满整张封面、完全透明。
  * 番剧党认封面不认标题，点图比点下面那行小字自然得多。
+ *
+ * 由 `<Cover onOpen={...}>` 渲染（不传 onOpen 就没有这个按钮），
+ * 所以本季 / 时间表 / 追番 / 补番 / 日记 / 历程里的封面都能点 ——
+ * 它一开始只做在本季卡片里，别的页面点了没反应，而用户不会想到「换个页面就不能点」。
+ *
  * z-index 只给 1：徽标(2) 与星标(3) 要压在它上面，否则星标就点不着了。
  */
-.card__open {
+.cover__hot {
   position: absolute;
   inset: 0;
   z-index: 1;
@@ -833,7 +819,7 @@ html:not([data-frost='on']) .modal {
   background: transparent;
   cursor: pointer;
 }
-.card__open:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.cover__hot:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 
 .card__badge {
   position: absolute;
@@ -846,11 +832,11 @@ html:not([data-frost='on']) .modal {
   padding: 2px 7px;
   border-radius: 999px;
   background: rgba(10, 12, 18, 0.7);
-  font-size: 10.5px;
+  font-size: 0.84em;
   color: #fff;
   backdrop-filter: blur(4px);
 }
-.card__badge-late { font-style: normal; font-size: 9.5px; color: var(--accent-2); }
+.card__badge-late { font-style: normal; font-size: 0.76em; color: var(--accent-2); }
 
 .card__follow {
   position: absolute;
@@ -863,7 +849,7 @@ html:not([data-frost='on']) .modal {
   border: 1px solid rgba(255, 255, 255, 0.42);
   background: rgba(10, 12, 18, 0.55);
   color: #fff;
-  font-size: 12px;
+  font-size: 0.96em;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -881,7 +867,7 @@ html:not([data-frost='on']) .modal {
   border: 0;
   background: none;
   text-align: left;
-  font-size: 12.5px;
+  font-size: 1em;
   font-weight: 500;
   line-height: 1.4;
   color: var(--text);
@@ -893,7 +879,7 @@ html:not([data-frost='on']) .modal {
 }
 .card__title:hover { color: var(--accent); }
 
-.card__meta { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-3); margin-top: 3px; }
+.card__meta { display: flex; align-items: center; gap: 6px; font-size: 0.92em; color: var(--text-3); margin-top: 3px; }
 .card__score { color: var(--accent-2); font-weight: 600; font-variant-numeric: tabular-nums; }
 .card__flag { color: var(--text-3); }
 
@@ -909,10 +895,10 @@ html:not([data-frost='on']) .modal {
 }
 .weekcol--today { border-color: rgba(var(--accent-rgb), 0.55); box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.18); }
 .weekcol__head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
-.weekcol__name { font-size: 12px; font-weight: 600; }
+.weekcol__name { font-size: 0.96em; font-weight: 600; }
 .weekcol--today .weekcol__name { color: var(--accent); }
-.weekcol__date { font-size: 10.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.weekcol__empty { color: var(--text-3); font-size: 11.5px; text-align: center; padding: 10px 0; }
+.weekcol__date { font-size: 0.84em; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.weekcol__empty { color: var(--text-3); font-size: 0.92em; text-align: center; padding: 10px 0; }
 
 .slot {
   display: block;
@@ -929,10 +915,10 @@ html:not([data-frost='on']) .modal {
 .slot:hover { border-color: var(--line-2); transform: translateX(1px); }
 .slot--follow { border-color: rgba(var(--accent-2-rgb), 0.45); background: var(--accent-2-soft); }
 .slot--uncertain { opacity: 0.68; }
-.slot__time { display: flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--accent-2); font-weight: 600; font-variant-numeric: tabular-nums; }
-.slot__late { font-style: normal; font-size: 9.5px; color: var(--text-3); border: 1px solid var(--line); border-radius: 4px; padding: 0 3px; }
-.slot__name { display: block; font-size: 11.5px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.slot__ep { display: block; font-size: 10.5px; color: var(--text-3); }
+.slot__time { display: flex; align-items: center; gap: 4px; font-size: 0.92em; color: var(--accent-2); font-weight: 600; font-variant-numeric: tabular-nums; }
+.slot__late { font-style: normal; font-size: 0.76em; color: var(--text-3); border: 1px solid var(--line); border-radius: 4px; padding: 0 3px; }
+.slot__name { display: block; font-size: 0.92em; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slot__ep { display: block; font-size: 0.84em; color: var(--text-3); }
 
 /* ---------- 今日列表 ---------- */
 .day-list { display: flex; flex-direction: column; gap: 8px; }
@@ -988,17 +974,17 @@ html:not([data-frost='on']) .modal {
 .queue__row--hot { border-color: rgba(var(--ok-rgb), 0.42); background: var(--ok-soft); }
 
 .queue__cover { width: 40px; height: 56px; flex: 0 0 40px; border-radius: var(--r-sm); }
-.queue__cover .cover__glyph { font-size: 17px; }
+.queue__cover .cover__glyph { font-size: 1.36em; }
 
 .queue__info { flex: 1; min-width: 0; }
-.queue__title { font-size: 12.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.queue__sub { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+.queue__title { font-size: 1em; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue__sub { font-size: 0.92em; color: var(--text-3); margin-top: 2px; }
 
 .queue__count { text-align: right; min-width: 124px; }
-.queue__value { font-size: 22px; font-weight: 600; line-height: 1.15; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
-.queue__value--hot { color: var(--ok); font-size: 17px; }
-.queue__value--muted { color: var(--text-3); font-size: 15px; }
-.queue__unit { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.queue__value { font-size: 1.76em; font-weight: 600; line-height: 1.15; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
+.queue__value--hot { color: var(--ok); font-size: 1.36em; }
+.queue__value--muted { color: var(--text-3); font-size: 1.2em; }
+.queue__unit { font-size: 0.88em; color: var(--text-3); font-variant-numeric: tabular-nums; }
 
 .queue__ops { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 
@@ -1025,7 +1011,7 @@ html:not([data-frost='on']) .modal {
 .catchup__search { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .catchup__search .input { flex: 1; min-width: 0; }
 .catchup__cover { width: 38px; height: 54px; flex: 0 0 38px; border-radius: var(--r-sm); }
-.catchup__cover .cover__glyph { font-size: 16px; }
+.catchup__cover .cover__glyph { font-size: 1.28em; }
 .catchup__titlewrap { min-width: 0; flex: 1; }
 
 .catchup__title {
@@ -1033,7 +1019,7 @@ html:not([data-frost='on']) .modal {
   border: 0;
   background: none;
   text-align: left;
-  font-size: 12.5px;
+  font-size: 1em;
   font-weight: 500;
   line-height: 1.35;
   color: var(--text);
@@ -1045,15 +1031,15 @@ html:not([data-frost='on']) .modal {
   -webkit-box-orient: vertical;
 }
 .catchup__title:hover { color: var(--accent); }
-.catchup__eps { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+.catchup__eps { font-size: 0.92em; color: var(--text-3); margin-top: 2px; }
 
 .bar { height: 6px; border-radius: 3px; background: rgba(var(--text-rgb), 0.1); overflow: hidden; margin: 11px 0 9px; }
 .bar__fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.3s ease; }
 
 .catchup__meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.catchup__hint { font-size: 11px; color: var(--text-3); }
+.catchup__hint { font-size: 0.88em; color: var(--text-3); }
 .catchup__ops { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
-.catchup__deadline { display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 9px; font-size: 11px; color: var(--text-3); }
+.catchup__deadline { display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 9px; font-size: 0.88em; color: var(--text-3); }
 
 /* ---------- 补番概览小列表 ---------- */
 .mini-list { margin-top: 12px; display: flex; flex-direction: column; gap: 7px; }
@@ -1498,7 +1484,6 @@ html:not([data-frost='on']) .modal {
     height: auto !important;
     max-height: 74vh;
   }
-  .window__edge { display: none; }
   .weekgrid { grid-template-columns: repeat(7, 118px); overflow-x: auto; padding-bottom: 6px; }
   .settings { width: 100%; }
   .theme-grid { grid-template-columns: 1fr; }
@@ -1523,6 +1508,35 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
 
 .tier__bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tier__spacer { flex: 1 1 auto; }
+/*
+ * 导入备份前那一步的确认块。
+ * 用警告色描边而不是普通面板色：这一步按下去会覆盖用户所有的记录，
+ * 长得像「一个普通设置项」是不负责任的。
+ */
+.simport {
+  margin-top: 12px;
+  padding: 11px 13px;
+  border-radius: var(--r);
+  border: 1px solid rgba(var(--danger-rgb), 0.5);
+  background: rgba(var(--danger-rgb), 0.07);
+}
+.simport__head { margin: 0; font-size: 12.5px; font-weight: 600; }
+.simport__list {
+  list-style: none; margin: 9px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.simport__list li {
+  display: flex; gap: 10px; align-items: baseline;
+  font-size: 12px; color: var(--text-2);
+}
+/* 左列定宽：两行数字要能上下对齐，不然「哪行是哪个」还得靠读字 */
+.simport__list span { flex: 0 0 72px; color: var(--text-3); }
+.simport__list b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.simport .snote { margin-top: 9px; }
+
+/* 结果那一行（导入完成 / 失败）区别于普通说明：它是「刚刚发生了什么」 */
+.ssec__result { color: var(--text-2); font-weight: 500; }
+
 .tier__note { font-size: 11px; color: var(--text-2); }
 .tier__select { width: auto; min-width: 168px; }
 
@@ -1567,6 +1581,23 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
   width: 26px; height: 15px; padding: 0; border: none; border-radius: 4px;
   background: transparent; cursor: pointer;
 }
+/*
+ * 删档按钮。只在「自定义」下渲染（见 TierRow），所以不用管预设状态下的观感。
+ * 颜色跟着档位底色走（currentColor）：档位底色是用户自己选的，
+ * 深浅不一，写死一种颜色总有一档看不清。
+ */
+.tier-row__del {
+  width: 18px; height: 15px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 4px;
+  background: rgba(0, 0, 0, 0.22);
+  color: inherit;
+  font-size: 9px; line-height: 1;
+  cursor: pointer;
+  opacity: 0.75;
+}
+.tier-row__del:hover:not(:disabled) { opacity: 1; background: rgba(0, 0, 0, 0.42); }
+.tier-row__del:disabled { opacity: 0.3; cursor: not-allowed; }
 .tier-row__input {
   width: 84px; text-align: center; font-size: 12px; font-weight: 600;
   border-radius: 5px; border: 1px solid rgba(0, 0, 0, 0.25);

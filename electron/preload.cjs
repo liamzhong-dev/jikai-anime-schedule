@@ -47,12 +47,15 @@ contextBridge.exposeInMainWorld('jikai', {
 
   // 应用信息与系统集成
   appInfo: () => ipcRenderer.invoke('app:info'),
+  retryHardware: () => ipcRenderer.invoke('app:retry-hardware'),
   getAutoLaunch: () => ipcRenderer.invoke('autolaunch:get'),
   setAutoLaunch: (on) => ipcRenderer.invoke('autolaunch:set', on),
   setGlobalHotkey: (spec) => ipcRenderer.invoke('hotkey:set', spec),
   setTrayState: (payload) => ipcRenderer.invoke('tray:state', payload),
   saveTextFile: (payload) => ipcRenderer.invoke('file:save-text', payload),
   saveBinaryFile: (payload) => ipcRenderer.invoke('file:save-binary', payload),
+  readTextFile: () => ipcRenderer.invoke('file:read-text'),
+  writeBackup: (payload) => ipcRenderer.invoke('file:write-backup', payload),
 
   // 季度报告长图：渲染层拼好自包含 HTML，主进程在隐藏窗口里出 PDF / PNG 再落盘
   reportExport: (payload) => ipcRenderer.invoke('report:export', payload),

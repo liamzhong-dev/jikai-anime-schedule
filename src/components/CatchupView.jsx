@@ -75,7 +75,7 @@ export default function CatchupView({
         return (
           <div key={item.id} className={cls.join(' ')}>
             <div className="catchup__head">
-              <Cover anime={anime} className="catchup__cover" />
+              <Cover anime={anime} className="catchup__cover" onOpen={onOpen} />
               <div className="catchup__titlewrap">
                 <button type="button" className="catchup__title" onClick={() => onOpen(anime)}>
                   {anime.titleZh || anime.titleJa}

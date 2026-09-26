@@ -23,7 +23,7 @@ import { useCoverSrc } from './CoverContext.jsx';
  */
 export { hueOf, fallbackGradient } from '../core/palette.js';
 
-export default function Cover({ anime, className = '', children, style }) {
+export default function Cover({ anime, className = '', children, style, onOpen, openLabel }) {
   const title = anime?.titleZh || anime?.titleJa || '?';
   const glyph = title.slice(0, 1);
   const { cache, remote } = useCoverSrc(anime);
@@ -50,6 +50,31 @@ export default function Cover({ anime, className = '', children, style }) {
       ) : (
         <span className="cover__glyph">{glyph}</span>
       )}
+      {/*
+        整块封面就是「打开详情」的热区 —— 传了 onOpen 才有。
+        
+        ⚠️ 为什么做进 Cover，而不是在每个视图外面各铺一个按钮：
+        它一开始只做在本季卡片（AnimeCard）里，结果**只有那一个视图能点封面** ——
+        时间表、追番、补番、日记、历程里的封面全是死的，点上去毫无反应，
+        而用户根本不会想到「同样一张封面，换个页面就不能点了」。
+        「封面能点开详情」这件事在哪儿都该成立，所以收到这里来。
+        
+        做成**可选 prop**：不传就没有热区，因此抽屉、报告这些不需要的地方
+        （封面在那里只是个装饰/素材）不受影响 —— 早先把它写进组件里、
+        一改就顺带改掉其余六处的顾虑，靠这个默认关闭解决了。
+        
+        必须排在 children **之前**：徽标与星标要压在它上面，否则点星标会连带开详情。
+        也必须是**真的 <button>**：`div + onClick` 吃不到 Tab 与回车。
+      */}
+      {onOpen ? (
+        <button
+          type="button"
+          className="cover__hot"
+          data-cover-open={anime?.id ?? ''}
+          aria-label={openLabel ?? `打开《${title}》的详情`}
+          onClick={() => onOpen(anime)}
+        />
+      ) : null}
       {children}
     </div>
   );

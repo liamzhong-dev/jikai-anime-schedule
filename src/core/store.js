@@ -9,13 +9,14 @@
 import { platform } from '../platform/index.js';
 import { DEFAULT_THEME } from '../theme/themes.js';
 import { DEFAULT_WALLPAPER } from '../theme/applyTheme.js';
-import { CARD_MIN, clampCardMin } from './layout.js';
+import { CARD_MIN, FONT_SCALE, clampCardMin, clampFontScale } from './layout.js';
 import { DEFAULT_API } from '../data/bangumiApi.js';
 import { DEFAULT_SOURCE } from '../data/sources.js';
 import { BUILTIN_PRESETS, presetById } from './layoutPresets.js';
 import { addToGroup as addToGroupPure, defaultGroups, groupSummary, mergeSubjects, pickSubjects, removeFromGroup as removeFromGroupPure } from './library.js';
-import { makeDefaultTierlist, normalizeTierlist } from './tierlist.js';
-import { makeDefaultReport, normalizeReport } from './report.js';
+import { makeDefaultTierlist, normalizeTierlist, normalizeTierlists } from './tierlist.js';
+import { makeDefaultReport, normalizeReport, normalizeReports } from './report.js';
+import { EXPORTED_KEYS } from './transfer.js';
 import {
   addDiaryEntry as addDiaryEntryPure,
   removeDiaryEntry as removeDiaryEntryPure,
@@ -65,6 +66,7 @@ const DEFAULTS = {
     panelAlpha: 1,        // 卡片不透明度（壁纸要透出来时调低）
     wallpaper: { ...DEFAULT_WALLPAPER },
     cardMin: CARD_MIN.def, // 番剧网格一格的宽度（px）——「一屏塞几列」的档位
+    fontScale: FONT_SCALE.def, // 卡片里文字的大小倍率 —— 和 cardMin 配一对（一个管图、一个管字）
 
     api: { ...DEFAULT_API },
 
@@ -115,6 +117,8 @@ function mergeSettings(saved) {
     // 老存档里没有这个字段；被手改过的值也在这里夹回来，
     // 免得一个 3000px 的格宽让网格变成一列
     cardMin: clampCardMin(s.cardMin),
+    // 同上一条：老存档里没有这个字段，手改过的值也在这里夹回来
+    fontScale: clampFontScale(s.fontScale),
   };
 }
 
@@ -171,6 +175,63 @@ function snapshot() {
     settings: state.settings,
     cache: state.cache,
   };
+}
+
+// ---------- 备份与迁移 ----------
+
+/**
+ * 导出的来源：和 `snapshot()` 完全同一批字段。
+ *
+ * 复用它而不是另列一遍，是因为「哪些东西算用户的记录」这件事只该有一处定义。
+ * 但**要深拷**：直接把 state 里的对象递出去，用户接着在界面上改一下，
+ * 这边刚序列化好的备份就跟着变了。
+ */
+export function exportableState() {
+  return structuredClone(snapshot());
+}
+
+/**
+ * 用一份备份**整份替换**本机的状态。
+ *
+ * 为什么是替换而不是合并：这个功能的用途是「换台机器接着用」，
+ * 合并出来的结果没法预测 —— 同名作品两边都有时到底听谁的，
+ * 用户看不出也说不清，最后变成「导入完一半是旧的」。
+ * 替换只有一种结果：导入完和新机器上导出前**一模一样**。
+ *
+ * 代价是「本机已有的记录会没」——这一条由调用方负责：
+ * 覆盖之前必须先把现在的状态另存一份，并在界面上把两边的条数摆给用户看。
+ *
+ * ⚠️ 文件里没有的字段回**默认值**，不回本机的值。
+ * 备份是一份完整快照；回本机值的话，「文件里没有这一项」就变成了
+ * 「悄悄留着本机的旧数据」，那种半新半旧的状态最难排查。
+ */
+export function importState(raw, { nowMs = Date.now() } = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const next = { ...structuredClone(DEFAULTS) };
+
+  for (const k of EXPORTED_KEYS) {
+    if (k === 'settings') continue;
+    if (src[k] !== undefined) next[k] = structuredClone(src[k]);
+  }
+
+  next.settings = mergeSettings(src.settings);
+  /*
+   * 本机代理地址（形如 http://127.0.0.1:7890）**不跟着走**。
+   * 它是「这台机器上的那个口」，换台机器再原样写上去，最可能的结果是
+   * 每个请求都连不上，而界面上只表现为「数据源一直转圈」——
+   * 完全看不出是导入带过来的。用户到了新机器重设一次很简单，排查这个很难。
+   */
+  next.settings.api = { ...next.settings.api, proxy: '' };
+
+  // 读回来的东西一样要过修数据那一关：备份文件也是能被手改的
+  next.diary = normalizeDiary(next.diary);
+  next.tierlists = normalizeTierlists(next.tierlists, { nowMs });
+  next.reports = normalizeReports(next.reports, { nowMs });
+
+  state = next;
+  emit();
+  scheduleSave();
+  return state;
 }
 
 // ---------- 追番 ----------
@@ -418,13 +479,27 @@ export function patchTierlist(key, patch, { nowMs = Date.now() } = {}) {
   return next;
 }
 
-/** 清空一季度的排布（保留档位定义，只清图块） */
+/**
+ * 清空一季度的排布：**只清图块，档位定义留着**。
+ *
+ * ⚠️ 这里原来是 `makeDefaultTierlist(k, { presetId })` —— 把档位行也重置回预设。
+ * 有自定义档位之后那就是丢用户数据：按钮上写的是「清空」，
+ * 而用户辛苦改的档位名会被换回 TOP~DRUG，且没有任何提示。
+ * 所以改成「有这份表就留着它的 rows 和 presetId」。
+ *
+ * @param {string} key 季度
+ * @param {{ presetId?: string, nowMs?: number }} [opts] `presetId` 只在**还没有这份表**时用得上
+ */
 export function resetTierlist(key, { presetId, nowMs = Date.now() } = {}) {
   const k = String(key ?? '');
   if (!k) return null;
-  const fresh = makeDefaultTierlist(k, { presetId, nowMs });
-  update((s) => ({ ...s, tierlists: { ...(s.tierlists ?? {}), [k]: fresh } }));
-  return fresh;
+  const base = readTierlist(k);
+  const fresh = base
+    ? { ...base, items: [], updatedAt: nowMs }
+    : makeDefaultTierlist(k, presetId ? { presetId } : { nowMs });
+  const next = normalizeTierlist(fresh, { seasonKey: k, nowMs });
+  update((s) => ({ ...s, tierlists: { ...(s.tierlists ?? {}), [k]: next } }));
+  return next;
 }
 
 /** 哪些季度排过（界面上给个「已排 N 个季度」用） */

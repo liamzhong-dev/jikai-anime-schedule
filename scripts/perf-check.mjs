@@ -107,16 +107,16 @@ if (jsonOnly) {
 /** 帧间隔换算成「大概多少 fps」，比毫秒直观 */
 const fps = (ms) => (ms > 0 ? Math.round(1000 / ms) : 0);
 
-const SCENARIO = { idle: '空闲', scroll: '滚动番剧库', typing: '连续输入搜索词', drawer: '详情抽屉' };
+const SCENARIO = { idle: '空闲', scroll: '滚动番剧库', typing: '连续输入搜索词', drawer: '详情抽屉', hover: '鼠标扫过卡片' };
 const VARIANT = {
   '': '原样',
   _frostOn: '强行开毛玻璃',
   _noBlur: '全关（理论上限）',
 };
 
-const ORDER = ['idle', 'scroll', 'typing', 'drawer',
+const ORDER = ['idle', 'scroll', 'typing', 'drawer', 'hover',
   'scroll_frostOn', 'typing_frostOn', 'drawer_frostOn',
-  'scroll_noBlur', 'typing_noBlur', 'drawer_noBlur'];
+  'scroll_noBlur', 'typing_noBlur', 'drawer_noBlur', 'hover_noBlur'];
 
 /** 中文在等宽字体里占两格，padEnd 按字符数算会歪 —— 自己按显示宽度补 */
 const width = (s) => [...String(s)].reduce((n, c) => n + (c.codePointAt(0) > 0x2e80 ? 2 : 1), 0);
@@ -176,6 +176,27 @@ check(Number(perf.idle?.frames) > 5, `空闲场景只采到 ${perf.idle?.frames}
  * 而那正是把滚动从 60fps 打到 13fps 的那个改动。
  */
 check(perf.frost === 'off', `期望 data-frost=off（无壁纸 + 面板不透明），实际 ${perf.frost} —— 不可见的毛玻璃又被打开了？`);
+
+/*
+ * hover 这一组必须量到了东西。
+ *
+ * ⚠️ 这是最容易变成「空气断言」的一组：扫动是由主进程发真实鼠标事件驱动的，
+ * 只要窗口位置、网格位置、坐标系有一处没对上，鼠标就一直在空白处划 ——
+ * 帧数据照样很漂亮（因为什么都没干），而结论完全是假的。
+ * `hovered` 是渲染层数的「这次扫动换过几次卡片命中」，它才是这一组的前提。
+ */
+if (perf.hover) {
+  check(
+    Number(perf.hover.hovered) > 0,
+    `鼠标扫过卡片的那一组，一次卡片命中都没有（hovered=0）—— 鼠标划在空白处，这组数字不能说明任何事`,
+  );
+  check(
+    Number(perf.hover.frames) > 10,
+    `hover 场景只采到 ${perf.hover.frames} 帧，采样太短`,
+  );
+} else {
+  check(false, '没量到 hover 场景 —— 探针没落回网格上，或者主进程那段扫动没跑起来');
+}
 
 if (failures.length) {
   console.error('');

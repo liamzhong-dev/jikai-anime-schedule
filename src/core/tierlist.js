@@ -93,6 +93,140 @@ export const PRESET_ROW_GROUPS = [
 export const SCORE_THRESHOLDS = [8, 7.5, 7, 6.5, 6, 5];
 
 /**
+ * 「自定义」**不是一套档位行**，只是「这份表已经不是任何一个预设了」的标记。
+ *
+ * 所以它不进 `PRESET_ROW_GROUPS`：那里每一项都要自带 `rows`，
+ * 而自定义的行就存在这份 tierlist 自己的 `rows` 里。
+ * 混进去的话，「换档位组」那条分支会拿着一份空行去覆盖用户改好的表。
+ */
+export const CUSTOM_PRESET_ID = 'custom';
+
+/** 档位行数上下限。上限是排版撑不住，下限是「只有一档」的 Tier List 没有意义 */
+export const ROW_LIMITS = { min: 2, max: 12 };
+
+/** 档位名的长度上限：粘一整段话进来会把那一列撑爆，预览和导出都得跟着崩 */
+export const ROW_LABEL_MAX = 24;
+
+/**
+ * 新档位的颜色轮转。
+ *
+ * 单独一张表，不从 `DEFAULT_ROWS` 里取 —— 以后改默认档位的配色
+ * （比如换成别的色系），不该顺带改掉「加一档」时给的颜色。
+ */
+const NEW_ROW_COLORS = ['#ff7f7f', '#ffbf7f', '#ffdf7f', '#bfff7f', '#7fbfff', '#bf7fff', '#d0d0d0', '#7fd4c1'];
+
+/** 这份表还是不是某个预设 */
+export function isCustomPreset(presetId) {
+  return String(presetId ?? '') === CUSTOM_PRESET_ID;
+}
+
+/** 档位名洗一遍：去掉首尾空白、压掉换行、截到上限。空的内退回兜底名 */
+export function cleanRowLabel(label, fallback = '新档') {
+  const s = String(label ?? '').replace(/\s+/g, ' ').trim().slice(0, ROW_LABEL_MAX);
+  return s || fallback;
+}
+
+const HEX_COLOR = /^#([0-9a-fA-F]{6})$/;
+const HEX_SHORT = /^#([0-9a-fA-F]{3})$/;
+
+/**
+ * 认一个颜色，认不出给中性灰。
+ *
+ * 三位简写 `#fff` 展开成六位：`<input type="color">` 只吃六位，
+ * 存档里留着简写的话，取色器会显示成灰的、用户一碰就把颜色改错。
+ * 八位带 alpha 的不收：档位底色必须是实色，透明下去行里的白字就看不清了。
+ */
+export function cleanRowColor(color, fallback = '#9aa0a6') {
+  const s = String(color ?? '').trim();
+  if (HEX_COLOR.test(s)) return s.toLowerCase();
+  const short = HEX_SHORT.exec(s);
+  if (short) return `#${short[1][0].repeat(2)}${short[1][1].repeat(2)}${short[1][2].repeat(2)}`.toLowerCase();
+  return fallback;
+}
+
+/**
+ * 下一个可用的行 id。
+ *
+ * 从 `r<n>` 里取最大编号往后接，并**避开已经占用的**——
+ * 自定义到一半又换回预设时，行 id 会重新变成 r1~r7，
+ * 直接 `r8` 下去没错，但「删了中间几档再加」就有可能撞上。
+ */
+export function nextRowId(rows) {
+  const used = new Set((Array.isArray(rows) ? rows : []).map((r) => String(r?.id ?? '')));
+  let max = 0;
+  for (const id of used) {
+    const m = /^r(\d+)$/.exec(id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  let n = max + 1;
+  while (used.has(`r${n}`)) n += 1;
+  return `r${n}`;
+}
+
+/**
+ * 加一档。`afterId` 给了就插在它后面，否则挂到最后。
+ *
+ * @returns {{ rows: object[], added: object|null }} 到上限时 `added` 为 null、rows 原样返回
+ */
+export function addRow(rows, { afterId = null, label = '', color = '' } = {}) {
+  const list = cloneRows(rows);
+  if (list.length >= ROW_LIMITS.max) return { rows: list, added: null };
+
+  const id = nextRowId(list);
+  const row = {
+    id,
+    label: cleanRowLabel(label, `新档 ${list.length + 1}`),
+    color: cleanRowColor(color, NEW_ROW_COLORS[list.length % NEW_ROW_COLORS.length]),
+  };
+  const at = list.findIndex((r) => r.id === String(afterId));
+  if (at >= 0) list.splice(at + 1, 0, row);
+  else list.push(row);
+  return { rows: list, added: row };
+}
+
+/**
+ * 删一档。
+ *
+ * ⚠️ 这里**只管行**，图块由 `unassignRow` 接手放回素材池 ——
+ * 两件事分开是因为调用方必须**两个都做**：只删行的话，`items` 里指向它的图块
+ * 会变成悬空引用（`normalizeTierlist` 读盘时会把它们丢掉，等于静默删数据）。
+ *
+ * @returns {{ rows: object[], removed: object|null }} 到下限时 `removed` 为 null
+ */
+export function removeRow(rows, rowId) {
+  const list = cloneRows(rows);
+  if (list.length <= ROW_LIMITS.min) return { rows: list, removed: null };
+  const at = list.findIndex((r) => r.id === String(rowId));
+  if (at < 0) return { rows: list, removed: null };
+  const [removed] = list.splice(at, 1);
+  return { rows: list, removed };
+}
+
+/** 改档位名 */
+export function setRowLabel(rows, rowId, label) {
+  const want = String(rowId);
+  return cloneRows(rows).map((r) => (r.id === want ? { ...r, label: cleanRowLabel(label, r.label) } : r));
+}
+
+/** 改档位颜色 */
+export function setRowColor(rows, rowId, color) {
+  const want = String(rowId);
+  return cloneRows(rows).map((r) => (r.id === want ? { ...r, color: cleanRowColor(color, r.color) } : r));
+}
+
+/**
+ * 把某一档里的图块全放回素材池。
+ *
+ * 做法是把它们从 `items` 里**摘掉** —— 素材池显示的是「不在 items 里的条目」，
+ * 摘掉就等于回去了。注意这不是「删图块」：用户点的是「删这一档」，
+ * 顺带把他排好的十几部番一起删掉，是这个界面能做的最糟的事。
+ */
+export function unassignRow(items, rowId) {
+  const want = String(rowId);
+  return (Array.isArray(items) ? items : []).filter((it) => String(it?.rowId) !== want);
+}
+
+/**
  * Chromium canvas 的硬上限（实测，不是估的）：
  * 单边 16384 像素、面积约 2.68 亿像素。超了 `toBlob()` 直接返回空图。
  */
@@ -153,8 +287,10 @@ export function normalizeTierlist(raw, { seasonKey = null, nowMs = Date.now() } 
         .filter((r) => r && r.id)
         .map((r, i) => ({
           id: String(r.id),
-          label: String(r.label ?? `档位 ${i + 1}`),
-          color: /^#[0-9a-fA-F]{3,8}$/.test(String(r.color ?? '')) ? r.color : '#9aa0a6',
+          // 读盘时也过一遍 cleanRowLabel / cleanRowColor：写出去的已经洗过了，
+          // 但存档是能被手改的，而「多长算长」这个规矩只该有一处定义。
+          label: cleanRowLabel(r.label, `档位 ${i + 1}`),
+          color: cleanRowColor(r.color),
         }))
     : cloneRows(DEFAULT_ROWS);
 
@@ -188,8 +324,25 @@ export function normalizeTierlist(raw, { seasonKey = null, nowMs = Date.now() } 
   };
 }
 
-// ===================== 查询 =====================
+/**
+ * 整个「季度 → 档位表」映射的归一化。
+ *
+ * 和 report.js 的 `normalizeReports` 是一对：导入备份、读盘都用它 ——
+ * 备份文件是能被手改的，而一份脏的 tierlists 会带着悬空的 rowId 进 state，
+ * 到界面那一步才炸（渲染时按 rowId 过滤，什么也不显示，看着像「排的东西丢了」）。
+ */
+export function normalizeTierlists(raw, { nowMs = Date.now() } = {}) {
+  const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const out = {};
+  for (const [key, value] of Object.entries(src)) {
+    const k = String(key ?? '').trim();
+    if (!k) continue;
+    out[k] = normalizeTierlist(value, { seasonKey: k, nowMs });
+  }
+  return out;
+}
 
+// ===================== 查询 =====================
 /** 某一档里的图块，按数组顺序 */
 export function itemsOfRow(items, rowId) {
   const want = String(rowId);

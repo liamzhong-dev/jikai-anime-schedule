@@ -130,7 +130,7 @@ export default function HistoryView({
                 <div className="history__spine">
                   <i className={`history__dot history__dot--${e.kind}`} />
                 </div>
-                <Cover anime={e.anime} className="history__cover" />
+                <Cover anime={e.anime} className="history__cover" onOpen={e.anime ? onOpen : undefined} />
                 <div className="history__main">
                   <button
                     type="button"

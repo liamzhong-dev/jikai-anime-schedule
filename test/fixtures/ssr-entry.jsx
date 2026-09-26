@@ -76,10 +76,22 @@ export async function renderCatchup({ rows = [], ...props } = {}) {
 /**
  * 渲染设置面板，只为验证标签栏 —— 尤其是「本地库」这一项真的挂上了。
  * 面板内部那一页由 renderLibrary 单独验。
+ *
+ * `settings` 透传：外观页的「卡片显示」两档要能喂越界值进来，
+ * 验的是「界面上显示的是夹过的值」，不是「代码里夹了」。
  */
-export async function renderSettingsTabs() {
+export async function renderSettingsTabs({ settings = {}, transfer, appInfo, defaultTab = 'look' } = {}) {
   await prepare();
-  return renderToStaticMarkup(<SettingsPanel open themeId="midnight" settings={{}} />);
+  return renderToStaticMarkup(
+    <SettingsPanel
+      open
+      themeId="midnight"
+      settings={settings}
+      defaultTab={defaultTab}
+      {...(transfer ? { transfer } : {})}
+      {...(appInfo ? { appInfo } : {})}
+    />,
+  );
 }
 
 /**
@@ -158,11 +170,11 @@ export async function renderCatchupWithDiary(rows = [], { ratingOf = () => null,
  * 在桌面壳和浏览器壳里的行为**故意不一样**（桌面壳不许退回直连，否则会下两遍）。
  * 这个分叉只能靠真的渲一遍才看得出来。
  */
-export async function renderCover({ anime, images = {}, allowRemote = true } = {}) {
+export async function renderCover({ anime, images = {}, allowRemote = true, onOpen, openLabel } = {}) {
   await prepare();
   return renderToStaticMarkup(
     <CoverProvider images={images} allowRemote={allowRemote}>
-      <Cover anime={anime} />
+      <Cover anime={anime} onOpen={onOpen} openLabel={openLabel} />
     </CoverProvider>,
   );
 }

@@ -45,6 +45,19 @@ const SMOKE_PNG = process.env.JIKAI_SMOKE || '';
 const IPC_SMOKE = process.env.JIKAI_IPC_SMOKE === '1';
 
 /**
+ * 「再试一次硬件加速」那条链的自检口子：`JIKAI_SMOKE_RETRYHW=<标记文件路径>`。
+ *
+ * 这是唯一一个会**主动重启程序**的按钮，而重启这种事没法靠读代码相信 ——
+ * 它得真的走完：① 用户点下去 → ② 主进程清掉降级标记 → ③ 新的一份真的起来了。
+ * 所以专门给它一条能执行的路：重启后的那一份凭 argv 里的标记认出自己，
+ * 往这个文件写一行就退出。
+ *
+ * ⚠️ 标记文件而不是 stdout：新起来的进程**不继承输出管道**，打出来的字到不了终端
+ * —— 自愈那条链就是这么被误判过一次的（见 createWindow 里 CRASH_TEST 那段注释）。
+ */
+const RETRYHW_PROBE = process.env.JIKAI_SMOKE_RETRYHW || '';
+
+/**
  * 自检模式下把 GPU 关掉。
  *
  * 这台机器（以及大多数无头/远程会话）的 GPU 进程起不来，表现是
@@ -182,6 +195,16 @@ if (RETRIED) {
 }
 
 /**
+ * 「再试一次硬件加速」重启出来的那一份，靠这个标记认出自己。
+ *
+ * ⚠️ 不能复用上面那个 `--no-sandbox-retry`：它带着一整套「自愈重开」的副作用
+ * （关 GPU、关沙盒），而这一份要验的恰恰是「换回硬件加速之后能不能起来」——
+ * 拿一个自己把 GPU 关掉的进程去验它，等于什么都没验。
+ */
+const RETRYHW_FLAG = '--retryhw-retried';
+const RETRYHW_RETRIED = process.argv.includes(RETRYHW_FLAG);
+
+/**
  * 单实例锁：**在这里拿，不是在文件末尾**。
  *
  * ⚠️ 位置很要紧。抢不到锁的进程会在文件末尾 `app.quit()`，可下面那个
@@ -197,6 +220,42 @@ if (RETRIED) {
  * 也必须在 ready 之前（这是 Electron 允许的时机）。
  */
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+/*
+ * 把「这份程序正开着」写进 userData。
+ *
+ * 自检脚本靠它找到并关掉这个进程：应用是单实例的，用户开着窗口的时候
+ * 自检起不来、直接退，报出来的症状却是「窗口没起来」，很容易查错方向。
+ *
+ * ⚠️ 为什么不用「枚举进程、按命令行认人」：本机 sandbox 里 Node spawn 任何外部
+ * 可执行体都是 EBUSY，那条路静默返回空列表 —— 看着像「一个都没找到」，
+ * 其实什么都没查。让程序自己声明身份就没有这个问题，也不用去猜路径。
+ *
+ * ⚠️ 只在**拿到锁**之后写（没拿到锁的那一份马上要退了，不该覆盖真正在跑的那条记录）。
+ * 正常退出时删掉；被强杀时留着，下次读到「pid 已经不存在」就顺手清掉。
+ */
+const PID_FILE = 'singleton.json';
+function writePidFile() {
+  try {
+    fs.writeFileSync(
+      path.join(app.getPath('userData'), PID_FILE),
+      JSON.stringify({ pid: process.pid, at: Date.now() }),
+      'utf8',
+    );
+  } catch { /* 写不进去只是自检关不掉我们，不该拦住启动 */ }
+}
+function clearPidFile() {
+  try { fs.unlinkSync(path.join(app.getPath('userData'), PID_FILE)); } catch { /* 本来就没有 */ }
+}
+/*
+ * ⚠️ `app.exit()` **不走** will-quit 那套流程，自检和冒烟里全是 `app.exit()` ——
+ * 只挂 will-quit 的话，每次跑完自检都会留下一份 pid 文件。
+ * 留着本身没害（下次读到「pid 已经不存在」会自己清掉），但它会让人分不清
+ * 「真有一份开着」和「上次没清干净」，而这正是这个功能最不该含糊的地方。
+ */
+process.on('exit', clearPidFile);
+process.on('SIGINT', () => { clearPidFile(); process.exit(0); });
+process.on('SIGTERM', () => { clearPidFile(); process.exit(0); });
 
 /**
  * 启动崩溃记忆器（计划 G5）。
@@ -218,8 +277,43 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
  * 降级结果会被**记住**：否则每次都「先正常试一次 → 崩 → 降级成功 → 又想试正常」，
  * 用户每开一次都要先看一次崩溃。
  */
+/**
+ * 攒够几次「健康启动」才敢把降级清掉。
+ *
+ * 一次就清的话，「崩 → 降级 → 起来 → 又试硬件加速 → 又崩」会变成每次开机都演一遍，
+ * 用户看到的是「这软件怎么老闪退」。攒两次是个折中：偶发崩溃能自己恢复，
+ * 真的起不来的一直留着降级。
+ */
+const HEALTHY_TO_RECOVER = 2;
+
+/**
+ * 最多自动恢复几次。
+ *
+ * 没有这个上限，「恢复 → 崩 → 降级 → 恢复 → 崩」会一直来回 ——
+ * 每三轮浪费用户两次启动。试过 3 次还不行，就认了：这台机器就是只能用软件渲染。
+ */
+const MAX_GPU_RECOVERIES = 3;
+
 const boot = (() => {
+  /*
+   * ⚠️ 默认**一个字都不许写**：不带 `--profile` 的那几条自检用的就是**用户的真实档案**
+   * （有一条路必须用真实档案 —— 要验「封面到底走没走缓存」）。于是自检崩一次，
+   * `degrade: true` 就写进了用户本人的档案：从此他每次打开都是软件渲染、界面发涩，
+   * 而没有任何地方能指向「是那次自检干的」。本机真的踩到过。
+   *
+   * 但判据是「这次跑的是不是一次性档案」，不是「这是不是自检」——
+   * 后者连 boot 状态机自己也一起挡死了（`JIKAI_USERDATA` 指的就是一次性目录，
+   * 往那儿写再多也不关用户的事），换来的只是**这套状态机彻底没法验证**：
+   * 它只有「真崩一次」才会走到下一格，而崩溃不能按需重演。
+   * 「degrade 永不复位」这个毛病就是这么漏到用户手上的。
+   */
+  const HAS_OWN_PROFILE = Boolean(process.env.JIKAI_USERDATA);
+  const SELF_CHECK = !HAS_OWN_PROFILE
+    && Boolean(SMOKE_PNG || IPC_SMOKE || process.env.JIKAI_PERF
+      || process.env.JIKAI_CRASH_TEST || process.env.JIKAI_BOOT_PROBE);
+
   const tryPath = () => {
+    if (SELF_CHECK) return '';
     try {
       return path.join(app.getPath('userData'), 'boot.json');
     } catch {
@@ -235,8 +329,16 @@ const boot = (() => {
       return {};
     }
   };
+  /**
+   * 这个进程往 boot.json 写过几次。
+   *
+   * 留着它是为了能断言「自检一个字都没写」—— 判「盘上有没有这个文件」不行，
+   * 那依赖跑之前的状态（用户档案里本来就有一份）。次数不依赖任何外部状态。
+   */
+  let writes = 0;
   const write = (patch) => {
     if (!file) return;
+    writes += 1;
     try {
       fs.writeFileSync(file, JSON.stringify({ ...read(), ...patch }), 'utf8');
     } catch { /* 记不住就算了，不影响启动 */ }
@@ -245,27 +347,98 @@ const boot = (() => {
   const prev = read();
   // 上一次留着 started（没走到 healthy）＝ 上次没起来就死了
   const crashedLastTime = prev.phase === 'started';
-  const shouldDegrade = crashedLastTime || prev.degrade === true;
+  /*
+   * `JIKAI_FORCE_DEGRADE=1`：强制降级跑一次，用来做 A/B ——
+   * 「用户觉得卡」和「硬件加速关掉了」这两件事到底是不是同一件事，
+   * 只有把同一组性能场景在两种渲染模式下各量一遍才答得了。
+   * 只影响这一次运行，不写档。
+   */
+  const forced = process.env.JIKAI_FORCE_DEGRADE === '1';
+  const shouldDegrade = forced || crashedLastTime || prev.degrade === true;
   /*
    * ⚠️ 抢不到锁就**一个字都不许写**：这个进程马上会 quit，它写下的东西
    * 会被下一次真正的启动当成「上次崩了」的证据。见上面单实例锁那一段。
    */
   if (hasSingleInstanceLock) {
-    if (crashedLastTime) write({ degrade: true });
+    /*
+     * 崩过就把健康次数**清零**再数。
+     *
+     * 不清的话 streak 就成了「这辈子一共健康过几次」：装了半年的档早就 ≥ 2，
+     * 于是「崩 → 降级一次 → 立刻恢复 → 又崩 → 又降级一次」会变成每次开机都闪一下，
+     * HEALTHY_TO_RECOVER 那一整套「攒够才敢信」等于白写。
+     * 清零之后语义才是想要的：**降级期间连续健康两次**才敢把硬件加速放回来。
+     */
+    if (crashedLastTime) write({ degrade: true, healthyStreak: 0 });
     write({ phase: 'started' });
   }
 
   return {
     shouldDegrade: shouldDegrade && hasSingleInstanceLock,
     crashedLastTime,
-    /** 窗口真的显示出来了调用一次，把标记抹掉 */
-    healthy: () => write({ phase: 'healthy' }),
+    forced,
+    selfCheck: SELF_CHECK,
+    writes: () => writes,
+    /** 这一次启动用的是不是软件渲染（设置面板要把它显示出来） */
+    degradedNow: shouldDegrade && hasSingleInstanceLock,
+    /**
+     * 窗口真的显示出来了调用一次，把标记抹掉。
+     *
+     * ⚠️ 这里同时是「降级该怎么退出」的唯一出口。原来只写 `phase: 'healthy'`，
+     * 于是一次崩溃留下的 `degrade: true` **永久生效** —— 用户从此一直软件渲染、
+     * 界面发涩，而且没有任何地方能把状态改回来。
+     */
+    healthy: () => {
+      if (SELF_CHECK) return;
+      const cur = read();
+      const streak = (Number(cur.healthyStreak) || 0) + 1;
+      const recoveries = Number(cur.recoveries) || 0;
+      if (cur.degrade === true && streak >= HEALTHY_TO_RECOVER && recoveries < MAX_GPU_RECOVERIES) {
+        write({
+          phase: 'healthy',
+          degrade: false,
+          healthyStreak: 0,
+          recoveries: recoveries + 1,
+          recoveredAt: Date.now(),
+        });
+        return;
+      }
+      write({ phase: 'healthy', healthyStreak: streak });
+    },
+    /** 让用户手动「再试一次硬件加速」：清掉降级并把恢复次数清零 */
+    retryHardware: () => {
+      write({ degrade: false, healthyStreak: 0, recoveries: 0, retriedAt: Date.now() });
+      return read();
+    },
+    /** 给设置面板看的当前状态 */
+    state: () => read(),
   };
 })();
 
 if (boot.shouldDegrade) {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu-sandbox');
+}
+
+/**
+ * `JIKAI_BOOT_PROBE=<crash|healthy>` —— 把 boot 的状态机从「只有真启动才走一遍」
+ * 变成「可以一步一步走」，给 `check:boot` 用（配合 `JIKAI_USERDATA` 指一次性目录）。
+ *
+ * 为什么非要有这个口子：这套状态机只有真的崩一次才会走到下一格，而崩溃没法按需重演。
+ * 于是「degrade 一旦写进去就永久生效」这个毛病从开发到发版一路没人发现 ——
+ * 用户那边只表现为「有点卡」，没有任何线索指向 `boot.json`。
+ *   crash   —— 什么都不做就退出，留下 `phase: 'started'`（＝模拟「上次没起来就死了」）
+ *   healthy —— 走一次正常启动该走的那一步
+ */
+const BOOT_PROBE = process.env.JIKAI_BOOT_PROBE || '';
+if (BOOT_PROBE) {
+  if (BOOT_PROBE === 'healthy') boot.healthy();
+  console.log(`BOOT_PROBE ${JSON.stringify({
+    probe: BOOT_PROBE,
+    shouldDegrade: boot.shouldDegrade,
+    writes: boot.writes(),
+    snap: boot.state(),
+  })}`);
+  app.exit(0);
 }
 
 /** 外链白名单：只允许 http/https，避免被 file:// 或自定义协议劫持 */
@@ -447,6 +620,36 @@ function createWindow() {
   if (SMOKE_PNG) {
     win.webContents.once('did-finish-load', async () => {
       try {
+        /*
+         * 重启过来的那一份：**认出自己就走人**。
+         *
+         * ⚠️ 必须排在所有探测之前（截图、点击、性能都不该再跑一遍）——
+         * 它唯一的使命是「证明自己起来了」，写一行标记就退。
+         */
+        if (RETRYHW_PROBE && RETRYHW_RETRIED) {
+          try {
+            fs.writeFileSync(RETRYHW_PROBE, `${JSON.stringify({ pid: process.pid, up: true })}\n`, 'utf8');
+          } catch { /* 写不了就按「没起来」算，脚本会把它报出来 */ }
+          app.exit(0);
+          return;
+        }
+
+        /*
+         * 第一份：替用户按一次「再试一次硬件加速」。
+         *
+         * ⚠️ 这一句是它留在这个世界上的最后一句话：`app.exit()` 是同步的，
+         * 主进程一收到这个 invoke 就立刻退，**返回值永远回不到这里**。
+         * 所以判据只能是「我按了」＋「外面看到的那些变化」，不能等它的返回值。
+         */
+        if (RETRYHW_PROBE) {
+          console.log(`SMOKE_RETRYHW_CALL ${JSON.stringify({ pid: process.pid })}`);
+          win.webContents.executeJavaScript('window.jikai.retryHardware()').catch(() => {});
+          await new Promise((r) => setTimeout(r, 3000));
+          console.log('SMOKE_FAIL 按了「再试一次」之后程序没有重启（进程还活着）');
+          app.exit(1);
+          return;
+        }
+
         // 等久一点可以顺便观察封面缓存有没有真的长起来（预热是后台跑的）
         const waitMs = Number(process.env.JIKAI_SMOKE_WAIT || 3000);
         await new Promise((r) => setTimeout(r, Number.isFinite(waitMs) ? waitMs : 3000));
@@ -492,6 +695,232 @@ function createWindow() {
           }
           // 等防抖（400ms）真的把状态写出去
           await new Promise((r) => setTimeout(r, 2000));
+        }
+
+        /*
+         * ---------- 点封面打开详情：JIKAI_SMOKE_CARDOPEN=1 ----------
+         *
+         * 为什么非得用主进程的 sendInputEvent，而不是在页面里给元素派发一个 click：
+         * 前者走 Chromium 真正的命中测试与输入管线 —— 封面上盖着别的东西时，
+         * 点到的就是那个东西；后者是「把事件直接塞给这个元素」，哪怕有东西压在上面
+         * 也照样成功。于是「用户点不开」这类 bug 在自检里永远是绿的，这正是它漏到现在的原因。
+         *
+         * 顺带记下 elementFromPoint 的命中链：真出了遮挡，一眼能看出是谁盖的。
+         */
+        const CARDOPEN = process.env.JIKAI_SMOKE_CARDOPEN || '';
+        if (CARDOPEN) {
+          const nap = (ms) => new Promise((r) => setTimeout(r, ms));
+          const before = await win.webContents
+            .executeJavaScript(
+              `(() => {
+                 const btn = document.querySelector('[data-cover-open]');
+                 if (!btn) return { found: 0 };
+                 const r = btn.getBoundingClientRect();
+                 const cx = Math.round(r.left + r.width / 2);
+                 const cy = Math.round(r.top + r.height / 2);
+                 const top = document.elementFromPoint(cx, cy);
+                 const path = [];
+                 let el = top;
+                 while (el && path.length < 5) {
+                   const cn = (el.className && typeof el.className === 'string')
+                     ? '.' + el.className.trim().split(/\\s+/).join('.')
+                     : '';
+                   path.push(el.tagName.toLowerCase() + cn);
+                   el = el.parentElement;
+                 }
+                 return {
+                   found: 1,
+                   box: Math.round(r.left) + ',' + Math.round(r.top) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height),
+                   cx: cx,
+                   cy: cy,
+                   hit: top ? (typeof top.className === 'string' && top.className ? top.className : top.tagName) : null,
+                   /*
+                    * ⚠️ 判「点到的是不是热区」**看 data 属性，不看类名**。
+                    * 这里原来比的是类名 card__open，后来热区从卡片搬到共用的
+                    * <Cover> 上、类名跟着改成 cover__hot，断言就悄悄失效了 ——
+                    * 它不会报错，只会永远红（或者更糟：有人把名字改回去让它变绿）。
+                    * 类名是给人看的外观，data 属性才是这条自检认的接口。
+                    *
+                    * ⚠️ 这段是模板字符串，**注释里也不能出现反引号** —— 一出现就把
+                    * 整段 JS 提前截断，报的是语法错，看不出是注释的问题。
+                    */
+                   hitOpen: !!(top && top.closest && top.closest('[data-cover-open]')),
+                   hitOpenId: (top && top.closest && top.closest('[data-cover-open]')?.getAttribute('data-cover-open')) || null,
+                   path: path,
+                   openBefore: document.querySelectorAll('.drawer__panel').length,
+                 };
+               })()`,
+            )
+            .catch((e) => ({ error: String(e?.message ?? e) }));
+
+          let after = null;
+          if (before && before.found) {
+            win.webContents.sendInputEvent({ type: 'mouseMove', x: before.cx, y: before.cy });
+            await nap(80);
+            win.webContents.sendInputEvent({ type: 'mouseDown', x: before.cx, y: before.cy, button: 'left', clickCount: 1 });
+            await nap(80);
+            win.webContents.sendInputEvent({ type: 'mouseUp', x: before.cx, y: before.cy, button: 'left', clickCount: 1 });
+            await nap(800);
+            after = await win.webContents
+              .executeJavaScript(
+                `(() => {
+                   const p = document.querySelector('.drawer__panel');
+                   return {
+                     panel: document.querySelectorAll('.drawer__panel').length,
+                     drawerId: p ? p.getAttribute('data-drawer-id') : null,
+                     title: (document.querySelector('.drawer__title') || {}).textContent || null,
+                   };
+                 })()`,
+              )
+              .catch((e) => ({ error: String(e?.message ?? e) }));
+            // 收拾干净：后面的场景不该在遮罩底下跑
+            await win.webContents
+              .executeJavaScript(`(() => { const c = document.querySelector('.drawer__close'); if (c) c.click(); return 1; })()`)
+              .catch(() => null);
+            await nap(300);
+          }
+          console.log(`SMOKE_CARDOPEN ${JSON.stringify({ before, after })}`);
+        }
+
+        /*
+         * ---------- 鼠标扫过卡片网格：JIKAI_PERF=1 时才跑 ----------
+         *
+         * 「卡」最可能藏在两处，而这两处都只能由主进程来量：
+         *   ① 卡片 hover 时的 transform + 阴影（82 张卡，每移过去一张就重绘一层）；
+         *   ② 徽标与星标上的 backdrop-filter: blur(4px) —— 它们**不在** data-frost 名单里，
+         *      理由写在 styles.css 里（底下压着封面原图、模糊看得见、当时实测几乎不花帧）。
+         *      「当时」是多久以前？所以这里顺手做一次 A/B：同一段扫动，
+         *      把 backdrop-filter 全关掉再量一遍。数字说话，不靠记忆。
+         *
+         * ⚠️ 不能用派发鼠标事件来假装 hover。CSS 的 :hover 认的是**真实命中状态**，
+         * 派发 mouseover 事件改不了它 —— 那样量出来的「hover 场景」里一个卡片都没 hover。
+         * 所以扫动由主进程发 `sendInputEvent({type:'mouseMove'})`，采帧的活交给渲染层。
+         */
+        let perfHover = null;
+        if (process.env.JIKAI_PERF) {
+          const nap = (ms) => new Promise((r) => setTimeout(r, ms));
+          const gridBox = await win.webContents
+            .executeJavaScript(
+              `(() => {
+                 const g = document.querySelector('.cardgrid') || document.querySelector('.queue') || document.querySelector('.board');
+                 if (!g) return { ok: 0 };
+                 const r = g.getBoundingClientRect();
+                 if (r.width < 40 || r.height < 40) return { ok: 0, why: '太小', w: Math.round(r.width), h: Math.round(r.height) };
+                 return { ok: 1, left: r.left, top: r.top, width: r.width, height: r.height, cards: g.querySelectorAll('.card, .queue__row, .catchup').length };
+               })()`,
+            )
+            .catch(() => ({ ok: 0 }));
+
+          if (gridBox && gridBox.ok) {
+            const install = `(() => {
+              const S = { gaps: [], long: [], alive: true };
+              window.__hoverPerf = S;
+              /*
+               * 数一数这次扫动到底换过几次「卡片命中」。
+               * 没有这个数就没法判断量到的是什么：如果扫了半天一直在空隙里
+               * 或者一直停在同一张卡上，那这些帧数据回答的不是「hover 卡片要多少帧」。
+               * 监听 mouseover 是可以的 —— 它是真鼠标事件，会跟着 sendInputEvent 走；
+               * （不能用它来**制造** hover，但用它来**数** hover 没问题。）
+               */
+              const g = document.querySelector('.cardgrid') || document.querySelector('.queue') || document.querySelector('.board');
+              if (g && !g.__hoverCounter) {
+                g.__hoverCounter = true;
+                g.addEventListener('mouseover', function (e) {
+                  const c = e.target && e.target.closest ? e.target.closest('.card, .queue__row, .catchup') : null;
+                  if (c) window.__hoverHits = (window.__hoverHits || 0) + 1;
+                });
+              }
+              try {
+                S.po = new PerformanceObserver(function (l) {
+                  const es = l.getEntries();
+                  for (let i = 0; i < es.length; i += 1) S.long.push(es[i].duration);
+                });
+                S.po.observe({ entryTypes: ['longtask'] });
+              } catch (e) { S.po = null; }
+              let last = performance.now();
+              const step = function () {
+                const t = performance.now();
+                S.gaps.push(t - last);
+                last = t;
+                if (S.alive) requestAnimationFrame(step);
+              };
+              requestAnimationFrame(step);
+              return 1;
+            })()`;
+
+            const collect = `(() => {
+              const S = window.__hoverPerf;
+              if (!S) return null;
+              S.alive = false;
+              if (S.po) S.po.disconnect();
+              const stat = function (arr) {
+                if (!arr.length) return { frames: 0, p50: 0, p95: 0, max: 0 };
+                const s = arr.slice().sort(function (a, b) { return a - b; });
+                const at = function (p) { return Number(s[Math.min(s.length - 1, Math.floor(s.length * p))].toFixed(2)); };
+                return { frames: s.length, p50: at(0.5), p95: at(0.95), max: Number(s[s.length - 1].toFixed(2)) };
+              };
+              /* gaps 的第一个是「安装到现在」，把首帧算进去会把 p95 抬高一截 */
+              const gaps = S.gaps.slice(1);
+              const long = S.long.slice();
+              const sum = long.reduce(function (a, b) { return a + b; }, 0);
+              const out = stat(gaps);
+              out.longTasks = long.length;
+              out.longSum = Number(sum.toFixed(1));
+              out.longMax = long.length ? Number(Math.max.apply(null, long).toFixed(1)) : 0;
+              out.hovered = Number(window.__hoverHits || 0);
+              return out;
+            })()`;
+
+            /*
+             * 扫动路径：横着扫几行。步长取网格宽度的 1/7、行高按高度分 6 行 ——
+             * 目的不是「把每一张卡都 hover 一遍」，而是**一直在换命中目标**：
+             * hover 的开销大头是「换一张卡 → 旧的撤掉样式、新的加上样式」那一下重绘。
+             */
+            const sweep = async () => {
+              const cols = 7;
+              const rows = 6;
+              await win.webContents.executeJavaScript(`(() => { window.__hoverHits = 0; return 1; })()`).catch(() => null);
+              for (let ri = 0; ri < rows; ri += 1) {
+                for (let ci = 0; ci < cols; ci += 1) {
+                  const x = Math.round(gridBox.left + (gridBox.width * (ci + 0.5)) / cols);
+                  const y = Math.round(gridBox.top + (gridBox.height * (ri + 0.5)) / rows);
+                  win.webContents.sendInputEvent({ type: 'mouseMove', x, y });
+                  await nap(45);
+                }
+              }
+            };
+
+            const runOnce = async () => {
+              await win.webContents.executeJavaScript(install).catch(() => null);
+              await nap(120);
+              await sweep();
+              await nap(160);
+              return win.webContents.executeJavaScript(collect).catch(() => null);
+            };
+
+            perfHover = await runOnce();
+            if (perfHover) perfHover.cards = gridBox.cards;
+
+            /* A/B：把 backdrop-filter 全关掉，同一段扫动再走一遍 */
+            const noBlur = await win.webContents
+              .executeJavaScript(`(() => {
+                const t = document.createElement('style');
+                t.id = 'perf-no-blur';
+                t.textContent = '*{backdrop-filter:none !important;}'
+                document.head.appendChild(t);
+                return 1;
+              })()`)
+              .then(() => runOnce())
+              .catch(() => null);
+            await win.webContents
+              .executeJavaScript(`(() => { const t = document.getElementById('perf-no-blur'); if (t) t.remove(); return 1; })()`)
+              .catch(() => null);
+            if (perfHover && noBlur) perfHover.noBlur = noBlur;
+
+            // 把鼠标挪回左上角：后面的场景不该在一个「正在 hover 某张卡」的状态下量
+            win.webContents.sendInputEvent({ type: 'mouseMove', x: 2, y: 2 });
+            await nap(200);
+          }
         }
 
         const st = await coverCache?.stats?.();
@@ -683,10 +1112,6 @@ function createWindow() {
                  await new Promise(function (r) { requestAnimationFrame(r); });
                };
 
-               await measure('idle', function () { return new Promise(function (r) { setTimeout(r, 1200); }); });
-               await measure('scroll', scrollOnce);
-               await measure('typing', typeOnce);
-
                /* 详情抽屉：点一次标题把抽屉打开，滚它的内容区，再关掉 */
                const drawerOnce = async function () {
                  const t = document.querySelector('.card__title');
@@ -706,10 +1131,29 @@ function createWindow() {
                  await new Promise(function (r) { setTimeout(r, 300); });
                };
 
+               /*
+                 ⚠️ 只跑一遍。这里原来写了两遍（第一遍没有 drawer），
+                 而 scenarios 是按名字存的 —— 第二遍把第一遍整个盖掉，
+                 第一遍纯粹是白跑两秒多。性能自检自己拖时间，最容易让人不想跑它。
+               */
                await measure('idle', function () { return new Promise(function (r) { setTimeout(r, 1200); }); });
                await measure('scroll', scrollOnce);
                await measure('typing', typeOnce);
                await measure('drawer', drawerOnce);
+
+               /*
+                 鼠标扫过卡片网格（数字由主进程量，走 sendInputEvent）。
+                 为什么这一条不能像别的场景一样在这里量：CSS 的 :hover 只认
+                 **真实命中状态**，派发 mouseover 事件不会让它变 ——
+                 而卡片 hover 时有 transform + 阴影，82 张卡里每一张还压着一个
+                 backdrop-filter 的徽标，移动时每一帧都可能重绘两层模糊。
+                 所以这一段由主进程发真鼠标事件、这里只负责采帧。
+               */
+               const hoverPerf = ${JSON.stringify(perfHover || null)};
+               if (hoverPerf) {
+                 scenarios.hover = hoverPerf;
+                 if (hoverPerf.noBlur) scenarios.hover_noBlur = hoverPerf.noBlur;
+               }
 
                /*
                  A/B 组。全关那条回答「毛玻璃一共值多少帧」，
@@ -1092,6 +1536,42 @@ async function runIpcSmoke() {
   await step('app:info', async () => {
     const r = await call('app:info');
     record('app:info', r && r.isDesktop === true && typeof r.version === 'string', JSON.stringify(r?.platform));
+    /*
+     * 自检一定会把 GPU 关掉（文件顶部那一处），所以这里**必须**是 software。
+     * 写成「hardware 也行」就成了一条恒真的空气断言 —— 而这个字段的全部价值
+     * 恰恰在于它说的跟真实情况一致。
+     */
+    record('app:info(渲染模式)', r?.render === 'software', `render=${r?.render} 恢复次数=${r?.gpuRecoveries}`);
+  });
+
+  await step('app:retry-hardware(自检里必须拒绝重启)', async () => {
+    // 测的是**这个按钮不会把自检弄死**：它要真重启，脚本这边看到的是「没反应」，
+    // 报出来会是「没打出 IPC_SMOKE_END」，指向一个完全错误的方向。
+    const r = await call('app:retry-hardware');
+    record('app:retry-hardware(自检里拒绝)', r?.ok === false && /自检/.test(String(r?.error)), `ok=${r?.ok} err=${r?.error}`);
+  });
+
+  await step('自检不许碰用户的 boot.json', async () => {
+    /*
+     * ⚠️ 这个文件里最该有的一条反向断言。
+     *
+     * 自检的默认 userData 就是**用户本人的档案**（有一条路必须用真实档案，
+     * 才能验「封面到底走没走缓存」）。本机真的发生过：自检跑了几次崩溃路径，
+     * 就把 `{"phase":"started","degrade":true}` 写进了用户本人的 boot.json，
+     * 从此他每次打开都是软件渲染、界面发涩，而没有一条线索指向「是自检干的」。
+     *
+     * 断言的是「文件根本不该被创建」—— 内容对不对是另一回事，**写了就算污染**。
+     */
+    /*
+     * 判据用「这个进程往 boot.json 写过几次」，而不是「盘上有没有这个文件」——
+     * 后者依赖跑之前的状态（用户档案里本来就有一份、而且是脏的），
+     * 那样这条断言就变成「跑之前得先干净」，自检不该有这种前提。
+     * 次数不依赖任何外部状态：0 就是 0。
+     */
+    const f = path.join(app.getPath('userData'), 'boot.json');
+    const onDisk = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '（没有这个文件）';
+    const info = await call('app:info');
+    record('自检不许碰用户的 boot.json', Number(info?.bootWrites) === 0, `写盘次数=${info?.bootWrites}；盘上现在是 ${onDisk}`);
   });
 
   await step('cover:stats', async () => {
@@ -1172,6 +1652,56 @@ async function runIpcSmoke() {
     record('file:save-text(取消)', r?.ok === false, `error=${r?.error}`);
   });
   dialog.showSaveDialog = realSaveDialog;
+
+  /*
+   * 读文件（导入备份用）。
+   * 这一条要真读一次盘：`showOpenDialog` 换成「直接给一个临时路径」，
+   * handler 里读文件那段原样执行 —— 只验「handler 在不在」是验不出
+   * 「路径接没接对、编码对不对」的，而那两种错都要到用户导备份那天才显形。
+   */
+  const realOpenDialog = dialog.showOpenDialog;
+  const readFrom = path.join(tmp, 'smoke-import.json');
+  fs.writeFileSync(readFrom, '{"app":"smoke","format":1}', 'utf8');
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [readFrom] });
+  await step('file:read-text', async () => {
+    const r = await call('file:read-text');
+    record(
+      'file:read-text',
+      r?.ok === true && r?.text === '{"app":"smoke","format":1}' && r?.name === 'smoke-import.json',
+      `ok=${r?.ok} name=${r?.name} 内容=${String(r?.text ?? '').slice(0, 24)}`,
+    );
+  });
+
+  // 取消也要如实回，且**不能**是抛出来的错 —— 取消不是错误
+  dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
+  await step('file:read-text(取消)', async () => {
+    const r = await call('file:read-text');
+    record('file:read-text(取消)', r?.ok === false && r?.error === '已取消', `error=${r?.error}`);
+  });
+  dialog.showOpenDialog = realOpenDialog;
+
+  // 太大的文件要拦下来：一口气 readFileSync 会把主进程卡住
+  dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path.join(tmp, 'smoke-huge.json')] });
+  await step('file:read-text(超大)', async () => {
+    fs.writeFileSync(path.join(tmp, 'smoke-huge.json'), Buffer.alloc(33 * 1024 * 1024, 0x20));
+    const r = await call('file:read-text');
+    record('file:read-text(超大)', r?.ok === false && /太大/.test(String(r?.error)), `error=${String(r?.error).slice(0, 40)}`);
+  });
+  dialog.showOpenDialog = realOpenDialog;
+
+  /*
+   * 导入前的自动备份：路径由主进程定，**不弹框** ——
+   * 这一步的意义就是在用户还没反应过来时把状态存住，问他挑哪个目录就来不及了。
+   * 文件名要过一遍 basename，别让渲染层用路径穿越写到 userData 外面。
+   */
+  await step('file:write-backup', async () => {
+    const r = await call('file:write-backup', { name: '../../escaped.json', text: '{"pre":1}' });
+    const inside = r?.ok === true && typeof r.path === 'string'
+      && path.resolve(r.path).startsWith(path.resolve(app.getPath('userData')));
+    const wrote = r?.ok === true && fs.existsSync(r.path) && fs.readFileSync(r.path, 'utf8') === '{"pre":1}';
+    record('file:write-backup', inside && wrote, `路径=${r?.path} 越界=${!inside} 内容对=${wrote}`);
+    try { fs.rmSync(path.dirname(r.path), { recursive: true, force: true }); } catch { /* 清理失败不影响断言 */ }
+  });
 
   // ---- 4. 会改真实文件的：测完还原 ----
   /**
@@ -1452,6 +1982,8 @@ if (!hasSingleInstanceLock) {
 } else {
   // Windows 上不设 AppUserModelId，通知会显示成 electron.app.Electron
   app.setAppUserModelId('com.jikai.app');
+  writePidFile();
+  app.on('will-quit', clearPidFile);
 
   app.on('second-instance', () => showWindow());
 
@@ -1615,7 +2147,47 @@ if (!hasSingleInstanceLock) {
       isDesktop: true,
       userData: app.getPath('userData'),
       packaged: app.isPackaged,
+      /**
+       * 这一次启动跑在硬件加速还是软件渲染上。
+       *
+       * 摆出来的理由：用户反馈「还是有点卡」，而最像的解释是这台机器早就被记成降级了
+       * —— `boot.json` 里那个 `degrade: true` 以前一旦写进去就永久生效，谁也没法改回来。
+       * 没有这个字段，两种模式下界面长得一模一样，说不清到底跑在哪一种上。
+       *
+       * 「现在是软件渲染吗」= 两处关 GPU 的入口合起来看：文件顶部自检那一处
+       * （`SMOKE_PNG || IPC_SMOKE`）和 boot 那一处。只判 boot 的话，自检里会报
+       * 「硬件加速」而其实 GPU 早就关了 —— 那种字段看着一切正常、其实在骗人。
+       */
+      render: (boot.degradedNow || SMOKE_PNG || IPC_SMOKE) ? 'software' : 'hardware',
+      gpuRecoveries: Number(boot.state().recoveries) || 0,
+      /** 这个进程往 boot.json 写过几次 —— 自检里必须是 0 */
+      bootWrites: boot.writes(),
     }));
+
+    /**
+     * 手动「再试一次硬件加速」。
+     *
+     * `disableHardwareAcceleration()` 只在 ready 之前调用才有效，所以清掉标记之后
+     * 必须重启才可能有意义 —— 这也是它为什么是个要用户自己按的按钮：
+     * 重启会关掉他手上的窗口，不能替他决定。
+     */
+    handle('app:retry-hardware', async () => {
+      /*
+       * 冒烟/自检里默认不许重启：脚本正等着看输出，一重启就成了「没反应」。
+       * 例外是 `JIKAI_SMOKE_RETRYHW` —— 那一档本来就是专门来测这次重启的。
+       */
+      if ((SMOKE_PNG || IPC_SMOKE) && !RETRYHW_PROBE) {
+        return { ok: false, error: '自检模式不重启' };
+      }
+      boot.retryHardware();
+      /*
+       * 标记是给重启后那一份的：它一睁眼就得知道自己不是第一份，否则会再按一次
+       * 这个按钮 —— 无限重启，用户那边看起来就是「程序反复闪退」。
+       */
+      app.relaunch({ args: [...process.argv.slice(1), RETRYHW_FLAG] });
+      app.exit(0);
+      return { ok: true };
+    });
 
     handle('autolaunch:get', () => getAutoLaunch());
     handle('autolaunch:set', (_e, on) => setAutoLaunch(on));
@@ -1647,6 +2219,57 @@ if (!hasSingleInstanceLock) {
       try {
         fs.writeFileSync(filePath, String(text), 'utf8');
         return { ok: true, path: filePath };
+      } catch (err) {
+        return { ok: false, error: err?.message ?? String(err) };
+      }
+    });
+
+    /*
+     * 读一个文本文件进来（导入备份用）。
+     *
+     * ⚠️ 取消要回 `{ok:false, error:'已取消'}` 而不是抛：取消不是错误，
+     * 界面接到 '已取消' 就什么都不做。抛出去的话用户会看到一条红色的失败提示 ——
+     * 他明明只是改了主意。
+     *
+     * ⚠️ 大小上限 32MB。备份是纯文本、正常几十 KB，几十 MB 的那种几乎一定是
+     * 「选错了文件」（比如挑到一个视频或数据库），一口气 readFileSync 会把主进程卡住。
+     */
+    handle('file:read-text', async () => {
+      const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow ?? undefined, {
+        title: '选择备份文件',
+        properties: ['openFile'],
+        filters: [{ name: 'JSON', extensions: ['json'] }, { name: '所有文件', extensions: ['*'] }],
+      });
+      if (canceled || !filePaths?.length) return { ok: false, error: '已取消' };
+      const filePath = filePaths[0];
+      try {
+        const st = fs.statSync(filePath);
+        if (st.size > 32 * 1024 * 1024) {
+          return { ok: false, error: `文件太大了（${(st.size / 1048576).toFixed(1)} MB），备份文件不该有这么大` };
+        }
+        return { ok: true, name: path.basename(filePath), path: filePath, text: fs.readFileSync(filePath, 'utf8') };
+      } catch (err) {
+        return { ok: false, error: err?.message ?? String(err) };
+      }
+    });
+
+    /*
+     * 往 userData 下的 backups/ 里写一份东西（导入前的自动备份用）。
+     *
+     * 为什么不复用 `file:save-text`：那个会弹保存框，而这一步的意义正是
+     * **在用户还没反应过来之前**把现在的状态存住 —— 等他挑目录的时候，
+     * 数据已经快被覆盖了。所以路径由主进程定，一次都不问。
+     *
+     * ⚠️ 文件名只取 basename，别让渲染层用 `../` 写到 userData 外面去。
+     */
+    handle('file:write-backup', async (_e, { name = 'backup.json', text = '' } = {}) => {
+      try {
+        const dir = path.join(app.getPath('userData'), 'backups');
+        fs.mkdirSync(dir, { recursive: true });
+        const safe = path.basename(String(name)).replace(/[^\w.-]+/g, '_') || 'backup.json';
+        const file = path.join(dir, safe);
+        fs.writeFileSync(file, String(text), 'utf8');
+        return { ok: true, path: file, name: safe, bytes: Buffer.byteLength(String(text), 'utf8') };
       } catch (err) {
         return { ok: false, error: err?.message ?? String(err) };
       }

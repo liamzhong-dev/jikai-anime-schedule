@@ -11,9 +11,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  CANVAS_LIMITS, DEFAULT_ROWS, EXPORT_DEFAULTS, ITEM_SIZES, PRESET_ROW_GROUPS, SCORE_THRESHOLDS,
-  autoRankByScore, fitsLimits, insertIndexAt, itemsOfRow, makeDefaultTierlist, measureLayout,
-  moveItem, normalizeTierlist, pickScale, poolKeys, removeItem, rowOf, rowStats, tileCrop,
+  CANVAS_LIMITS, CUSTOM_PRESET_ID, DEFAULT_ROWS, EXPORT_DEFAULTS, ITEM_SIZES, PRESET_ROW_GROUPS,
+  ROW_LABEL_MAX, ROW_LIMITS, SCORE_THRESHOLDS,
+  addRow, autoRankByScore, cleanRowColor, cleanRowLabel, fitsLimits, insertIndexAt, isCustomPreset,
+  itemsOfRow, makeDefaultTierlist, measureLayout, moveItem, nextRowId, normalizeTierlist,
+  pickScale, poolKeys, removeItem, removeRow, rowOf, rowStats, setRowColor, setRowLabel,
+  tileCrop, unassignRow,
 } from '../src/core/tierlist.js';
 
 // ===================== 工具 =====================
@@ -439,4 +442,125 @@ test('tileCrop：尺寸非法时返回空矩形而不是 NaN', () => {
   assert.deepEqual(r, { sx: 0, sy: 0, sw: 0, sh: 0 });
   const bad = tileCrop(undefined, undefined, 'poster', 1);
   assert.equal(Number.isNaN(bad.sw), false);
+});
+
+// ===================== 自定义档位 =====================
+
+test('自定义不是预设：它不在 PRESET_ROW_GROUPS 里', () => {
+  assert.equal(
+    PRESET_ROW_GROUPS.some((p) => p.id === CUSTOM_PRESET_ID),
+    false,
+    '自定义的行存在 tierlist.rows 里；混进预设表的话，「换档位组」会拿空行去覆盖它',
+  );
+  assert.equal(isCustomPreset(CUSTOM_PRESET_ID), true);
+  assert.equal(isCustomPreset(null), false);
+  assert.equal(isCustomPreset(undefined), false, 'undefined 不能被当成自定义，那是最常见的一份空状态');
+  assert.equal(isCustomPreset('top-drug'), false);
+});
+
+test('加一档：接在最后、颜色轮转、不影响已经排好的图块', () => {
+  const rows = DEFAULT_ROWS.map((r) => ({ ...r }));
+  const { rows: next, added } = addRow(rows);
+  assert.equal(next.length, rows.length + 1);
+  assert.equal(next[next.length - 1].id, added.id);
+  assert.equal(next.length > 0 && new Set(next.map((r) => r.id)).size, next.length, '档位 id 不能重复');
+  assert.ok(/^#[0-9a-f]{6}$/.test(added.color), `新档位要有可用的颜色，实际 ${added.color}`);
+  assert.equal(rows.length, DEFAULT_ROWS.length, '不能就地改传进来的数组');
+});
+
+test('加一档：afterId 给了就插在它后面', () => {
+  const { rows: next } = addRow(DEFAULT_ROWS, { afterId: 'r2' });
+  assert.equal(next.length, 8);
+  assert.deepEqual(
+    next.slice(0, 4).map((r) => r.id),
+    ['r1', 'r2', next[2].id, 'r3'],
+    '应当插在 r2 后面、r3 前面，其余顺序不动',
+  );
+  assert.notEqual(next[2].id, 'r3', '不能顶掉原来那一档');
+});
+
+test('加一档：到上限就不再长了，而不是悄悄换掉一档', () => {
+  const full = Array.from({ length: ROW_LIMITS.max }, (_, i) => ({ id: `r${i + 1}`, label: `档${i + 1}`, color: '#9aa0a6' }));
+  const { rows: next, added } = addRow(full);
+  assert.equal(added, null);
+  assert.equal(next.length, ROW_LIMITS.max);
+});
+
+test('nextRowId 要避开已经占用的编号', () => {
+  assert.equal(nextRowId([]), 'r1');
+  assert.equal(nextRowId([{ id: 'r1' }, { id: 'r3' }]), 'r4');
+  assert.equal(nextRowId([{ id: 'x' }, { id: 'r1' }, { id: 'r2' }]), 'r3');
+  // 「删了中间两档再加」正是会撞上的那一次
+  assert.notEqual(nextRowId([{ id: 'r1' }, { id: 'r2' }]), 'r1');
+});
+
+test('删一档：行没了，但图块要能找回来', () => {
+  const rows = DEFAULT_ROWS.map((r) => ({ ...r }));
+  const items = [
+    { key: 'a', rowId: 'r1' },
+    { key: 'b', rowId: 'r2' },
+    { key: 'c', rowId: 'r1' },
+  ];
+  const { rows: next, removed } = removeRow(rows, 'r1');
+  assert.equal(removed.id, 'r1');
+  assert.equal(next.some((r) => r.id === 'r1'), false);
+
+  // 只删行不处理 items 的话，这三条会变成悬空引用 —— 读盘时被静默丢掉
+  const left = unassignRow(items, 'r1');
+  assert.deepEqual(left.map((it) => it.key), ['b']);
+  assert.equal(
+    normalizeTierlist({ rows: next, items }).items.length,
+    1,
+    '不调 unassignRow 的话，a 和 c 就悄悄没了（这条就是那个坑本身）',
+  );
+  assert.equal(normalizeTierlist({ rows: next, items: left }).items.length, 1, '处理好之后剩下的那条还在');
+  // 放回素材池 = 不再出现在 items 里，于是 poolKeys 能重新列出它们
+  assert.deepEqual(
+    poolKeys([{ id: 'a' }, { id: 'b' }, { id: 'c' }], left).sort(),
+    ['a', 'c'],
+  );
+});
+
+test('删一档：到下限就不让删了', () => {
+  const two = DEFAULT_ROWS.slice(0, ROW_LIMITS.min).map((r) => ({ ...r }));
+  const { rows: next, removed } = removeRow(two, 'r1');
+  assert.equal(removed, null);
+  assert.equal(next.length, ROW_LIMITS.min);
+});
+
+test('改名 / 改色：一条一处，别的行不动', () => {
+  const rows = setRowLabel(DEFAULT_ROWS, 'r2', '  挺好看  ');
+  assert.equal(rows.find((r) => r.id === 'r2').label, '挺好看');
+  assert.equal(rows.find((r) => r.id === 'r1').label, DEFAULT_ROWS[0].label);
+  assert.equal(DEFAULT_ROWS[1].label, 'A', '不能就地改');
+
+  const colored = setRowColor(DEFAULT_ROWS, 'r2', '#ABCDEF');
+  assert.equal(colored.find((r) => r.id === 'r2').color, '#abcdef');
+  assert.equal(colored.find((r) => r.id === 'r3').color, DEFAULT_ROWS[2].color);
+});
+
+test('脏输入：空名字、超长名字、认不出的颜色都有人管', () => {
+  assert.equal(cleanRowLabel(''), '新档', '删空了要退回兜底名，不能渲染成一格空白');
+  assert.equal(cleanRowLabel('   \n  '), '新档');
+  assert.equal(cleanRowLabel('a\nb'), 'a b', '换行要压成空格，不然那一列会被撑高');
+  assert.equal(cleanRowLabel('x'.repeat(80)).length, ROW_LABEL_MAX);
+
+  // 三位简写要展开成六位：<input type="color"> 只吃六位，
+  // 留着 #fff 的话取色器会显示成灰的，用户一碰就把颜色改错
+  assert.equal(cleanRowColor('#fff'), '#ffffff');
+  assert.equal(cleanRowColor('#ABC'), '#aabbcc');
+  assert.equal(cleanRowColor('  #123456 '), '#123456');
+  assert.equal(cleanRowColor('红色'), '#9aa0a6');
+  assert.equal(cleanRowColor(''), '#9aa0a6');
+  // 八位带 alpha 的不收：档位底色透明下去，行里的白字就看不清了
+  assert.equal(cleanRowColor('#11223344'), '#9aa0a6');
+});
+
+test('改名之后过一遍 normalize 也不会被改回去', () => {
+  // 曾经这里是「认得 #RRGGBB，其它一律换成灰」+「名字不截断」，
+  // 于是同一个值「刚改完是对的、重开一遍就变了」
+  const rows = setRowColor(setRowLabel(DEFAULT_ROWS, 'r1', '神作'), 'r1', '#00ff88');
+  const back = normalizeTierlist({ rows, items: [] });
+  assert.equal(back.rows[0].label, '神作');
+  assert.equal(back.rows[0].color, '#00ff88');
 });

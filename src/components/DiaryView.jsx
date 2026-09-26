@@ -129,7 +129,7 @@ export default function DiaryView({
             <div className="diary__list" data-diary-panel="compare">
               {rows.map((r) => (
                 <div className="diary__row" key={r.key} data-diary-row={r.key} data-band={r.cmp.band}>
-                  <Cover anime={r.anime} className="diary__cover" />
+                  <Cover anime={r.anime} className="diary__cover" onOpen={r.anime ? onOpen : undefined} />
                   <div className="diary__main">
                     <button type="button" className="diary__title" onClick={() => r.anime && onOpen?.(r.anime)}>
                       {r.anime?.titleZh || r.anime?.titleJa || `作品 ${r.key}`}
@@ -151,7 +151,7 @@ export default function DiaryView({
             <div className="diary__list" data-diary-panel="timeline">
               {timeline.map((e) => (
                 <div className="diary__row diary__row--tl" key={`${e.key}-${e.at}`} data-diary-at={e.at}>
-                  <Cover anime={e.anime} className="diary__cover" />
+                  <Cover anime={e.anime} className="diary__cover" onOpen={e.anime ? onOpen : undefined} />
                   <div className="diary__main">
                     <div className="diary__tl-head">
                       <button type="button" className="diary__title" onClick={() => e.anime && onOpen?.(e.anime)}>

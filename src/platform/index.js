@@ -111,6 +111,15 @@ const webAdapter = {
   async appInfo() {
     return { version: APP_VERSION, platform: 'web', isDesktop: false, chrome: null };
   },
+  /**
+   * 「再试一次硬件加速」是桌面壳专属。
+   *
+   * 浏览器里没有「关掉硬件加速」这回事 —— 渲染模式归浏览器自己管，页面连接口都没有。
+   * 所以这里老实说没有，别摆一个点了没反应的按钮。
+   */
+  async retryHardware() {
+    return { ok: false, error: '浏览器里没有这一项，渲染模式由浏览器自己决定' };
+  },
   async getAutoLaunch() {
     return { openAtLogin: false, supported: false };
   },
@@ -136,6 +145,64 @@ const webAdapter = {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     return true;
+  },
+
+  /**
+   * 让用户挑一个文本文件读进来（导入备份用）。
+   *
+   * 浏览器侧用隐藏的 `<input type="file">`，桌面侧是系统选文件对话框。
+   * ⚠️ 这条**不能顺手用 `prompt` 让用户粘路径**：Electron 里 prompt 存在但一调用就抛
+   * （「prompt() is and will not be supported」），而浏览器里是好好的 ——
+   * 属于「换个壳才炸」的那类坑，读代码完全看不出来。
+   *
+   * @returns {{ ok: true, name: string, text: string } | { ok: false, error: string }}
+   *          用户取消时 `error` 是 '已取消' —— 界面据此**不报错**，只是什么都不做
+   */
+  async pickTextFile() {
+    if (typeof document === 'undefined') return { ok: false, error: '当前环境不能读文件' };
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,application/json';
+      input.style.display = 'none';
+      // 拿不到 change（用户关掉选择框）时也得有个收尾：否则 Promise 一直悬着，
+      // 界面上的按钮永远是「读取中…」
+      let done = false;
+      const finish = (r) => { if (!done) { done = true; input.remove(); resolve(r); } };
+      input.addEventListener('change', () => {
+        const f = input.files?.[0];
+        if (!f) return finish({ ok: false, error: '已取消' });
+        const fr = new FileReader();
+        fr.onload = () => finish({ ok: true, name: f.name, text: String(fr.result ?? '') });
+        fr.onerror = () => finish({ ok: false, error: '读文件出错' });
+        fr.readAsText(f);
+      });
+      // 现代浏览器关掉选择框不再触发任何事件，只能靠窗口重新获得焦点时收尾
+      globalThis.addEventListener?.('focus', () => setTimeout(() => {
+        if (!input.files?.length) finish({ ok: false, error: '已取消' });
+      }, 500), { once: true });
+      document.body.appendChild(input);
+      input.click();
+    });
+  },
+
+  /**
+   * 导入前的自动备份。
+   *
+   * 浏览器里没有「程序的数据目录」，退而求其次存进 localStorage ——
+   * 它是唯一一处「用户看不见、但重启还在」的地方。
+   * ⚠️ 明确回 `where`：界面要把「备份放在哪儿」说给用户听，
+   * 说不到位的话，「反悔时找得回来」就只是一句空话。
+   */
+  async writeStateBackup({ name = 'backup.json', text = '' } = {}) {
+    if (typeof localStorage === 'undefined') return { ok: false, error: '当前环境没有可写的地方' };
+    try {
+      localStorage.setItem(`jikai:backup:${name}`, String(text));
+      return { ok: true, where: '浏览器本地存储', name, bytes: String(text).length };
+    } catch (err) {
+      // 配额满了是这里最常见的失败，得如实报，不能假装成功
+      return { ok: false, error: err?.message ?? String(err) };
+    }
   },
 
   // ---- 封面缓存 ----
@@ -238,6 +305,9 @@ const electronAdapter = {
   async appInfo() {
     return window.jikai?.appInfo?.() ?? { version: '0.0.0', platform: 'unknown', isDesktop: true };
   },
+  async retryHardware() {
+    return window.jikai?.retryHardware?.() ?? { ok: false, error: '这个版本的桌面壳还不支持' };
+  },
   async getAutoLaunch() {
     return window.jikai?.getAutoLaunch?.() ?? { openAtLogin: false, supported: false };
   },
@@ -260,6 +330,18 @@ const electronAdapter = {
     const r = await window.jikai?.saveTextFile?.({ name, text });
     if (r && r.ok === false) throw new Error(r.error || '保存失败');
     return true;
+  },
+  /** 系统选文件对话框读一个文本进来。取消时回 `{ok:false, error:'已取消'}`，不抛 */
+  async pickTextFile() {
+    const r = await window.jikai?.readTextFile?.();
+    if (!r) return { ok: false, error: '主进程没有提供读文件能力' };
+    return r;
+  },
+  /** 往 userData 下的 backups/ 写一份（导入前的自动备份），路径由主进程定 */
+  async writeStateBackup({ name = 'backup.json', text = '' } = {}) {
+    const r = await window.jikai?.writeBackup?.({ name, text });
+    if (!r) return { ok: false, error: '主进程没有提供写备份能力' };
+    return r;
   },
   async saveBinaryFile({ name = 'jikai.png', dataUrl = '' } = {}) {
     const r = await window.jikai?.saveBinaryFile?.({ name, dataUrl });

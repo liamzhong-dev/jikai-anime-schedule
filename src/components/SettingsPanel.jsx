@@ -7,6 +7,9 @@ import { BUILTIN_GENERATED_AT, BUILTIN_SEASONS } from '../data/builtin/index.js'
 import { hiddenFeatures, isVisible } from '../core/features.js';
 import { formatBytes as fmtBytes } from '../core/wallpaper.js';
 import { describeUpdate } from '../core/update.js';
+import { CARD_MIN, FONT_SCALE, clampCardMin, clampFontScale } from '../core/layout.js';
+// 只为了把「文件里 / 本机现在」两行说成人话，纯函数，不碰状态
+import { describeCounts } from '../core/transfer.js';
 import { prettyKey } from './ShortcutsOverlay.jsx';
 import { platform } from '../platform/index.js';
 import LibraryPanel from './LibraryPanel.jsx';
@@ -85,6 +88,8 @@ export default function SettingsPanel({
   updateState, onCheckUpdate, onOpenUpdate,
   onExportPresets,
   appInfo, autoLaunch, onAutoLaunch,
+  /** 「再试一次硬件加速」—— 只有桌面壳有；点下去会重启程序 */
+  onRetryHardware,
   hotkeyInfo, onGlobalHotkey,
   onToast,
   /**
@@ -94,8 +99,23 @@ export default function SettingsPanel({
    * 钩子绑在一起；拆开传会让这边的签名再长十行，而中间并不需要任何一个值。
    */
   library = {},
+  /**
+   * 备份与迁移这一块要的几样：`{ onExport, onImport, busy, note }`。
+   *
+   * 收成一包传（跟 library 同样的理由）：这一块自己不需要任何中间状态，
+   * 摊开加进签名只会让上面那一列再长四行。
+   */
+  transfer = {},
+  /**
+   * 打开时停在哪一页。只当初始值用，之后由面板自己管。
+   *
+   * 加这个口子是为了能验「数据源页」和「本地库页」这类**不在第一页**的内容：
+   * 组件内部 state 会把 SSR 断言挡在外面 —— 渲出来永远是外观页，
+   * 于是那几个页签里的东西一条都测不到（"外观页有取景框" 那种断言反倒是全绿的）。
+   */
+  defaultTab = 'look',
 }) {
-  const [tab, setTab] = useState('look');
+  const [tab, setTab] = useState(defaultTab);
   const [presetName, setPresetName] = useState('');
   const [apiId, setApiId] = useState('1');
   const wpFileRef = useRef(null);
@@ -108,6 +128,14 @@ export default function SettingsPanel({
   const [renameValue, setRenameValue] = useState('');
   // 联系页的复制反馈：记的是「哪一行刚复制过」，不是复制的内容
   const [copied, setCopied] = useState('');
+  /*
+   * 「再试一次硬件加速」的二次确认。
+   *
+   * 不用 window.confirm：Electron 渲染进程里的原生弹窗是被关掉的，
+   * prompt 实测一调用就抛（见上面改名那段的注释）。两个壳都可能翻脸的东西，
+   * 一律用页面内的状态代替 —— 点一次进入待确认，再点一次才真重启。
+   */
+  const [retryArmed, setRetryArmed] = useState(false);
 
   const copyContact = async (text, tag) => {
     try {
@@ -358,6 +386,88 @@ export default function SettingsPanel({
                   />
                 </Row>
               </section>
+
+              {/*
+                卡片里的内容显示多大：封面一格多宽、字多大。
+                
+                这一组是「卡片窗口不再能缩放」之后补上的位置 —— 用户要的从来不是
+                窗口能拉大（拉大了里面的封面和字还是原来那么大，等于白拉），
+                而是**内容**换个大小看。两个档位分开给，是因为最佳值不一样：
+                有人想一屏塞更多封面（图和字一起小），也有人只想把字放大看清（图不动）。
+                放在外观页而不是藏在工具栏里：藏起来就等于没有。
+              */}
+              <section className="ssec">
+                <h4 className="ssec__title">卡片显示</h4>
+                <Row label="封面尺寸" hint="一格留多宽 —— 想一屏塞下更多封面就往左拉">
+                  <Slider
+                    value={clampCardMin(settings?.cardMin)}
+                    min={CARD_MIN.min}
+                    max={CARD_MIN.max}
+                    step={4}
+                    onChange={(v) => patchSettings({ cardMin: v })}
+                    format={(v) => `${v}px`}
+                  />
+                </Row>
+                <Row label="文字大小" hint="卡片里的标题与信息 —— 只影响字，不动封面">
+                  <Slider
+                    value={clampFontScale(settings?.fontScale)}
+                    min={FONT_SCALE.min}
+                    max={FONT_SCALE.max}
+                    step={FONT_SCALE.step}
+                    onChange={(v) => patchSettings({ fontScale: v })}
+                    format={(v) => `${Math.round(v * 100)}%`}
+                  />
+                </Row>
+              </section>
+
+              {/*
+                现在跑在硬件加速还是软件渲染上。
+
+                用户说过「还是有点卡」，而最像的解释是这台机器早被记成降级了 ——
+                软件渲染下滚动和拖拽会明显发涩，可界面长得跟平时一模一样，谁也看不出来。
+                所以这里既要把模式说出来，也要给一个能自己按的「再试一次」：
+                以前那个标记一旦写进去就永久生效，用户连申诉的入口都没有。
+              */}
+              {appInfo?.isDesktop ? (
+                <section className="ssec">
+                  <h4 className="ssec__title">性能</h4>
+                  <Row
+                    label="渲染"
+                    hint={appInfo?.render === 'software'
+                      ? '关掉了硬件加速 —— 滑动和拖拽会比平时发涩，能试就试回硬件加速'
+                      : '走显卡渲染，这是正常状态'}
+                  >
+                    <span className="kv" data-render-mode={appInfo?.render === 'software' ? 'software' : 'hardware'}>
+                      {appInfo?.render === 'software' ? '软件渲染' : '硬件加速'}
+                    </span>
+                    {appInfo?.render === 'software' ? (
+                      retryArmed ? (
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn--danger"
+                            onClick={() => { setRetryArmed(false); onRetryHardware?.(); }}
+                          >
+                            确定重启
+                          </button>
+                          <button type="button" className="btn" onClick={() => setRetryArmed(false)}>算了</button>
+                        </>
+                      ) : (
+                        <button type="button" className="btn" onClick={() => setRetryArmed(true)}>再试一次</button>
+                      )
+                    ) : null}
+                  </Row>
+                  {appInfo?.render === 'software' ? (
+                    <p className="snote">
+                      这台机器以前崩过一次，程序就自己把硬件加速关了、免得再崩。
+                      {Number(appInfo?.gpuRecoveries) > 0
+                        ? `自动试回来已经失败 ${Number(appInfo.gpuRecoveries)} 次了，所以没再自己试。`
+                        : '正常开两次它也会自己试回来，不必非点这里。'}
+                      「确定重启」会把当前窗口关掉重开一次。
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
             </>
           ) : null}
 
@@ -569,6 +679,78 @@ export default function SettingsPanel({
                   </button>
                 </div>
                 <p className="snote">清缓存只影响「从网上下下来的番剧表」，你的追番、进度、补番卡都不动。</p>
+              </section>
+
+              {/*
+                备份与迁移。
+                放在「数据源」页而不是「本地库」：这一页管的就是「数据在哪儿」；
+                用户找这个功能时想的是「我的记录怎么搬走」，不会想到去点「本地库」。
+              */}
+              <section className="ssec">
+                <h4 className="ssec__title">
+                  备份与迁移
+                  <em className="ssec__hint">追番、进度、补番、日记、档位表、报告、设置</em>
+                </h4>
+                <div className="sact">
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    onClick={() => transfer.onExport?.()}
+                    disabled={Boolean(transfer.busy)}
+                  >
+                    {transfer.busy === 'export' ? '正在导出…' : '导出备份…'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => transfer.onImport?.()}
+                    disabled={Boolean(transfer.busy)}
+                  >
+                    {transfer.busy === 'import' ? '正在读取…' : '从备份导入…'}
+                  </button>
+                </div>
+                <p className="snote">
+                  导出的是一份几十 KB 的 JSON，里面是追番、进度、补番、日记、档位表、报告和设置。
+                  封面缓存和壁纸不跟着走 —— 那两个换台机器重新下一次就有了，塞进去只会让备份大到传不动。
+                </p>
+                <p className="snote">
+                  导入是<strong>整份替换</strong>：本机现有的记录会被文件里的覆盖。
+                  覆盖之前会自动把现在的记录另存一份到程序的数据目录里（文件名带 <code>backup-import-</code>），反悔时找得回来。
+                </p>
+                {/*
+                  待确认的那一步。
+
+                  覆盖是破坏性的，所以不直接写 —— 先把两边的条数摆出来，
+                  用户才知道自己按下去会失去什么。没有这两行数字，
+                  「确认覆盖」四个字跟「确定」按钮没区别，点了只能靠运气。
+                */}
+                {transfer.pending ? (
+                  <div className="simport">
+                    <p className="simport__head">文件「{transfer.pending.fileName}」读好了，要导入吗？</p>
+                    <ul className="simport__list">
+                      <li><span>文件里</span><b>{describeCounts(transfer.pending.theirs)}</b></li>
+                      <li><span>本机现在</span><b>{describeCounts(transfer.pending.mine)}</b></li>
+                    </ul>
+                    <p className="snote">
+                      导入之后，本机的记录会被上面那行<strong>整份替换</strong>（不是合并）。
+                      现在的记录会先另存一份，找得回来。
+                    </p>
+                    <div className="sact">
+                      <button
+                        type="button"
+                        className="btn btn--danger"
+                        onClick={() => transfer.onConfirmImport?.()}
+                        disabled={Boolean(transfer.busy)}
+                      >
+                        {transfer.busy === 'import' ? '正在导入…' : '确认导入并覆盖'}
+                      </button>
+                      <button type="button" className="btn" onClick={() => transfer.onCancelImport?.()}>
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {transfer.note ? <p className="snote ssec__result">{transfer.note}</p> : null}
               </section>
             </>
           ) : null}

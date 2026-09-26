@@ -14,6 +14,7 @@ import { platform } from '../src/platform/index.js';
 import {
   ensureTierlist, flush, listTierlists, patchTierlist, readTierlist, resetTierlist, update,
 } from '../src/core/store.js';
+import { PRESET_ROW_GROUPS } from '../src/core/tierlist.js';
 
 /** 拦下落盘的快照，用来验 snapshot() 到底带了哪些字段 */
 let captured = null;
@@ -121,4 +122,35 @@ test('落盘的那一版也要是干净的（脏数据不能只修在内存里�
   flush();
 
   assert.deepEqual(captured.tierlists['2026q3'].items, [{ key: '1', rowId: 'r1' }], 'r9 那条不该被写进磁盘');
+});
+
+test('清空：档位定义要留着，自定义模板尤其是', () => {
+  resetAll();
+  /*
+   * 这条守的是一个很容易顺手写错的地方：清空原来是
+   * `makeDefaultTierlist(k, { presetId })`，会把档位行一起重置回预设。
+   * 有自定义档位之后那就是丢用户数据 —— 按钮上写的是「清空」，不是「恢复默认」。
+   */
+  const custom = [
+    { id: 'r1', label: '神作', color: '#ff7f7f' },
+    { id: 'r2', label: '还行', color: '#7fbfff' },
+  ];
+  patchTierlist('2026q3', { rows: custom, items: ITEMS, presetId: 'custom' });
+  const fresh = resetTierlist('2026q3', { nowMs: 5000 });
+
+  assert.deepEqual(fresh.items, [], '图块要清掉');
+  assert.deepEqual(fresh.rows.map((r) => r.label), ['神作', '还行'], '自己改的档位名不能被换回预设');
+  assert.equal(fresh.presetId, 'custom', '清空之后下拉里还该写着「自定义」');
+
+  // 换一套预设是另一个动作，它当然要换行 —— 别把两者搞成一件事
+  const preset = patchTierlist('2026q3', { rows: PRESET_ROW_GROUPS[1].rows.map((r) => ({ ...r })), presetId: 'masterpiece' });
+  assert.equal(preset.rows[0].label, 'Masterpiece');
+  assert.deepEqual(preset.items, [], '换预设之后图块还是空的');
+});
+
+test('清空：还没有这份表时，presetId 才用来定初始档位', () => {
+  resetAll();
+  const fresh = resetTierlist('2026q4', { presetId: 's-f' });
+  assert.equal(fresh.presetId, 's-f');
+  assert.equal(fresh.rows[0].label, 'S');
 });

@@ -36,7 +36,7 @@ export default function FollowingView({ rows, now, onOpen, onMark, onSetStatus, 
 
         return (
           <div key={anime.id} className={rowCls.join(' ')}>
-            <Cover anime={anime} className="queue__cover" />
+            <Cover anime={anime} className="queue__cover" onOpen={onOpen} />
 
             <div className="queue__info">
               <div className="queue__title">{anime.titleZh || anime.titleJa}</div>

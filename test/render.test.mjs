@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 
 import { SAMPLE_ITEMS, SAMPLE_SEASON } from './fixtures/sample-state.js';
-import { makeDefaultTierlist } from '../src/core/tierlist.js';
+import { makeDefaultTierlist, PRESET_ROW_GROUPS } from '../src/core/tierlist.js';
 import { makeBlock, makeDefaultReport } from '../src/core/report.js';
 
 /**
@@ -56,13 +56,14 @@ test('默认视图：骨架、卡片窗口、进度条都在', async () => {
   assert.ok(html.includes('本季概览'), '应渲染统计窗口');
   assert.ok(html.includes('番剧库'), '应渲染番剧库窗口');
 
-  // 卡片式窗口的拖拽 / 缩放把手
+  // 卡片式窗口：拖标题栏移动，**没有**缩放手柄
   assert.ok(html.includes('window__bar'), '窗口应有可拖拽标题栏');
-  // 2026-09-26：原来只有右下角一个把手（类名 window__resize），
-  // 加宽卡片得先摸到那个角 —— 卡片比画布宽时那个角还在滚动条外面。改成八条边。
-  for (const dir of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
-    assert.ok(html.includes(`data-window-resize="${dir}"`), `窗口应有 ${dir} 方向的缩放把手`);
-  }
+  /*
+   * 八条边的把手做过一轮又撤掉了：窗口能拉大、里面的封面和字还是原来那么大，
+   * 那不是用户要的（他要的是**内容**的比例，现在归设置里的「封面尺寸 / 文字大小」管）。
+   * 反向断言放在这里，是因为「撤掉的功能悄悄回来」比「没做」更难发现。
+   */
+  assert.equal(countOf(html, 'data-window-resize='), 0, '窗口不该再有缩放把手');
 
   // 加载进度条
   assert.ok(html.includes('progressbar'), '顶栏应有进度条节点');
@@ -254,6 +255,61 @@ test('Tier List：七档都在，档位名按预设来', async () => {
   }
   assert.equal(countOf(html, 'tier-row__label'), 7, '应当是 7 档');
   assert.ok(html.includes('tier-pool'), '应渲染素材池');
+});
+
+/* ── 自定义档位 ───────────────────────────────────────── */
+
+test('档位组下拉：三套预设之外还要有「自定义」', async () => {
+  const html = await renderTier();
+  for (const p of PRESET_ROW_GROUPS) {
+    assert.ok(html.includes(`>${p.name}</option>`), `下拉里少了预设「${p.name}」`);
+  }
+  assert.ok(html.includes('>自定义</option>'), '下拉里要有「自定义」这一项，否则这个功能等于没入口');
+  assert.equal(html.includes('value="custom" selected'), false, '默认还是预设，不能一进来就是自定义');
+});
+
+test('预设档位下不露删档入口：那不是用户此刻在做的事', async () => {
+  const html = await renderTier();
+  assert.equal(countOf(html, 'data-row-del='), 0, '预设是成套的，随手删一档会让 items 里的 rowId 悬空');
+  assert.equal(html.includes('+ 加一档'), false, '加档的按钮同理，只在自定义下出现');
+});
+
+test('自定义档位：每一档都有删除口，工具栏有加一档', async () => {
+  const base = makeDefaultTierlist(SAMPLE_SEASON);
+  const html = await renderTier({ tierlist: { ...base, presetId: 'custom' } });
+
+  assert.equal(
+    countOf(html, 'data-row-del='),
+    base.rows.length,
+    '自定义下每一档都该有删除按钮',
+  );
+  for (const row of base.rows) {
+    assert.ok(html.includes(`data-row-del="${row.id}"`), `档位 ${row.id} 上没找到删除按钮`);
+  }
+  assert.ok(html.includes('+ 加一档'), '自定义下要能加档');
+  assert.ok(html.includes('回到素材池'), '删档要说明图块不会丢 —— 不说的话没人敢点');
+  // 反向：预设名还在下拉里，但当前选中的是自定义
+  assert.ok(html.includes('value="custom" selected'), '此刻下拉里该显示「自定义」');
+});
+
+test('自定义档位：只剩两档时删除按钮要禁用，不是点了没反应', async () => {
+  const base = makeDefaultTierlist(SAMPLE_SEASON);
+  const two = { ...base, presetId: 'custom', rows: base.rows.slice(0, 2) };
+  const html = await renderTier({ tierlist: two });
+  assert.equal(countOf(html, 'data-row-del='), 2);
+  // 卡在「删档按钮自己」上做正则：工具栏以后多一个禁用按钮，不该把这条弄红
+  const disabledDel = (s) => (s.match(/data-row-del="[^"]*" disabled=""/g) || []).length;
+  assert.equal(disabledDel(html), 2, '到下限要标成禁用（还能再点一次就说明这个下限没生效）');
+  const enabled = await renderTier({ tierlist: { ...base, presetId: 'custom' } });
+  assert.equal(disabledDel(enabled), 0, '七档的时候不该有任何一档是禁用的');
+});
+
+test('自定义档位：改过的名字要真的画在行上', async () => {
+  const base = makeDefaultTierlist(SAMPLE_SEASON);
+  const rows = base.rows.map((r, i) => (i === 0 ? { ...r, label: '神作' } : r));
+  const html = await renderTier({ tierlist: { ...base, presetId: 'custom', rows } });
+  assert.ok(html.includes('>神作<'), '改过的档位名要出现在表上');
+  assert.equal(html.includes('>TOP<'), false, '改掉的那一档不该还留着旧名字');
 });
 
 test('Tier List：素材池里的番剧渲染成了图块，且排进档位后就从池子里消失', async () => {
@@ -856,28 +912,86 @@ test('番剧卡片：封面整块都是打开详情的入口，星标仍在它�
   const cards = countOf(html, 'card__title');
   assert.ok(cards > 5, '先得有卡片，才谈得上点');
   assert.equal(
-    countOf(html, 'data-card-open='),
+    countOf(html, 'data-cover-open='),
     cards,
     '每张卡都该有一个封面热区 —— 数量对不上就是有卡片漏了（以前只有标题能点）',
   );
   // 星标必须还在，且压在热区上面（z-index 三层：热区 1、徽标 2、星标 3）
   assert.ok(countOf(html, 'card__follow') >= cards, '星标不能因为加了热区就没了');
-  assert.ok(html.includes('card__open'), '热区的类名要在，样式靠它定位');
+  assert.ok(html.includes('cover__hot'), '热区的类名要在，样式靠它定位');
 });
 
-/* ── 卡片窗口：八方向缩放 ─────────────────────────────── */
+/*
+ * 热区是 Cover 的**可选**能力：传 onOpen 才有。
+ *
+ * 这条反向断言是这套改动里最值钱的一条 —— 抽屉、报告画布里的封面只是装饰与素材，
+ * 万一顺手给它们也铺上热区，用户点一张素材图会莫名弹出另一部番的详情。
+ */
+test('封面热区是可选的：没传 onOpen 就不该有', async () => {
+  const any = { id: 4242, titleZh: '热区测试条目' };
+  const plain = await renderCover({ anime: any });
+  assert.equal(plain.includes('cover__hot'), false, '没传 onOpen 的封面不该有热区');
+  assert.equal(plain.includes('data-cover-open'), false, '也不该留下热区属性');
 
-test('卡片窗口：八个方向都有缩放把手，最多化和折叠时收起来', async () => {
-  const html = await renderWindowCard();
-  for (const dir of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
-    assert.ok(html.includes(`data-window-resize="${dir}"`), `缺了 ${dir} 方向的把手`);
+  const hot = await renderCover({ anime: any, onOpen: () => {} });
+  assert.ok(hot.includes('cover__hot'), '传了 onOpen 就该铺上热区');
+  assert.ok(hot.includes('data-cover-open="4242"'), '热区要带条目 id，自检靠它找人');
+  assert.ok(hot.includes('aria-label="打开《'), '热区要有无障碍标签 —— Tab 与读屏都靠它');
+});
+
+/*
+ * 每一个用到封面的列表视图都要真的接上。
+ *
+ * ⚠️ 这条断言存在的理由就是它上次没有：热区最初只做在本季卡片里，
+ * 于是时间表 / 追番 / 补番 / 日记 / 历程的封面全是死的 ——
+ * 而当时的测试只验了「本季卡片有热区」，完全看不出别的视图漏了。
+ * 用户也不会想到「同一张封面，换个页面就点不开」，只会说「这里点不动」。
+ */
+test('封面热区：凡是列表视图里的封面都要能点', async () => {
+  const REQUIRED = ['season', 'following', 'catchup'];
+  for (const view of ['season', 'schedule', 'following', 'catchup', 'diary', 'history']) {
+    const html = await render({ view });
+    // `data-cover="` 不会命中 `data-cover-open="`（后者在 = 之前多一截），数得准
+    const covers = countOf(html, 'data-cover="');
+    const hots = countOf(html, 'data-cover-open="');
+
+    /*
+     * ⚠️ 断言写「有封面就必须能点」，而不是「每个视图都必须有热区」——
+     * 时间表的样例数据里没有夜间排播的条目，那个视图本来就一张封面都没有。
+     * 硬要求它会红在「这个视图没数据」上，而那是现实、不是错误
+     * （项目里有过教训：断言卡住现实，会让人去改本来正确的代码）。
+     *
+     * 但 **season / following / catchup 例外：它们必须有封面** ——
+     * 不然三条都不满足时这段循环会一路 continue 过去，变成一条永远绿的空气断言。
+     */
+    if (covers === 0) {
+      assert.equal(
+        REQUIRED.includes(view),
+        false,
+        `${view} 视图一张封面都没有 —— 这个视图本该有封面，多半是样例数据或视图本身坏了`,
+      );
+      continue;
+    }
+    assert.equal(
+      hots,
+      covers,
+      `${view} 视图里有 ${covers} 张封面，却只有 ${hots} 张能点 —— 同一个封面换个页面就点不开了`,
+    );
   }
-  // 一张卡正好八个。多出来的多半是把手被渲了两遍（那样命中判定会互相抢）
-  assert.equal(countOf(html, 'data-window-resize='), 8, '一张卡应该正好 8 个把手');
-  // 反向：旧的那个孤零零的角把手类名不该再出现，否则会多出一层和边条重叠的热区
-  assert.equal(html.includes('window__resize'), false, '旧的单角把手类名要彻底换掉');
-  // 把手要能挡住指针事件才算数（z-index 写在 CSS 里，这里只钉住它挂了类）
-  assert.equal(countOf(html, 'window__edge '), 8, '每条边都要有 window__edge 基类');
+});
+
+/* ── 卡片窗口：只能移动，不能缩放 ─────────────────────── */
+
+test('卡片窗口：标题栏可拖、有折叠与最大化，但没有任何缩放手柄', async () => {
+  const html = await renderWindowCard();
+  assert.ok(html.includes('window__bar'), '标题栏要在 —— 移动靠它');
+  assert.ok(html.includes('window__btn'), '折叠 / 最大化按钮要在');
+
+  // 反向断言：八方向那套、以及更早的单角把手，一个都不该再出现。
+  // 这比当年那条「有 8 个把手」值钱 —— 撤掉一个功能之后，最常发生的就是它悄悄回来。
+  assert.equal(countOf(html, 'data-window-resize='), 0, '不该再有缩放把手');
+  assert.equal(html.includes('window__edge'), false, '边条那套类名要清干净');
+  assert.equal(html.includes('window__resize'), false, '旧的单角把手类名同样不该在');
 });
 
 /* ── 壁纸取景框 ───────────────────────────────────────── */
@@ -953,4 +1067,146 @@ test('番剧网格：一格宽档位落到网格的列宽上', async () => {
   assert.ok(wild.includes('--card-min:220px'), '超大档位要夹到上限');
   const tiny = await renderSeasonView({ cardMin: 1 });
   assert.ok(tiny.includes('--card-min:76px'), '过小的档位要夹到下限');
+});
+
+/* ── 卡片显示：封面尺寸 + 文字大小 ─────────────────────── */
+
+test('设置面板外观页：卡片显示里两档都在，显示的得是夹过的值', async () => {
+  const dflt = await renderSettingsTabs();
+  assert.ok(dflt.includes('卡片显示'), '外观页要有这一块');
+  assert.ok(dflt.includes('封面尺寸'), '一格的宽窄要能调');
+  assert.ok(dflt.includes('文字大小'), '卡片里的字要能单独调大 —— 不能只有封面能变');
+  assert.ok(dflt.includes('>112px<'), '没设过时封面档显示默认值');
+  assert.ok(dflt.includes('>100%<'), '没设过时文字档显示 100%');
+
+  /*
+   * ⚠️ 这里特意喂 `fontScale: null` 而不是不喂。
+   * `Number(null) === 0`，夹一下会落到**下限** 0.85 —— 而下限是有意义的值，
+   * 界面上只表现成「字有点小」，永远不报错；`undefined` 却能正常走默认值。
+   * 一半对一半错最容易骗过自测，所以两个都得上。
+   */
+  const dirty = await renderSettingsTabs({ settings: { cardMin: 9999, fontScale: null } });
+  assert.ok(dirty.includes('>220px<'), '越界的封面档要按上限显示');
+  assert.equal(dirty.includes('>9999px<'), false, '不能把没夹过的值摆到界面上');
+  assert.ok(dirty.includes('>100%<'), 'fontScale 是 null 时该显示默认 100%，不是被抬到下限 85%');
+  assert.equal(dirty.includes('>85%<'), false, 'null 不能被当成 0 夹到下限');
+});
+
+test('卡片区的字号必须跟着 --fs 走，不许再写死 px', async () => {
+  assert.ok(
+    /\.cardgrid,\s*\.queue,\s*\.board,\s*\.weekgrid\s*\{\s*font-size:\s*calc\(12\.5px \* var\(--fs, 1\)\)/.test(CSS),
+    '四个卡片容器上要有基准字号，这是「文字大小」唯一的落点',
+  );
+
+  /*
+   * 反向断言，比上面那条值钱：以后谁新加一个 `.card__xxx { font-size: 12px }`，
+   * 界面上完全看不出来它不跟着滑块走 —— 只有当有人真去拉滑块才会发现。
+   * 所以这里把「卡片区出现绝对 px 字号」一律判成错。
+   */
+  const hard = [...CSS.matchAll(/^\.(?:card|queue|catchup|slot|weekcol)__[\w-]+[^{]*\{[^}]*font-size:\s*[0-9.]+px/gm)];
+  assert.equal(
+    hard.length,
+    0,
+    `卡片区不该有写死的字号，改成 em 派生：\n${hard.map((m) => m[0].trim()).join('\n')}`,
+  );
+});
+
+/* ── 备份与迁移 ───────────────────────────────────────── */
+
+test('设置里的备份与迁移：两个入口都在，且说清「导入不含封面」', async () => {
+  const html = await renderSettingsTabs({ defaultTab: 'data' });
+  assert.ok(html.includes('备份与迁移'), '数据源页要有这一块');
+  assert.ok(html.includes('导出备份…'), '要有导出入口');
+  assert.ok(html.includes('从备份导入…'), '要有导入入口');
+  assert.ok(html.includes('整份替换'), '要提前说清导入是覆盖，不能等按下去才知道');
+  assert.ok(html.includes('backup-import-'), '要说明覆盖前会另存一份，否则用户不敢按');
+  assert.equal(html.includes('simport'), false, '没选文件的时候不该有待确认那一块');
+});
+
+test('导入待确认：两边的条数都要摆出来', async () => {
+  const html = await renderSettingsTabs({
+    defaultTab: 'data',
+    transfer: {
+      busy: '',
+      note: '',
+      pending: {
+        fileName: 'jikai-backup-20260926-1200.json',
+        incoming: {},
+        // 这两行是整块的意义所在：看不到「会失去什么」，确认按钮就只是个「确定」
+        theirs: { following: 42, catchup: 3, diary: 17, tierlists: 2, reports: 1 },
+        mine: { following: 5, catchup: 0, diary: 1, tierlists: 0, reports: 0 },
+      },
+      onExport: () => {},
+      onImport: () => {},
+      onConfirmImport: () => {},
+      onCancelImport: () => {},
+    },
+  });
+  assert.ok(html.includes('jikai-backup-20260926-1200.json'), '要说清导的是哪个文件');
+  assert.ok(html.includes('文件里'), '要有「文件里」那一行');
+  assert.ok(html.includes('本机现在'), '要有「本机现在」那一行');
+  assert.ok(html.includes('追番 42') && html.includes('日记 17'), '文件里的条数要真的算出来');
+  assert.ok(html.includes('追番 5') && html.includes('日记 1'), '本机的条数也要算出来');
+  assert.ok(html.includes('确认导入并覆盖'), '确认按钮要说清会发生什么');
+  assert.ok(html.includes('btn btn--danger'), '这一步是破坏性的，不该长得像个普通按钮');
+  assert.ok(html.includes('取消'), '要能退出来');
+  // 反向：本机那行不能把文件里的数字又抄一遍
+  assert.equal(html.includes('追番 42') && html.includes('本机现在</span><b>追番 42'), false);
+});
+
+test('导入待确认：忙的时候按钮要禁用，不是点了没反应', async () => {
+  const html = await renderSettingsTabs({
+    defaultTab: 'data',
+    transfer: {
+      busy: 'import',
+      note: '',
+      pending: { fileName: 'x.json', incoming: {}, theirs: { following: 1 }, mine: { following: 0 } },
+    },
+  });
+  assert.ok(html.includes('正在导入…'), '要显示正在做的事，不然用户会以为卡了');
+  assert.equal((html.match(/disabled=""/g) || []).length >= 3, true, '导入中导出/导入/确认都该禁掉');
+});
+
+test('导入结果那一行要画出来', async () => {
+  const ok = await renderSettingsTabs({ defaultTab: 'data', transfer: { note: '已从「a.json」导入：追番 42 · 覆盖前的记录已另存：C://tmp//backup-import-1.json' } });
+  assert.ok(ok.includes('ssec__result'), '结果要有个区别于普通说明的样式钩子');
+  assert.ok(ok.includes('覆盖前的记录已另存'));
+
+  const bad = await renderSettingsTabs({ defaultTab: 'data', transfer: { note: '「a.json」不是能用的备份：这不是本程序导出的备份文件' } });
+  assert.ok(bad.includes('不是本程序导出的备份文件'), '认不出的文件要把原因说出来，而不是只报「失败」');
+});
+
+/* ── 渲染模式那一行 ───────────────────────────────────── */
+
+test('性能那一块：软件渲染要说出来，并给一个能自己按的出口', async () => {
+  const html = await renderSettingsTabs({
+    appInfo: { isDesktop: true, version: '1.4.0', render: 'software', gpuRecoveries: 0 },
+  });
+  assert.ok(html.includes('>性能<'), '外观页要有这一块');
+  assert.ok(html.includes('软件渲染'), '跑在软件渲染上就得说出来，别让用户自己猜「为什么发涩」');
+  assert.ok(html.includes('data-render-mode="software"'), '给它一个能断言的身份，别靠文案去认');
+  assert.ok(html.includes('再试一次'), '要有个能自己按的出口 —— 以前那个标记写进去就再也没法改回来');
+  assert.ok(html.includes('会把当前窗口关掉重开一次'), '重启是破坏性的，按之前得说清会发生什么');
+});
+
+test('性能那一块：硬件加速时不该摆一个没用的按钮', async () => {
+  const html = await renderSettingsTabs({
+    appInfo: { isDesktop: true, version: '1.4.0', render: 'hardware', gpuRecoveries: 0 },
+  });
+  assert.ok(html.includes('data-render-mode="hardware"'));
+  assert.equal(html.includes('再试一次'), false, '一切正常的时候不该摆个按钮勾着人点');
+  // 反向：正常状态不许出现「软件渲染」这几个字
+  assert.equal(html.includes('软件渲染'), false);
+});
+
+test('性能那一块：浏览器壳和拿不到 appInfo 时整块都不出现', async () => {
+  // 浏览器里渲染模式归浏览器管，摆一行「硬件加速」只是好看，点了也没用
+  const web = await renderSettingsTabs({ appInfo: { isDesktop: false, version: '1.4.0', platform: 'web' } });
+  assert.equal(web.includes('data-render-mode'), false);
+  assert.equal(web.includes('再试一次'), false);
+
+  // 反向：面板没给 appInfo 的时候（老壳 / 只渲染面板的测试）也不能凭空冒出来
+  const none = await renderSettingsTabs({});
+  assert.equal(none.includes('data-render-mode'), false, '拿不到 appInfo 就不该硬画一块空的出来');
+  assert.equal(none.includes('再试一次'), false);
 });

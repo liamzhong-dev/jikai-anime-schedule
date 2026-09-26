@@ -30,7 +30,17 @@ export default function DetailDrawer({
   return (
     <>
       <div className="drawer__mask" onClick={onClose} />
-      <aside className="drawer__panel" role="dialog" aria-label={anime.titleZh || anime.titleJa}>
+      {/*
+        `data-drawer-id` 只给自检用：光断言「抽屉开了」不够 ——
+        「点的是 A、开出来的是 B」（比如把下标当 id 传下去）同样是错的，
+        但只看 `.drawer__panel` 存不存在是看不出来的。
+      */}
+      <aside
+        className="drawer__panel"
+        role="dialog"
+        aria-label={anime.titleZh || anime.titleJa}
+        data-drawer-id={anime.id ?? ''}
+      >
         <button type="button" className="drawer__close" onClick={onClose} title="关闭">✕</button>
 
         <div className="drawer__head">

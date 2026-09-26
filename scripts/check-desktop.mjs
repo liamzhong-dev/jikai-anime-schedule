@@ -44,12 +44,20 @@
  * 并让探针打开设置面板、在取景框里按真实指针拖一下，跑完再回来读 state.json。
  * 验的是「按住拖 → 像素换算 → store → 防抖 → IPC → 磁盘」整条链 ——
  * 这里面除了「框画出来了」以外的每一环，单测和 SSR 都够不着。
+ *
+ * `--cardopen` 会让主进程用**真实鼠标事件**点一下封面正中，验「点封面能开详情抽屉」。
+ * 它不能用合成 click 代替：合成事件直接派发给元素、绕开命中测试，封面上真盖着东西
+ * 也照样成功 —— 「用户点不开」就是这么漏出去的。
+ *
+ * 程序被自己的窗口占着锁时，这个脚本会**把本项目的 Electron 关掉再来一次**
+ * （只认命令行里带本项目路径的进程）。`--no-kill` 可以关掉这个行为。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { builtinItems } from '../src/data/builtin/index.js';
+import { closeRunningApp } from './lib/killapp.mjs';
 
 const root = process.cwd();
 const dist = path.join(root, 'dist');
@@ -61,9 +69,16 @@ const season = arg('season', '');
 const profile = arg('profile', '');
 const click = Number(arg('click', '0'));
 const wp = process.argv.includes('--wp');
+const cardopen = process.argv.includes('--cardopen');
+const retryhw = process.argv.includes('--retryhw');
 
 if (wp && !profile) {
   console.error('✗ --wp 必须同时给 --profile：不给的话这次自检会去拖**用户真实存档**里的壁纸位置');
+  process.exit(2);
+}
+
+if (retryhw && !profile) {
+  console.error('✗ --retryhw 必须同时给 --profile：它要往 boot.json 里写一份降级标记，不能拿用户真实档案试');
   process.exit(2);
 }
 
@@ -331,6 +346,23 @@ if (click > 0) env.JIKAI_SMOKE_CLICK = String(click);
 if (view === 'search') env.JIKAI_SMOKE_SEARCH = SEARCH_WORD;
 // 壁纸拖动那一路：让探针打开设置、在取景框里真拖一下
 if (wp) env.JIKAI_SMOKE_WPDRAG = '1';
+/*
+ * 封面热区那一路：主进程用**真实鼠标事件**（sendInputEvent）点一下封面正中。
+ * 这条不能用合成 click 代替 —— 合成事件直接派发给元素，就算有东西盖在封面上
+ * 也照样「成功」，于是「用户点不开」永远查不出来。
+ */
+if (cardopen) env.JIKAI_SMOKE_CARDOPEN = '1';
+/*
+ * 「再试一次硬件加速」那一路：靠一个标记文件把重启后的那一份认出来。
+ *
+ * 为什么非要用文件：新起来的进程**不继承输出管道**，它的 stdout 到不了这里
+ * （自愈那条链就是因为这个被误判过一次的）。
+ */
+const retryMarker = path.join(root, 'test', '.tmp', 'retryhw.marker');
+if (retryhw) {
+  try { fs.rmSync(retryMarker, { force: true }); } catch { /* 本来就没有 */ }
+  env.JIKAI_SMOKE_RETRYHW = retryMarker;
+}
 
 let expected = null;
 let profileDir = '';
@@ -359,18 +391,126 @@ if (profile) {
   }
   expected = seedProfile(profileDir, view, wp);
   env.JIKAI_USERDATA = profileDir;
+
+  /*
+   * 「再试一次」那一路要从**降级态**起步，先往这份档案里写一个 degrade:true。
+   * 不写的话这一次本来就是硬件加速，「清掉标记」根本无从验起 ——
+   * 那种自检会是绿的，因为压根没有任何东西需要被清掉。
+   */
+  if (retryhw) {
+    fs.writeFileSync(
+      path.join(profileDir, 'boot.json'),
+      JSON.stringify({ phase: 'healthy', degrade: true, healthyStreak: 0, recoveries: 0 }),
+      'utf8',
+    );
+  }
 }
 
-const output = await new Promise((resolve, reject) => {
-  const child = spawn(electron, ['.'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  let out = '';
-  let err = '';
-  child.stdout.on('data', (d) => { out += d.toString(); });
-  child.stderr.on('data', (d) => { err += d.toString(); });
-  const timer = setTimeout(() => child.kill('SIGKILL'), 120000);
-  child.on('close', () => { clearTimeout(timer); resolve({ out, err }); });
-  child.on('error', reject);
-});
+/**
+ * 起一次桌面壳，把 stdout / stderr 收回来。
+ */
+async function runSmoke(env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(electron, ['.'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 120000);
+    child.on('close', () => { clearTimeout(timer); resolve({ out, err }); });
+    child.on('error', reject);
+  });
+}
+
+let output = await runSmoke(env);
+
+/*
+ * 被自己的窗口占着锁时，**关掉它再来一次**。
+ *
+ * 应用是单实例的：用户开着窗口跑自检，第二份起不来就直接退，一个字都不打印 ——
+ * 报出来的症状是「窗口没起来」，会让人去查渲染进程。所以这里不再只是打印一句提示。
+ *
+ * ⚠️ 只在**真的被占锁**时才动手（看主进程打的那行 SMOKE_FAIL），
+ * 而不是每次自检都先杀一遍 —— 无故杀掉用户正开着的窗口，是拿用户的数据换测试方便。
+ * ⚠️ 给了 `--profile` 的运行自带一份 userData、自带一把锁，跟用户的窗口不冲突，
+ * 所以那种情况根本走不到这一步（也不该去动用户的窗口）。
+ * ⚠️ 真不想让它动手就加 `--no-kill`。
+ */
+if (!output.out.includes('SMOKE_OK') && /已有实例在运行/.test(output.out + output.err)) {
+  if (process.argv.includes('--no-kill')) {
+    console.warn('! 已有一份本项目在运行，--no-kill 让它留在那儿；这次自检多半起不来');
+  } else {
+    const r = await closeRunningApp(root);
+    if (r.killed) {
+      if (r.forced) console.warn('  ! 它是被强杀的 —— 那 400ms 防抖里没写盘的改动会丢，别在它正忙的时候跑自检');
+      output = await runSmoke(env);
+    } else if (r.reason === 'no-pid-file') {
+      // ⚠️ 这一支要说清楚：**认不出是谁占着锁**，不是「没人在跑」。
+      // 旧版本的程序没有 pid 文件，或者文件被清掉了，都会走到这里。
+      console.warn('! 锁被占着，但那个进程没留下身份标记（老版本的程序？），自动关不掉');
+    } else if (r.reason === 'stubborn') {
+      console.warn(`! pid ${r.pid} 关不掉（两次都没成），请手动结束它`);
+    }
+  }
+}
+
+/*
+ * ---------- 「再试一次硬件加速」：这条链只能自己走一遍才知道 ----------
+ *
+ * 它跟别的自检不一样：**第一份进程注定不会打出 SMOKE_OK** —— 它按完按钮就把自己重启了，
+ * 所以不能套下面那套判据，得单独判三件事：
+ *   ① 渲染层真的按到了        —— stdout 里有 SMOKE_RETRYHW_CALL，带第一份的 pid
+ *   ② 新的一份真的起来了      —— 标记文件里的 pid 跟第一份不一样
+ *   ③ 主进程真的清了降级标记  —— boot.json 里的 degrade 不再是 true
+ * 少任何一条，用户那边看到的都是「按了没反应」（最难看的是第三条：
+ * 程序重启了、界面回来了，可它还是软件渲染，用户只会觉得「按了这个没用」）。
+ */
+if (retryhw) {
+  const bad = [];
+  const callLine = output.out.split(/\r?\n/).find((l) => l.startsWith('SMOKE_RETRYHW_CALL'));
+  let firstPid = null;
+  if (callLine) {
+    try {
+      firstPid = JSON.parse(callLine.slice('SMOKE_RETRYHW_CALL'.length))?.pid ?? null;
+    } catch { /* 下面按「没按到」算 */ }
+  }
+  if (!firstPid) {
+    const tail = output.out.split(/\r?\n/).filter(Boolean).slice(-5).join(' | ').slice(0, 300);
+    bad.push(`渲染层没按到「再试一次」—— 没有 SMOKE_RETRYHW_CALL 那一行，按钮/桥/探针有一环没接上（stdout 尾部：${tail}）`);
+  }
+
+  // 新的一份是另一个进程，起得比第一份退得晚，所以要等一会儿
+  let up = null;
+  for (let i = 0; i < 40 && !up; i += 1) {
+    try {
+      up = JSON.parse(fs.readFileSync(retryMarker, 'utf8'));
+    } catch {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  if (!up) {
+    bad.push(`重启之后的那一份没起来：${retryMarker} 一直没出现 —— 用户按下去的结局会是「程序关了，再也没回来」`);
+  } else if (firstPid && Number(up.pid) === Number(firstPid)) {
+    bad.push(`标记文件里的 pid 跟第一份一样（${up.pid}）—— 那不是重启，是同一个进程写了两次`);
+  }
+
+  let bootAfter = null;
+  try {
+    bootAfter = JSON.parse(fs.readFileSync(path.join(profileDir, 'boot.json'), 'utf8'));
+  } catch { /* 文件没了就是没了，下面顺手报出来 */ }
+  if (bootAfter?.degrade === true) {
+    bad.push('按了「再试一次」但降级标记还在 —— 下一轮启动照样是软件渲染，这个按钮等于白按');
+  }
+
+  if (bad.length) {
+    console.error(`\n✗ 「再试一次硬件加速」自检失败：${bad.length} 条`);
+    for (const m of bad) console.error(`  · ${m}`);
+    process.exit(1);
+  }
+  console.log('✓ 「再试一次硬件加速」自检通过');
+  console.log(`  · 第一份 pid=${firstPid} 按下按钮 → 重启后的 pid=${up.pid} 自己报到了 → boot.json 里 degrade=${JSON.stringify(bootAfter?.degrade)}`);
+  process.exit(0);
+}
 
 const line = output.out.split(/\r?\n/).find((l) => l.trim().startsWith('SMOKE_OK'));
 if (!line) {
@@ -385,6 +525,7 @@ if (!line) {
    */
   if (all.some((l) => l.includes('已有实例在运行'))) {
     console.error('  → 单实例锁被占：把正在运行的程序关掉再来；或者给 --profile 换一份一次性存档。');
+    console.error('     （上面已经试着自动关掉本项目的进程了；`--no-kill` 可以让它别动手）');
   }
   process.exit(1);
 }
@@ -400,6 +541,23 @@ try {
 const failures = [];
 const warnings = [];
 const check = (ok, msg) => { if (!ok) failures.push(msg); };
+
+/*
+ * 封面热区那一路的结果走的是**独立一行**（SMOKE_CARDOPEN …），不在 SMOKE_OK 的
+ * JSON 里：它是主进程算出来的（sendInputEvent 只有主进程能发），而 SMOKE_OK 装的是
+ * 渲染层探针的返回值。两处混在一起的话，探针那边就得反过来等主进程，绕。
+ */
+let cardReport = null;
+{
+  const coLine = output.out.split(/\r?\n/).find((l) => l.trim().startsWith('SMOKE_CARDOPEN'));
+  if (coLine) {
+    try {
+      cardReport = JSON.parse(coLine.slice(coLine.indexOf('{')));
+    } catch {
+      cardReport = { parseError: coLine.slice(0, 200) };
+    }
+  }
+}
 
 // ---- 视图本身 ----
 check(report.view === view, `视图不对：期望 ${view}，实际 ${report.view}`);
@@ -696,6 +854,56 @@ if (wp) {
   }
 }
 
+// ---- 封面热区：真的用鼠标点一下，详情抽屉要开 ----
+// 这一条守的是「用户点封面」这件最普通的事。它曾经坏过而**没有任何自检报出来**，
+// 原因是当时开抽屉的自检写的是 `.card__title.click()` —— 点的是标题，不是封面：
+// 断言只覆盖了「有个人能开抽屉」，没覆盖「点封面能开抽屉」。
+//
+// 更关键的是那句 click() 是**合成事件**：它把事件直接派发给元素，绕开了命中测试。
+// 封面上真盖着东西时，合成事件照样成功，于是自检全绿、用户点不开。
+// 所以这里用主进程的 sendInputEvent 走真实输入管线，并先把 elementFromPoint
+// 的命中链取回来 —— 真出了遮挡，报告里能直接看出是谁盖的。
+if (cardopen) {
+  const b = cardReport?.before ?? {};
+  const a = cardReport?.after ?? {};
+  check(
+    Number(b.found) === 1,
+    `本季视图里没有一张卡片带封面热区（data-cover-open 一个都没有）`
+      + `：cardopen=${JSON.stringify(cardReport)}`,
+  );
+  if (Number(b.found) === 1) {
+    check(Number(b.openBefore) === 0, '开始之前抽屉就是开着的，这一次点击说明不了任何问题');
+    /*
+     * ⚠️ 判据是 `hitOpen`（热区上那个 data 属性），不是类名。
+     * 这里原来写的是 `hit.includes('card__open')` —— 热区后来搬进共用的 <Cover>、
+     * 类名改成 cover__hot，这条断言就**悄悄失效**了：它不会报错，只会永远红，
+     * 而修法看起来像是「把类名改回去」。外观的类名会变，data 属性才是接口。
+     */
+    check(
+      b.hitOpen === true,
+      `封面正中点到的不是热区，而是 ${JSON.stringify(b.hit)}`
+        + `（命中链 ${JSON.stringify(b.path)}）—— 有东西盖在封面上，用户点不到`,
+    );
+    check(
+      Number(a.panel) === 1,
+      `用鼠标真点了封面正中，详情抽屉却没开（after=${JSON.stringify(a)}）`
+        + ' —— 热区在 DOM 里，但事件没走通',
+    );
+    /*
+     * 「点的是 A、开出来的是 B」同样是错的，只看抽屉在不在是看不出来的。
+     * 这条曾经真的差一点漏掉：每个视图各自把 onOpen 接到 <Cover> 上，
+     * 某个视图传错一层（比如传了 map 的下标）就会这样坏。
+     */
+    if (b.hitOpenId != null) {
+      check(
+        String(a.drawerId) === String(b.hitOpenId),
+        `点的是作品 ${b.hitOpenId}，抽屉里打开的是 ${JSON.stringify(a.drawerId)}（标题「${a.title}」）`
+          + ' —— 列表里的 onOpen 接错了一层',
+      );
+    }
+  }
+}
+
 // ---- 内置数据在（离线开箱可用的前提）----
 check(report.library === 'yes', `内置作品库没加载（library=${report.library}），离线就开不了箱了`);
 
@@ -769,6 +977,13 @@ if (wp) {
     );
     console.log(`  框里那行人话：${w.hint}`);
   }
+}
+if (cardopen) {
+  const b = cardReport?.before ?? {};
+  const a = cardReport?.after ?? {};
+  console.log(`  封面热区 ${b.box} · 正中命中 ${JSON.stringify(b.hit)}`);
+  console.log(`  真实鼠标点击 → 详情抽屉 ${a.panel ?? '?'} 个${a.title ? ` · 标题「${a.title}」` : ''}`);
+  if (Array.isArray(b.path)) console.log(`  命中链：${b.path.join(' < ')}`);
 }
 console.log(`  截图：${path.relative(root, shot)}（${(fs.statSync(shot).size / 1024).toFixed(0)} KB）`);
 for (const w of warnings) console.log(`  ! ${w}`);

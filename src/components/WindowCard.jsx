@@ -1,9 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { setLayout } from '../core/store.js';
-import { RESIZE_CURSOR, RESIZE_DIRS, fitRect, resizeRect } from '../core/layout.js';
+import { fitRect } from '../core/layout.js';
 
 /**
- * 卡片式窗口：拖标题栏移动、拖**八条边**缩放、双击标题栏最大化、按钮折叠。
+ * 卡片式窗口：拖标题栏移动、双击标题栏最大化、按钮折叠。
+ *
+ * ⚠️ **不做缩放了**（这一轮去掉的）。八方向把手做过一轮，去掉不是因为它写不出来，
+ * 而是因为它**没有用**：卡片窗口能拉大，里面的封面和字还是原来那么大 ——
+ * 用户真正想要的是「换个大小看」，那是**内容**的比例，不是窗口的比例。
+ * 那件事现在归设置里的「封面尺寸 / 文字大小」管（见 SettingsPanel 的显示分组）。
+ * 留着八条边，只会多出一层到处都能抓到、一拖就把版面弄乱的把手。
  *
  * 拖动期间只动本地 state，松手才写回 store —— 否则每帧都会触发一次全局重渲染
  * 与一次落盘，拖起来会发涩。
@@ -13,7 +19,7 @@ export default function WindowCard({ id, title, hint, actions, children, default
   const initial = saved ?? defaultRect ?? { x: 16, y: 16, w: 640, h: 420 };
 
   const [rect, setRect] = useState(initial);
-  const [mode, setMode] = useState(null); // move | resize | null
+  const [dragging, setDragging] = useState(false);
   const [maxed, setMaxed] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const drag = useRef(null);
@@ -23,7 +29,7 @@ export default function WindowCard({ id, title, hint, actions, children, default
 
   // 外部（例如换视图后 store 被重置）改了布局时同步一次
   useEffect(() => {
-    if (saved && !mode) setRect(saved);
+    if (saved && !dragging) setRect(saved);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved?.x, saved?.y, saved?.w, saved?.h]);
 
@@ -33,6 +39,10 @@ export default function WindowCard({ id, title, hint, actions, children, default
    * 只在「这张卡用户还没摆过」时做一次（`saved` 为空）—— 已经摆过的是用户的
    * 选择，哪怕他把卡片拖到画布外面也不该被纠正（多屏、临时挪开都很正常）。
    * 不落盘：窗口重新变宽之后，默认摆位又该是原来的大小。
+   *
+   * ⚠️ 窗口不能缩放之后这一步反而更必要：默认摆位是按 1440 宽的窗口定的
+   * （见 layoutPresets.js），窄窗下卡片比画布还宽 ——
+   * 而用户现在**没有任何办法**自己把它缩回来（以前至少能拖右下角）。
    */
   useEffect(() => {
     if (fitted.current || saved) return;
@@ -51,21 +61,19 @@ export default function WindowCard({ id, title, hint, actions, children, default
   }, [saved]);
 
   useEffect(() => {
-    if (!mode) return undefined;
+    if (!dragging) return undefined;
 
     const onMove = (e) => {
       const d = drag.current;
       if (!d) return;
-      const dx = e.clientX - d.sx;
-      const dy = e.clientY - d.sy;
-      if (mode === 'move') {
-        setRect({ ...d.base, x: Math.max(0, d.base.x + dx), y: Math.max(0, d.base.y + dy) });
-      } else {
-        setRect(resizeRect({ base: d.base, dx, dy, dir: d.dir }));
-      }
+      setRect({
+        ...d.base,
+        x: Math.max(0, d.base.x + (e.clientX - d.sx)),
+        y: Math.max(0, d.base.y + (e.clientY - d.sy)),
+      });
     };
     const onUp = () => {
-      setMode(null);
+      setDragging(false);
       setRect((r) => {
         setLayout(id, r);
         return r;
@@ -80,13 +88,13 @@ export default function WindowCard({ id, title, hint, actions, children, default
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-  }, [mode, id]);
+  }, [dragging, id]);
 
-  const start = (m, dir = 'se') => (e) => {
+  const start = () => (e) => {
     e.preventDefault();
     e.stopPropagation();
-    drag.current = { sx: e.clientX, sy: e.clientY, base: { ...rect }, dir };
-    setMode(m);
+    drag.current = { sx: e.clientX, sy: e.clientY, base: { ...rect } };
+    setDragging(true);
   };
 
   const toggleMax = () => {
@@ -107,13 +115,13 @@ export default function WindowCard({ id, title, hint, actions, children, default
 
   const cls = ['window'];
   if (maxed) cls.push('window--max');
-  if (mode) cls.push('window--dragging');
+  if (dragging) cls.push('window--dragging');
 
   return (
     <section className={cls.join(' ')} style={style} ref={rootRef}>
       <header
         className="window__bar"
-        onPointerDown={start('move')}
+        onPointerDown={start()}
         onDoubleClick={toggleMax}
       >
         <span className="window__title">{title}</span>
@@ -135,22 +143,6 @@ export default function WindowCard({ id, title, hint, actions, children, default
       </header>
 
       {!collapsed && <div className="window__body">{children}</div>}
-      {/*
-        八条边都能拖。原来只有右下角一个把手，想把卡片加宽就得先摸到那个角 ——
-        卡片比画布宽的时候，那个角还得先把滚动条拖过去才够得着。
-      */}
-      {!collapsed && !maxed
-        ? RESIZE_DIRS.map((d) => (
-            <div
-              key={d}
-              className={`window__edge window__edge--${d}`}
-              data-window-resize={d}
-              title="拖动缩放"
-              style={{ cursor: RESIZE_CURSOR[d] }}
-              onPointerDown={start('resize', d)}
-            />
-          ))
-        : null}
     </section>
   );
 }
