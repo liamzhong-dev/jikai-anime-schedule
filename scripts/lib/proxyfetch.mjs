@@ -27,8 +27,13 @@ export function proxyFromEnv(env = process.env) {
   return { host, port: Number(port), from: 'env' };
 }
 
-/** 走 CONNECT 隧道连到目标主机，拿到一条裸 socket */
-function tunnel(proxy, targetHost, targetPort, timeoutMs) {
+/**
+ * 走 CONNECT 隧道连到目标主机，拿到一条裸 socket。
+ *
+ * 导出是为了给 poolfetch.mjs 复用 —— 那边要在一条连接上连发多个请求
+ * （全量抓取时每请求重建隧道太贵，而且并发一高代理侧就会断 TLS）。
+ */
+export function tunnel(proxy, targetHost, targetPort, timeoutMs) {
   return new Promise((resolve, reject) => {
     let done = false;
     const finish = (fn, v) => {
@@ -142,8 +147,20 @@ export async function httpGet(url, { proxy = null, headers = {}, timeoutMs = 150
 
 /**
  * 探测可用的本地代理。
- * 做法：拿一个真实目标去连一次 CONNECT，连得上才算数 —— 光看端口在监听不够，
- * 很多软件会开一堆监听端口但没一个能出网。
+ *
+ * 端口扫描那一路：拿一个真实目标去连一次 CONNECT，连得上才算数 ——
+ * 光看端口在监听不够，很多软件会开一堆监听端口但没一个能出网。
+ *
+ * ⚠️ 环境变量那一路必须**再真发一次请求**，只验 CONNECT 是不够的。
+ * 踩过的坑：有些环境（沙盒 / CI）会注入 http_proxy 指向一个
+ * 「能回 CONNECT、但不转发数据」的黑洞代理。它隧道建得成，于是被选中；
+ * 之后每个请求都在 TLS 阶段被掐断，报
+ * `Client network socket disconnected before secure TLS connection was established`
+ * —— 看着像网络抖动或目标站不稳，其实是代理从头就选错了。
+ * 本机实测就是这样：环境变量指向 11530（curl 直测 code=000），
+ * 真正能用的是扫出来的 7892。
+ *
+ * 端口扫到的候选不必做这一步：那些是本机代理软件，CONNECT 通了数据就通。
  */
 export async function detectProxy({ target = 'api.bgm.tv', port = 443, timeoutMs = 2500, env = process.env } = {}) {
   const fromEnv = proxyFromEnv(env);
@@ -151,9 +168,14 @@ export async function detectProxy({ target = 'api.bgm.tv', port = 443, timeoutMs
     try {
       const socket = await tunnel(fromEnv, target, port, timeoutMs);
       socket.destroy();
-      return fromEnv;
+      const res = await httpGet(`https://${target}/v0/subjects/1`, {
+        proxy: fromEnv,
+        timeoutMs: Math.max(timeoutMs, 8000),
+        headers: { 'User-Agent': 'jikai-proxy-probe' },
+      });
+      if (res.status > 0) return fromEnv;
     } catch {
-      /* 环境变量里那个不可用，继续扫端口 */
+      /* 环境变量里那个不可用（或只是个黑洞口），继续扫端口 */
     }
   }
   for (const p of PROXY_CANDIDATES) {

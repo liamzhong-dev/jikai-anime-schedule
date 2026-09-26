@@ -19,6 +19,7 @@ import WallpaperLayer from './components/WallpaperLayer.jsx';
 import Toasts from './components/Toasts.jsx';
 import { useStoreState } from './core/useStore.js';
 import { searchNames } from './core/library.js';
+import { splitHits, stubFromHit } from './core/search.js';
 import {
   addCatchup, archiveSubjects, exportLayoutPresets, flush, listGroups, load as loadStore, markEpisode,
   patchCatchup, patchFollowing, patchSettingSection, patchSettings, readSeasonCacheRaw,
@@ -912,6 +913,37 @@ export default function App() {
       ?? { id: Number(key), titleZh: '', titleJa: `条目 ${key}`, cover: null, score: null, __missing: true };
   }, [pool, st.subjects]);
 
+  /**
+   * 顶栏搜索的「本季之外」补充。
+   *
+   * 主区域那个列表只按本季过滤，搜一部老番时它通常是空的 —— 而全量名称索引
+   * （八千多部，含中/日/英名）早就在本地了，只是以前只服务「加入补番」这一个动作。
+   * 这里拿它再搜一遍，把不在本季的命中交给下拉，于是「搜到任何一部番」才成立。
+   *
+   * limit 给 40 而不是直接取 8：本季命中若排在前面，别季的会被挤掉，
+   * 而分开统计正是 splitHits 干的事（它先按季过滤再取前 N）。
+   */
+  const searchSplit = useMemo(() => {
+    const q = keyword.trim();
+    if (!q || !nameIndex?.entries?.length) return { others: [], inSeason: 0 };
+    const ids = new Set(season.map((a) => Number(a.id)));
+    return splitHits(searchNames(nameIndex, q, { limit: 40 }), ids, { othersLimit: 8 });
+  }, [keyword, nameIndex, season]);
+
+  const searchReady = Boolean(nameIndex?.entries?.length);
+
+  /**
+   * 点开一条跨季搜索结果。
+   *
+   * 本地有完整条目就用它；没有（老番常常是这种）就用索引里那点信息拼一个最小条目 ——
+   * 抽屉对空字段有兜底，名字、平台、外链是对的，够用户确认「是不是这部」并跳去 Bangumi。
+   * 直接用 diaryLookup 的话会拿到 `__missing` 占位，界面上只剩一句「条目 12345」。
+   */
+  const handlePickSearch = useCallback((hit) => {
+    const local = diaryLookup(hit.id);
+    setDrawer(local?.__missing ? stubFromHit(hit) : local);
+  }, [diaryLookup]);
+
   const diaryData = readDiary();
 
   const handleSaveDiary = useCallback((id, { rating, note }) => {
@@ -1132,6 +1164,10 @@ export default function App() {
           onSeason={setSeasonKey}
           keyword={keyword}
           onKeyword={setKeyword}
+          searchOthers={searchSplit.others}
+          searchInSeason={searchSplit.inSeason}
+          searchReady={searchReady}
+          onPickSearch={handlePickSearch}
           onRefresh={() => loadData(seasonKey, { live: true })}
           syncing={syncing}
           progress={progressPct}

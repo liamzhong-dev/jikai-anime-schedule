@@ -22,10 +22,16 @@
  *   node scripts/check-desktop.mjs --view=catchup --profile=<空目录> --season=2026q3 --click=8
  *   node scripts/check-desktop.mjs --view=report --profile=<空目录> --season=2026q3
  *   node scripts/check-desktop.mjs --view=history --profile=<空目录> --season=2026q3
+ *   node scripts/check-desktop.mjs --view=search --profile=<空目录> --season=2026q3
  *
  * 报告视图跑两次各有意义：带 `--profile` 那次的 reports 是我们自己塞的（断言的是
  * 「磁盘 → 画布」这条接线），不带 `--profile` 那次断言的是「封面真的走缓存」。
  * `check:desktop:report` 只跑前者（后者要热缓存，放进 npm script 会看运行环境脸色）。
+ *
+ * `--view=search` 这一路会播种一份**名称索引**（userData 下的 nameIndex.json），
+ * 并让主进程探针真的往搜索框里打字，验的是「索引读得到 → 输入 → 下拉弹出来」
+ * 这条链。关键词只定义在脚本里的 SEARCH_WORD 一处，经环境变量递给探针 ——
+ * 两边各写一份的话，改一处就会不同步，症状是「下拉是空的」，看着像功能坏了。
  *
  * `--profile` 给这次运行指定一个一次性的存档目录（主进程的 JIKAI_USERDATA），
  * 并往里**播种**好这次要验的数据：要验「磁盘上的数据能不能一路走到界面上」，
@@ -70,6 +76,23 @@ const r2 = (n) => Math.round(n * 100) / 100;
 const titleOf = (it) => it.titleZh || it.titleJa;
 
 /**
+ * 跨季搜索自检用的名称索引样本。
+ *
+ * ⚠️ 搜索词只有这一处定义，靠 SEARCH_WORD 经 JIKAI_SMOKE_SEARCH 传给主进程探针。
+ * 探针里再硬写一份的话，两边改一处就会不同步，而症状是「下拉是空的」——
+ * 看着像功能坏了，其实是脚本自己设定的词对不上。
+ *
+ * 两条同前缀的跨季老番（都不在当前季，所以必须出现在下拉里）+ 一条当前季的
+ * （用来确认它**不会**被重复列进下拉：本季的已经在主区域的列表里了）。
+ */
+const SEARCH_WORD = '鬼灭';
+const SEARCH_INDEX = [
+  { id: 900001, zh: '鬼灭之刃', ja: '鬼滅の刃', en: 'Demon Slayer', y: 2019, q: 2, t: 'tv' },
+  { id: 900002, zh: '鬼灭之刃 无限列车篇', ja: '鬼滅の刃 無限列車編', en: '', y: 2021, q: 4, t: 'tv' },
+  { id: 900003, zh: '本季的测试条目', ja: 'テスト用', en: '', y: 2026, q: 3, t: 'tv' },
+];
+
+/**
  * 给一次性 profile 播种，并算好「按这份输入应该得到什么」。
  *
  * 期望值是从**输入数据**推出来的（内置番剧的 Bangumi 分 + 我们塞进去的评分），
@@ -81,6 +104,8 @@ function seedProfile(dir, forView) {
     process.exit(2);
   }
   const state = {};
+  // 名称索引是独立文件（跟真实实现一致：它约 1MB，不跟 state 混在一起）
+  let nameIndex = null;
   let expectation = null;
 
   if (forView === 'diary') {
@@ -179,6 +204,35 @@ function seedProfile(dir, forView) {
       events: 3,   // a 两条（开始追 + 看完）+ b 一条
       days: [12],
     };
+  } else if (forView === 'search') {
+    /*
+     * 跨季搜索的输入是**名称索引**（userData 下的 nameIndex.json），不是 state ——
+     * 所以这个分支只写索引，state 留空。
+     *
+     * 期望值从索引推，不写死数字：命中搜索词的条目里，**不在当前季的**才该进下拉。
+     * 这条规则正是这个功能的核心，也让断言顺带守住了「在不在本季」的判定。
+     */
+    nameIndex = {
+      builtAt: Date.now(),
+      source: 'smoke',
+      count: SEARCH_INDEX.length,
+      span: [2019, 2026],
+      entries: SEARCH_INDEX,
+    };
+    const key = season || '2026q3';
+    const inSeasonIds = new Set(builtinItems(key).map((a) => Number(a.id)));
+    const hit = SEARCH_INDEX.filter((e) => e.zh.includes(SEARCH_WORD));
+    const others = hit.filter((e) => !inSeasonIds.has(e.id));
+    if (!hit.length) {
+      console.error(`✗ 索引样本里没有一条含「${SEARCH_WORD}」，自检没法验命中`);
+      process.exit(2);
+    }
+    expectation = {
+      ready: '1',
+      items: others.length,
+      panel: others.length,
+      titles: others.map((e) => e.zh),
+    };
   }
 
   /*
@@ -189,6 +243,9 @@ function seedProfile(dir, forView) {
    */
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(state, null, 2), 'utf8');
+  // 索引只有当这次自检真的需要时才写 —— 写了一份别的视图用不上的索引，
+  // 会顺手把「没有索引时该怎么显示」这条分支从别的自检里遮掉。
+  if (nameIndex) fs.writeFileSync(path.join(dir, 'nameIndex.json'), JSON.stringify(nameIndex), 'utf8');
   return expectation;
 }
 
@@ -205,6 +262,9 @@ env.JIKAI_SMOKE_VIEW = view;
 env.JIKAI_SMOKE_WAIT = wait;
 if (season) env.JIKAI_SMOKE_SEASON = season;
 if (click > 0) env.JIKAI_SMOKE_CLICK = String(click);
+// 只有搜索那一路才给探针递词：探针见到词就会往输入框里打字，
+// 别的视图不需要，平白多一步还可能干扰它们自己的断言。
+if (view === 'search') env.JIKAI_SMOKE_SEARCH = SEARCH_WORD;
 
 let expected = null;
 let profileDir = '';
@@ -213,7 +273,7 @@ if (profile) {
   /**
    * 清掉上一轮留下的存档。
    *
-   * ⚠️ 「整个目录递归删」在某些环境里会被拦下来（WorkBuddy 沙盒的 safe-delete shim）：
+   * ⚠️ 「整个目录递归删」在某些沙盒环境里会被拦下来（safe-delete 钩子的批量确认）：
    * 一次删超过 50 个文件就要人工确认，报
    *   [safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":64,"threshold":50,…}
    * 而 Electron 的 userData 目录里光 Cache/GPUCache 就六七十个文件，必然超线。
@@ -457,6 +517,42 @@ if (view === 'history') {
   }
 }
 
+// ---- 跨季搜索：能不能真的捞到本季之外的老番 ----
+// 这一条守的是整条链：名称索引落到 userData → App 读到 → 在顶栏输入 →
+// 下拉弹出来 → 列的是别季的命中。
+// 纯函数与 SSR 各守一层，但「真壳里 React 的事件链通不通、索引读不读得到」
+// 只有桌面壳能回答 —— 而索引读不到时，界面会安静地什么都不显示，看不出是坏了。
+//
+// ⚠️ 探针往受控 input 里打字用的是原生 setter（见 electron/main.cjs）——
+// 直接赋 value 是走不到 onChange 的，那样这条断言会永远「面板没弹」，
+// 而现象看着像功能坏了。
+if (view === 'search') {
+  check(Number(report.qsearchBox) === 1, `顶栏没有搜索容器（qsearchBox=${report.qsearchBox}）`);
+  check(Number(report.searchInput) === 1, `顶栏没有搜索输入框（searchInput=${report.searchInput}）`);
+
+  if (expected) {
+    check(
+      String(report.qsearchReady) === expected.ready,
+      `索引可用状态应当是 ${expected.ready}，实际 ${report.qsearchReady} —— nameIndex.json 没被读到`,
+    );
+    check(
+      Number(report.qsearchPanel) === expected.panel,
+      `下拉应当列出 ${expected.panel} 条，实际 ${report.qsearchPanel}`
+        + ' —— 关键词没进到组件里，或者别季的命中被当成「本季的」滤掉了',
+    );
+    check(
+      Number(report.qsearchItems) === expected.items,
+      `下拉命中项应当是 ${expected.items} 条，实际 ${report.qsearchItems}`,
+    );
+    check(
+      JSON.stringify(report.qsearchNames) === JSON.stringify(expected.titles),
+      `命中名应当是 ${JSON.stringify(expected.titles)}，实际 ${JSON.stringify(report.qsearchNames)}`,
+    );
+  } else {
+    warnings.push('没有 --profile 播种名称索引，搜索下拉自然是空的（断言只在播种的那次才有意义）');
+  }
+}
+
 // ---- 内置数据在（离线开箱可用的前提）----
 check(report.library === 'yes', `内置作品库没加载（library=${report.library}），离线就开不了箱了`);
 
@@ -503,6 +599,13 @@ if (view === 'history') {
   if (expected) {
     console.log(`  耗时：${JSON.stringify(report.historyDays)} 天（期望 ${JSON.stringify(expected.days)}）`);
   }
+}
+if (view === 'search') {
+  console.log(
+    `  搜索：输入「${SEARCH_WORD}」→ 下拉 ${report.qsearchPanel} 条 · 索引可用 ${report.qsearchReady}`
+    + ` · 命中 ${(report.qsearchNames ?? []).join(' / ') || '(空)'}`,
+  );
+  if (expected) console.log(`  期望命中：${expected.titles.join(' / ')}`);
 }
 if (view === 'catchup') {
   console.log(`  补番卡片 ${report.diaryInputs} 张带打分控件`);

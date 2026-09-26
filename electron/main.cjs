@@ -473,7 +473,20 @@ function createWindow() {
 
         const st = await coverCache?.stats?.();
         const probe = await win.webContents.executeJavaScript(
-          `JSON.stringify({
+          `(async () => {
+             // 跨季搜索只在自检**指定了搜索词**时才模拟输入 ——
+             // 别的视图也走这段探针，平白往输入框里塞字会干扰它们的断言。
+             const KW = ${JSON.stringify(process.env.JIKAI_SMOKE_SEARCH || '')};
+             const box = document.querySelector('[data-search-input]');
+             if (KW && box) {
+               // React 的受控 input 不能直接赋 value —— 那样绕过了 onChange，
+               // 界面根本不会更新。要用原型上的原生 setter，再派发一个 input 事件。
+               const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+               setter.call(box, KW);
+               box.dispatchEvent(new Event('input', { bubbles: true }));
+               await new Promise((r) => setTimeout(r, 300));
+             }
+             return JSON.stringify({
              view: (globalThis.location?.hash || '').replace(/^#\\//, '').split('?')[0],
              rows: document.querySelectorAll('.tier-row__label').length,
              tiles: document.querySelectorAll('.tier-item__art').length,
@@ -519,7 +532,16 @@ function createWindow() {
              historyFinished: Number(document.querySelector('[data-history-finished]')?.getAttribute('data-history-finished') ?? -1),
              historyEvents: document.querySelectorAll('[data-history-event]').length,
              historyDays: [...document.querySelectorAll('[data-history-finish-days]')].map((e) => Number(e.getAttribute('data-history-finish-days'))),
-           })`,
+             // 跨季搜索：输入框在不在 / 面板条数 / 索引可用状态 / 命中名。
+             // 「下拉没弹」和「搜出来是空的」在截图里长得一模一样，只有分开数才判得了。
+             searchInput: document.querySelectorAll('[data-search-input]').length,
+             qsearchBox: document.querySelectorAll('[data-qsearch]').length,
+             qsearchPanel: Number(document.querySelector('[data-qsearch-panel]')?.getAttribute('data-qsearch-panel') ?? -1),
+             qsearchReady: document.querySelector('[data-qsearch-panel]')?.getAttribute('data-qsearch-ready') ?? null,
+             qsearchItems: document.querySelectorAll('[data-qsearch-item]').length,
+             qsearchNames: [...document.querySelectorAll('[data-qsearch-item] .qsearch__name')].map((e) => e.textContent),
+           });
+          })()`,
         ).catch((e) => `{"error":${JSON.stringify(String(e?.message ?? e))}}`);
         const img = await win.webContents.capturePage();
         fs.writeFileSync(SMOKE_PNG, img.toPNG());
@@ -806,6 +828,17 @@ async function runIpcSmoke() {
   });
 
   // ---- 2. 封面缓存：只读模式取一张肯定没有的，验证它「不发网络、也不崩」----
+  /*
+   * 先把冒烟专用的那个组清干净，保证起点是空的。
+   *
+   * 为什么必须先清：下面有一条「空 group 清理应当返回 removed=0」的断言，
+   * 而上一轮若在 warm 之后被打断（超时 / 崩溃 / 手工中断），
+   * `covers/__ipc_smoke__` 就会残留一条 —— 于是这次断言红成 removed=1，
+   * 看着像清理逻辑坏了，其实是上一轮留下的脏状态（实测真撞上了一次）。
+   * **一次测试的结果不该取决于上一次有没有跑干净。**
+   */
+  await call('cover:clear', { group: '__ipc_smoke__' });
+
   await step('cover:get(readOnly)', async () => {
     const r = await call('cover:get', {
       group: '__ipc_smoke__',

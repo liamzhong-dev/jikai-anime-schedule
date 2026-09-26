@@ -1,5 +1,6 @@
 import React from 'react';
 import ProgressBar from './ProgressBar.jsx';
+import SearchBox from './SearchBox.jsx';
 import { seasonLabel } from '../core/time.js';
 import { SOURCES } from '../data/sources.js';
 import { getTheme } from '../theme/themes.js';
@@ -14,6 +15,7 @@ const TITLES = {
 export default function TopBar({
   view, seasonKey, seasons, onSeason,
   keyword, onKeyword,
+  searchOthers, searchInSeason, searchReady, searchHint, onPickSearch,
   onRefresh, syncing, progress,
   dataSource, onDataSource,
   onOpenSettings, themeId, onCycleTheme,
@@ -31,12 +33,14 @@ export default function TopBar({
         ))}
       </select>
 
-      <input
-        className="topbar__search"
+      <SearchBox
         value={keyword}
-        placeholder="搜番剧名 / 制作公司 / 标签"
-        onChange={(e) => onKeyword(e.target.value)}
-        data-search-input="1"
+        onChange={onKeyword}
+        others={searchOthers}
+        inSeason={searchInSeason}
+        ready={searchReady}
+        hint={searchHint}
+        onPick={onPickSearch}
       />
 
       <div className="topbar__spacer" />

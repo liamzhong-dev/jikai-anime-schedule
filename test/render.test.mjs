@@ -34,7 +34,7 @@ await build({
   logLevel: 'silent',
 });
 
-const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport, renderHistory } = await import(pathToFileURL(outfile).href);
+const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport, renderHistory, renderSearchBox } = await import(pathToFileURL(outfile).href);
 
 const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const titles = SAMPLE_ITEMS.map((a) => escapeHtml(a.titleZh || a.titleJa));
@@ -714,4 +714,61 @@ test('App 的 history 视图与侧栏导航都挂上了（组件好用 ≠ 接�
   // 数字要对（6 部都在总数里），但不能假装它们有时间。
   assert.ok(html.includes('data-history-total="6"'), '播种的 6 部要算进总数');
   assert.ok(html.includes('data-history-untimed="6"'), '没有时间戳就如实说 6 部都未知');
+});
+
+// ---------------- 跨季搜索（v1.4）----------------
+
+test('跨季搜索：下拉列出别季的命中，且标出是哪一季', async () => {
+  const html = await renderSearchBox({
+    value: '鬼灭',
+    others: [
+      { id: 1, zh: '鬼灭之刃', ja: '鬼滅の刃', type: 'tv', seasonKey: '2019q2', score: 100 },
+      { id: 2, zh: '鬼灭之刃 无限列车篇', ja: '鬼滅の刃 無限列車編', type: 'tv', seasonKey: '2021q4', score: 90 },
+    ],
+    inSeason: 2,
+  });
+
+  assert.ok(html.includes('data-qsearch-panel="2"'), '下拉要在，条数写进属性便于自检');
+  assert.equal(countOf(html, 'data-qsearch-item='), 2, '两条命中都要列出来');
+  assert.ok(html.includes('鬼灭之刃'), '名字要在');
+  assert.ok(html.includes('data-qsearch-in-season="2"'), '本季命中数要写进属性');
+  // 光给一个名字、不说是哪一季，用户没法判断要找的是不是这一部
+  assert.ok(html.includes('2019 年 4 月'), '别季的要标出年份和月份');
+  assert.ok(html.includes('本季另有 2 部'), '本季命中的要去重说明，避免用户以为漏了');
+});
+
+test('跨季搜索：输入为空时一个面板都不弹（免得一进界面就挂一块东西）', async () => {
+  const html = await renderSearchBox({
+    value: '',
+    others: [{ id: 1, zh: '鬼灭之刃', ja: 'x', type: 'tv', seasonKey: '2019q2' }],
+  });
+  assert.equal(countOf(html, 'data-qsearch-panel='), 0, '空关键词不弹面板');
+  assert.equal(countOf(html, 'data-qsearch-item='), 0);
+  assert.ok(html.includes('data-search-input="1"'), '输入框本身要在');
+});
+
+test('跨季搜索：还没有名称索引时给一句说明，而不是一个空下拉', async () => {
+  // 索引要在「设置 → 本地库」手动更新一次才会建。没建时直接给空结果的话，
+  // 用户只会以为「搜不到」，不会想到是自己还没建索引。
+  const html = await renderSearchBox({ value: '鬼灭', ready: false });
+
+  assert.ok(html.includes('data-qsearch-ready="0"'), '要把「索引不可用」这个状态说出来');
+  assert.ok(html.includes('名称索引'), '文案要提到索引');
+  assert.ok(html.includes('本地库'), '要告诉用户去哪儿建');
+  assert.equal(countOf(html, 'data-qsearch-item='), 0, '没索引时不该有命中项');
+});
+
+test('跨季搜索：别季没命中但本季有时，说清「已经在下面列表里」', async () => {
+  const html = await renderSearchBox({ value: '转生', others: [], inSeason: 5 });
+  assert.ok(html.includes('data-qsearch-panel="0"'), '面板要在（用来交代情况）');
+  assert.equal(countOf(html, 'data-qsearch-item='), 0, '没有别季命中就不该有列表项');
+  assert.ok(html.includes('本季有 5 部匹配'), '数字要带上，让用户知道不是搜不到');
+});
+
+test('跨季搜索：顶栏真的挂上了（组件好用 ≠ 接进了 App）', async () => {
+  const html = await render({});
+  assert.ok(html.includes('data-qsearch="1"'), 'App 顶栏要有搜索容器');
+  // 快捷键「/」靠这个属性找输入框，换掉的话快捷键会静默失效 —— 一并钉住
+  assert.ok(html.includes('data-search-input="1"'), '快捷键「/」找的就是这个属性');
+  assert.ok(html.includes('搜番剧名'), 'placeholder 要在');
 });

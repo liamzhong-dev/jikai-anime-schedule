@@ -227,6 +227,70 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .topbar__search:focus { border-color: var(--accent); background: var(--panel-2); }
 .topbar__search::placeholder { color: var(--text-3); }
 
+/* ---------- 跨季搜索下拉 ---------- */
+
+/* 输入框原来直接挂在 .topbar 里，现在外面包了一层容器：
+   下拉要相对它定位，所以宽度约束挪到容器上，输入框自己撑满。
+   输入框的 class 没换 —— 快捷键「/」靠 [data-search-input] 找它，样式也还挂在原处。 */
+.qsearch { position: relative; width: 240px; }
+.qsearch .topbar__search { width: 100%; }
+
+.qsearch__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: 340px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+.qsearch__head {
+  padding: 6px 8px 8px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.qsearch__item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.qsearch__item:hover { background: var(--panel-2); }
+
+.qsearch__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qsearch__meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.qsearch__note {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
 .iconbtn {
   width: 30px;
   height: 30px;
@@ -1188,6 +1252,9 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
   .sidenav { width: 68px; flex-basis: 68px; }
   .sidenav__item { font-size: 10.5px; }
   .topbar__search { width: 150px; }
+  /* 窄屏下容器跟着收，下拉可以宽一些（它悬浮在内容之上，不占布局） */
+  .qsearch { width: 150px; }
+  .qsearch__panel { width: 280px; }
 
   /* 窗口默认坐标是为宽屏摆的，窄屏下改回文档流，免得互相压住 */
   .canvas { display: flex; flex-direction: column; gap: 12px; }

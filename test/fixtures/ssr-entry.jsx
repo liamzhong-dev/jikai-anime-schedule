@@ -20,6 +20,7 @@ import Cover from '../../src/components/Cover.jsx';
 import { CoverProvider } from '../../src/components/CoverContext.jsx';
 import ReportView from '../../src/components/ReportView.jsx';
 import HistoryView from '../../src/components/HistoryView.jsx';
+import SearchBox from '../../src/components/SearchBox.jsx';
 import { makeDefaultTierlist } from '../../src/core/tierlist.js';
 import { makeDefaultReport } from '../../src/core/report.js';
 import { load, seedInitialState } from '../../src/core/store.js';
@@ -206,4 +207,24 @@ export async function renderHistory(props = {}) {
     onGoSeason: () => {},
   };
   return renderToStaticMarkup(<HistoryView {...base} {...props} />);
+}
+
+/**
+ * 单独渲染顶栏搜索框。
+ *
+ * 下拉的开关是组件内部 state（输入过就弹、点过某条就收），SSR 下只能取初始值，
+ * 所以「输完字之后长什么样」得靠 value 非空直接喂出来 —— 这正是要验的分支。
+ * 「命中结果是怎么算出来的」不由这里管（那是 core/search.js 的纯函数测试）。
+ */
+export async function renderSearchBox(props = {}) {
+  await prepare();
+  const base = {
+    value: '',
+    onChange: () => {},
+    onPick: () => {},
+    others: [],
+    inSeason: 0,
+    ready: true,
+  };
+  return renderToStaticMarkup(<SearchBox {...base} {...props} />);
 }
