@@ -5,6 +5,8 @@ import { airingsInRange, clockCST, countdown, countdownLabel, dateCST, isLateNig
 export default function DetailDrawer({
   anime, following, watchedEps, now,
   onClose, onToggleFollow, onMarkEpisode, onAddCatchup, onOpenExternal,
+  // 打分控件同样由外面注入，理由跟 CatchupView 一致：抽屉不该知道 store 的存在
+  renderDiary,
 }) {
   const episodes = useMemo(() => {
     if (!anime) return [];
@@ -93,6 +95,8 @@ export default function DetailDrawer({
               加入补番
             </button>
           </div>
+
+          {renderDiary ? renderDiary(anime) : null}
 
           {anime.summary ? <p className="drawer__summary">{anime.summary}</p> : null}
 

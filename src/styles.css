@@ -1334,3 +1334,103 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
   .tier-pool { flex: 0 0 auto; width: auto; border-right: none; border-bottom: 1px solid var(--line); padding: 0 0 10px; }
   .tier-pool__grid { max-height: 220px; }
 }
+
+/* ==========================================================================
+   补番日记 + Bangumi 评分比对
+   --------------------------------------------------------------------------
+   分档配色沿用三个语义色，不新造颜色：
+     合拍 = ok（绿）· 略偏 = warn（橙）· 分歧明显 = danger（红）
+   这不是「好/坏」的判断，是「离人群有多远」—— 分歧大不代表看错了，所以
+   文案里一律不写褒贬，只写差多少。
+   ========================================================================== */
+
+.diary { display: flex; flex-direction: column; gap: 12px; }
+.diary__stats {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--panel-2);
+}
+.diary__stat { display: flex; flex-direction: column; gap: 1px; min-width: 54px; }
+.diary__stat b { font-size: 17px; line-height: 1.15; }
+.diary__stat span { font-size: 11px; color: var(--text-3); }
+.diary__gap { margin-left: auto; font-size: 11.5px; color: var(--text-2); }
+.diary__note { font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+
+.diary__tabs { display: flex; gap: 6px; }
+.tab {
+  padding: 4px 10px; font-size: 12px; cursor: pointer;
+  border: 1px solid var(--line-2); border-radius: 999px;
+  background: transparent; color: var(--text-2);
+}
+.tab.is-active { border-color: var(--accent); color: var(--text); background: var(--accent-soft); }
+
+.diary__list { display: flex; flex-direction: column; gap: 7px; }
+.diary__row {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--panel-2);
+}
+.diary__cover { flex: 0 0 auto; width: 40px; height: 56px; border-radius: 6px; overflow: hidden; }
+.diary__main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.diary__title {
+  padding: 0; border: none; background: transparent; cursor: pointer;
+  color: var(--text); font-size: 13px; font-weight: 600; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.diary__title:hover { color: var(--accent); }
+.diary__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11.5px; }
+.diary__mine { color: var(--text); font-weight: 600; }
+.diary__bgm { color: var(--text-2); }
+.diary__summary { font-size: 11.5px; color: var(--text-3); line-height: 1.55;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.diary__tl-head { display: flex; align-items: baseline; gap: 8px; }
+.diary__time { margin-left: auto; font-size: 11px; color: var(--text-3); }
+.diary__note-text { font-size: 12px; color: var(--text-2); line-height: 1.6; }
+
+.diary-cmp {
+  padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.diary-cmp--agree { color: var(--ok); background: var(--ok-soft); border-color: rgba(var(--ok-rgb), 0.34); }
+.diary-cmp--near { color: var(--warn); background: var(--warn-soft); border-color: rgba(var(--warn-rgb), 0.34); }
+.diary-cmp--apart { color: var(--danger); background: var(--danger-soft); border-color: rgba(var(--danger-rgb), 0.34); }
+.diary-cmp--unknown { color: var(--text-3); background: transparent; border-color: var(--line-2); }
+
+.diary__history { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.diary__history-list { list-style: none; margin: 0; padding: 6px 8px; min-width: 190px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel); }
+.diary__history-list li { display: flex; gap: 6px; align-items: baseline; font-size: 11px; color: var(--text-2); padding: 2px 0; }
+.diary__history-list time { color: var(--text-3); flex: 0 0 auto; }
+.diary__history-note { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diary__history-del { padding: 0 4px; border: none; background: transparent; color: var(--text-3); cursor: pointer; font-size: 11px; }
+.diary__history-del:hover { color: var(--danger); }
+.diary__empty-hint { margin-top: 6px; font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+
+/* ---- 卡片上的打分控件 ---- */
+.diary-input { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.diary-input__scores { display: flex; gap: 3px; flex-wrap: wrap; }
+.diary-input__num {
+  width: 24px; height: 24px; padding: 0; cursor: pointer;
+  border: 1px solid var(--line-2); border-radius: 6px;
+  background: transparent; color: var(--text-2);
+  font-size: 11.5px; line-height: 1;
+}
+.diary-input__num:hover { border-color: var(--accent); color: var(--text); }
+.diary-input__num.is-on { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 700; }
+.diary-input__row { display: flex; gap: 6px; align-items: center; }
+.diary-input__note { flex: 1 1 auto; min-width: 0; font-size: 12px; padding: 4px 8px; }
+.diary-input__cmp { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11.5px; }
+.diary-input__mine { color: var(--text); font-weight: 600; }
+.diary-input__bgm { color: var(--text-2); }
+.diary-input__undo {
+  margin-left: auto; padding: 0; border: none; background: transparent;
+  color: var(--text-3); font-size: 11px; cursor: pointer;
+}
+.diary-input__undo:hover { color: var(--danger); }
+.diary-input__error { font-size: 11.5px; color: var(--danger); }
+.diary-input__hint { font-size: 11px; color: var(--warn); }
+.diary-input--compact .diary-input__num { width: 21px; height: 21px; font-size: 11px; }
+
+@media (max-width: 1100px) {
+  .diary__gap { margin-left: 0; flex-basis: 100%; }
+}

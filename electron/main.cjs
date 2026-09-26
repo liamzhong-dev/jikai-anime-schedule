@@ -45,6 +45,26 @@ if (SMOKE_PNG) {
 }
 
 /**
+ * 自检可以指定一个一次性的存档目录：`JIKAI_USERDATA=<绝对路径>`。
+ *
+ * 为什么必须能改：桌面自检要真的读写 `state.json`，而默认 userData 是
+ * **用户本人的真实档案** —— 让自动化往里写东西，等于测试在改用户的存档。
+ * 有了这个口子，自检就能在一个用完即弃的空 profile 里跑完整的
+ * 「落盘 → 重启 → 读回来」链路，而不是只敢验只读的部分。
+ *
+ * ⚠️ 必须在 app ready 之前调用，晚一步路径就改不动了。
+ */
+if (process.env.JIKAI_USERDATA) {
+  const dir = process.env.JIKAI_USERDATA;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    app.setPath('userData', dir);
+  } catch (err) {
+    console.warn(`[jikai] 指定 userData 失败，退回默认目录：${err?.message ?? String(err)}`);
+  }
+}
+
+/**
  * IPC 冒烟：`JIKAI_IPC_SMOKE=1` —— 把主进程所有 IPC handler 挨个真跑一遍，
  * 打一张 PASS/FAIL 表然后退出（有 FAIL 就退出码非 0）。
  *
@@ -337,10 +357,54 @@ function createWindow() {
         // 等久一点可以顺便观察封面缓存有没有真的长起来（预热是后台跑的）
         const waitMs = Number(process.env.JIKAI_SMOKE_WAIT || 3000);
         await new Promise((r) => setTimeout(r, Number.isFinite(waitMs) ? waitMs : 3000));
+
+        /*
+         * `JIKAI_SMOKE_CLICK=<n>`：先替用户点一次「给 n 分」+「记下」，再取数。
+         *
+         * 为什么要真的点：这条链是
+         *   控件 → 视图的 onSave → store → 防抖落盘 → preload → IPC → state.json
+         * 除了最前面两环，后面每一环都**只在桌面壳里存在**。单测和 SSR 覆盖到
+         * 「控件画出来了」，剩下的「点了以后到底有没有存进去」只能靠真的点一次。
+         * 这个项目里最贵的几个 bug 全都长这样：代码写了，但从没被执行过。
+         */
+        const clickRate = Number(process.env.JIKAI_SMOKE_CLICK || 0);
+        if (clickRate > 0) {
+          const pick = await win.webContents
+            .executeJavaScript(
+              `(() => {
+                 const btn = document.querySelector('[data-diary-rate="${clickRate}"]');
+                 if (!btn) return false;
+                 btn.click();
+                 return true;
+               })()`,
+            )
+            .catch(() => false);
+          if (!pick) {
+            console.warn('[jikai] 冒烟点击没找到打分按钮 —— 界面没到那一步');
+          } else {
+            // 两次点击之间隔一个宏任务：连着点的话，「保存」那一次可能还拿着
+            // 上一帧的草稿值，于是失败看起来像代码坏了，其实是测试手法的问题。
+            await new Promise((r) => setTimeout(r, 200));
+            const saved = await win.webContents
+              .executeJavaScript(
+                `(() => {
+                   const save = document.querySelector('[data-diary-save]');
+                   if (!save) return false;
+                   save.click();
+                   return true;
+                 })()`,
+              )
+              .catch(() => false);
+            if (!saved) console.warn('[jikai] 冒烟点击没找到保存按钮');
+          }
+          // 等防抖（400ms）真的把状态写出去
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+
         const st = await coverCache?.stats?.();
         const probe = await win.webContents.executeJavaScript(
           `JSON.stringify({
-             view: (globalThis.location?.hash || '').replace(/^#\\//, ''),
+             view: (globalThis.location?.hash || '').replace(/^#\\//, '').split('?')[0],
              rows: document.querySelectorAll('.tier-row__label').length,
              tiles: document.querySelectorAll('.tier-item__art').length,
              pool: document.querySelectorAll('.tier-pool__grid .tier-item').length,
@@ -349,6 +413,15 @@ function createWindow() {
              library: (window.jikai && typeof window.jikai.getCover === 'function') ? 'yes' : 'no',
              coverGroups: ${JSON.stringify((st?.groups ?? []).length)},
              coverBytes: ${JSON.stringify(st?.totalBytes ?? 0)},
+             diaryNav: document.querySelectorAll('.sidenav__item[data-nav="diary"]').length,
+             diaryView: document.querySelectorAll('[data-diary-view]').length,
+             diaryRows: document.querySelectorAll('[data-diary-row]').length,
+             diaryEntries: document.querySelectorAll('[data-diary-at]').length,
+             diaryInputs: document.querySelectorAll('[data-diary-for]').length,
+             diaryAvgMine: document.querySelector('[data-diary-avg-mine]')?.getAttribute('data-diary-avg-mine') ?? null,
+             diaryAvgBgm: document.querySelector('[data-diary-avg-bgm]')?.getAttribute('data-diary-avg-bgm') ?? null,
+             diaryRowTitles: [...document.querySelectorAll('[data-diary-row] .diary__title')].map((e) => e.textContent),
+             diaryLastRating: (document.querySelector('.diary-input__cmp .diary-input__mine')?.textContent ?? '').replace(/[^0-9]/g, '') || null,
            })`,
         ).catch((e) => `{"error":${JSON.stringify(String(e?.message ?? e))}}`);
         const img = await win.webContents.capturePage();

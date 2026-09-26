@@ -33,7 +33,7 @@ await build({
   logLevel: 'silent',
 });
 
-const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier } = await import(pathToFileURL(outfile).href);
+const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary } = await import(pathToFileURL(outfile).href);
 
 const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const titles = SAMPLE_ITEMS.map((a) => escapeHtml(a.titleZh || a.titleJa));
@@ -330,4 +330,144 @@ test('App 的 tier 视图与侧栏导航都挂上了', async () => {
   for (const label of TIER_ROWS) {
     assert.ok(html.includes(label), `tier 视图里应有 ${label} 档`);
   }
+});
+
+// ---------- 补番日记 + 评分比对 ----------
+
+const SAMPLE_DIARY = {
+  1001: { entries: [{ at: Date.UTC(2026, 9, 1), rating: 9, note: '后半段起飞了' }], updatedAt: 0 },
+  1002: { entries: [{ at: Date.UTC(2026, 9, 2), rating: 4, note: '' }], updatedAt: 0 },
+  1003: { entries: [{ at: Date.UTC(2026, 9, 3), rating: 7, note: '没查到 Bangumi 评分的一部' }], updatedAt: 0 },
+};
+
+const SAMPLE_SCORES = { 1001: 7.4, 1002: 7.4, 1003: null };
+
+function diaryLookupOf(scores) {
+  return (key) => ({
+    id: Number(key),
+    score: Number(key) in scores ? scores[key] : null,
+    titleZh: `作品 ${key}`,
+    titleJa: `作品 ${key}`,
+  });
+}
+
+test('补番日记：空态不是一块空白，要说清去哪儿才能有内容', async () => {
+  const html = await renderDiary({ diary: {} });
+  assert.ok(html.includes('data-diary-view="1"'), '日记视图应该渲染出来');
+  assert.ok(html.includes('补番日记还是空的'), '空态要有文案');
+  assert.ok(html.includes('去补番清单打分'), '空态要有去补番清单的入口');
+  assert.equal(html.includes('data-diary-row'), false, '空的时候不该有比对行');
+});
+
+test('补番日记：比对表按分歧降序 —— 分歧最大的浮在最上面', async () => {
+  const html = await renderDiary({ diary: SAMPLE_DIARY, lookup: diaryLookupOf(SAMPLE_SCORES) });
+  const order = [...html.matchAll(/data-diary-row="(\d+)"/g)].map((m) => m[1]);
+  // 1002 差 -3.4（分歧明显）、1001 差 +1.6（略偏）、1003 没有 BGM 分（沉底）
+  assert.deepEqual(order, ['1002', '1001', '1003'], '排序必须是「分歧大的在前、不可比的沉底」');
+});
+
+test('补番日记：三档徽章都要能出现，且缺 BGM 分的走 unknown 而不是当成 0 分', async () => {
+  const html = await renderDiary({ diary: SAMPLE_DIARY, lookup: diaryLookupOf(SAMPLE_SCORES) });
+  assert.ok(html.includes('diary-cmp--apart'), '差 3.4 应当渲染成分歧');
+  assert.ok(html.includes('diary-cmp--near'), '差 1.6 应当渲染成略偏');
+  assert.ok(html.includes('diary-cmp--unknown'), '没有 BGM 分的要走 unknown');
+  assert.ok(html.includes('BGM 未知'), '要明说 BGM 未知，不能显示成 0');
+});
+
+test('补番日记：均分只算两边都有分的，并把「有多少部没法比」说出来', async () => {
+  // 1001 我给 9 / BGM 7.4；1002 我给 4 / BGM 7.4；1003 没有 BGM 分 → 不入均值
+  const html = await renderDiary({ diary: SAMPLE_DIARY, lookup: diaryLookupOf(SAMPLE_SCORES) });
+  // 读的是**属性值**不是文本：一开始这几个 data-* 写成了不带 `=` 的裸属性，
+  // 渲染出来恒为 "true"，参数化自检就永远读到 true 还一切正常。这里顺带钉死。
+  assert.ok(html.includes('data-diary-avg-mine="6.5"'), '我的均分应当是 6.5（(9+4)/2）');
+  assert.ok(html.includes('data-diary-avg-bgm="7.4"'), 'BGM 均分应当是 7.4');
+  assert.equal(html.includes('data-diary-avg-mine="true"'), false, '统计值必须显式带值，裸属性会退化成 true');
+  assert.ok(/另有 1 部还差一边/.test(html), '必须写出「有几部没法比」，否则均分会被当成全部作品的均分');
+});
+
+test('补番日记：时间线页签在，短评能渲染出来', async () => {
+  // 页签是受控 prop，不这么做的话这里永远是「否」，而那个「否」跟功能对不对无关
+  const html = await renderDiary({
+    diary: SAMPLE_DIARY,
+    lookup: diaryLookupOf(SAMPLE_SCORES),
+    tabProp: 'timeline',
+  });
+  assert.ok(html.includes('data-diary-tab="timeline"'), '要有时间线页签');
+  assert.ok(html.includes('data-diary-panel="timeline"'), '受控页签应当真的切到时间线');
+  assert.ok(html.includes('后半段起飞了'), '短评要渲染出来');
+});
+
+test('补番日记：同一部记了多条时给出「几条」的入口', async () => {
+  const multi = {
+    ...SAMPLE_DIARY,
+    1001: {
+      entries: [
+        { at: Date.UTC(2026, 8, 1), rating: 6, note: '开头有点闷' },
+        { at: Date.UTC(2026, 9, 1), rating: 9, note: '后半段起飞了' },
+      ],
+      updatedAt: 0,
+    },
+  };
+  const html = await renderDiary({ diary: multi, lookup: diaryLookupOf(SAMPLE_SCORES) });
+  assert.ok(html.includes('2 条'), '多条记录要有展开入口');
+});
+
+test('打分控件：1–10 十个按钮都在、没打分时不显示比对行', async () => {
+  const html = await renderDiaryInput({ id: 1001 });
+  const nums = [...html.matchAll(/data-diary-rate="(\d+)"/g)].map((m) => Number(m[1]));
+  assert.deepEqual(nums, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], '1–10 一个都不能少');
+  assert.equal(html.includes('data-diary-cmp'), false, '没打分时不该有比对行');
+  // ⚠️ 不能用 window.prompt：Electron 里它存在但一调用就抛
+  assert.equal(/prompt\(/.test(html), false, '不许出现 prompt');
+});
+
+test('打分控件：已打分时显示「我的 / BGM / 差值」三段', async () => {
+  const html = await renderDiaryInput({ id: 1001, rating: 9, note: '好看', bgmScore: 7.4, count: 1, lastEntryAt: 123 });
+  assert.ok(html.includes('我的 9'));
+  assert.ok(html.includes('BGM 7.4'));
+  assert.ok(html.includes('+1.6'), '差值要带符号');
+  assert.ok(html.includes('data-diary-cmp="near"'), '差 1.6 应当落在 near');
+  assert.ok(html.includes('已记 1 次'), '记过之后要能看出记了几次');
+});
+
+test('打分控件：没有 BGM 分时不许显示成 0', async () => {
+  const html = await renderDiaryInput({ id: 1001, rating: 9, bgmScore: null });
+  assert.ok(html.includes('BGM 评分未知'));
+  assert.equal(html.includes('BGM 0'), false, '缺评分绝不能显示成 0');
+});
+
+test('App 的 diary 视图与侧栏导航都挂上了', async () => {
+  const html = await render({ view: 'diary' });
+  // 用 data-nav 而不是「补番日记」四个字：页面上同名的小标题不止一处，
+  // 按文字断言只能证明「这几个字出现过」，证明不了导航项存在。
+  assert.ok(html.includes('data-nav="diary"'), '侧栏应有补番日记导航项');
+  assert.ok(html.includes('data-diary-view="1"'), 'diary 视图应真的渲染出来');
+});
+
+test('App 的补番视图：打分控件是 App 自己接上去的，不是 fixture 外挂的', async () => {
+  // 这个用例刻意走真正的 <App />。上面那个 renderCatchupWithDiary 是把控件
+  // 从外面塞进 CatchupView 的，它证明「控件能被塞进去」，证明不了
+  // 「App 真的塞了」—— 而漏接线正是最典型的、看起来哪儿都写了的失败。
+  const html = await render({ view: 'catchup' });
+  const cards = [...html.matchAll(/data-diary-for="(\d+)"/g)].map((m) => m[1]);
+  assert.ok(cards.length >= 1, `App 得把打分控件真的接到补番卡片上（找到 ${cards.length} 个）`);
+  assert.ok(html.includes('data-diary-note='), '卡片上要有短评输入口');
+  assert.ok(html.includes('data-diary-save='), '卡片上要有保存按钮');
+});
+
+test('补番清单卡片上要出现打分控件（入口在清单上，不藏在详情里）', async () => {
+  const rows = [{
+    item: { id: 1, deadline: Date.UTC(2026, 9, 10), watchedEps: 3, targetEps: 12 },
+    anime: { ...SAMPLE_ITEMS[0], score: 7.4 },
+  }];
+  // 分两种状态各渲一遍：没打过分时只有十个按钮，打过分之后要多出「我的 / BGM / 差值」那行。
+  // 只测没打分的那一种，「打完分能看见跟 Bangumi 差多少」这个卖点就是没验过的。
+  const fresh = await renderCatchupWithDiary(rows);
+  assert.ok(fresh.includes(`data-diary-for="${SAMPLE_ITEMS[0].id}"`), '卡片上应当有打分口');
+  assert.ok(fresh.includes('data-diary-rate="10"'), '卡片上的打分口要真的是那十个按钮，不能只是个占位');
+  assert.equal(fresh.includes('data-diary-cmp='), false, '没打过分时不该有比对行');
+
+  const rated = await renderCatchupWithDiary(rows, { ratingOf: () => 9 });
+  assert.ok(rated.includes('BGM 7.4'), '卡片上要直接显示出 Bangumi 的分');
+  assert.ok(rated.includes('+1.6'), '卡片上要直接给出差值，而不是让人去别的页面查');
 });

@@ -21,6 +21,9 @@ export default function CatchupView({
   searchQuery = '', onSearchQuery,
   results = [], searching = false, searchNote = null,
   onAddHit,
+  // 打分控件由外面注入（`renderDiary`），这样这个组件不用知道 store 的存在 ——
+  // 它本来就是个纯展示组件，一旦自己去读 store，SSR 断言就得连着搭一套 store 桩
+  renderDiary,
 }) {
   const hasQuery = String(searchQuery ?? '').trim().length > 0;
   const showResults = hasQuery && results.length > 0;
@@ -112,6 +115,9 @@ export default function CatchupView({
               </button>
               <button type="button" className="btn btn--ghost" onClick={() => onRemove(item.id)}>删除</button>
             </div>
+
+            {/* 打分口就放在卡片上（不是藏进详情）：打完分最想立刻看到「跟 Bangumi 差多少」 */}
+            {renderDiary ? renderDiary(anime, item) : null}
 
             <label className="catchup__deadline">
               <span>截止</span>

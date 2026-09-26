@@ -14,6 +14,15 @@ import { DEFAULT_SOURCE } from '../data/sources.js';
 import { BUILTIN_PRESETS, presetById } from './layoutPresets.js';
 import { addToGroup as addToGroupPure, defaultGroups, groupSummary, mergeSubjects, pickSubjects, removeFromGroup as removeFromGroupPure } from './library.js';
 import { makeDefaultTierlist, normalizeTierlist } from './tierlist.js';
+import {
+  addDiaryEntry as addDiaryEntryPure,
+  removeDiaryEntry as removeDiaryEntryPure,
+  normalizeDiary,
+  entriesOf,
+  latestEntry,
+  latestRated,
+  myRating,
+} from './diary.js';
 
 const MAX_CACHED_SEASONS = 10;
 
@@ -36,6 +45,8 @@ const DEFAULTS = {
   activePreset: null,
   // { [seasonKey]: 一份 tierlist } —— 按季度各存一份，见「Tier List」一节
   tierlists: {},
+  // { [番剧id]: { entries: [{at, rating, note}], updatedAt } } —— 见「补番日记」一节
+  diary: {},
   settings: {
     dataSource: DEFAULT_SOURCE, // 'builtin' | 'bangumi-data' | 'bangumi-api'
     reminderLeadMin: 0,   // 提前多少分钟提醒
@@ -101,6 +112,8 @@ export async function load() {
     ...structuredClone(DEFAULTS),
     ...(saved ?? {}),
     settings: mergeSettings(saved?.settings),
+    // 磁盘上的日记可能是旧版本写的、也可能被手改过 —— 读的这一刻就修干净
+    diary: normalizeDiary(saved?.diary),
   };
   emit();
   return state;
@@ -141,6 +154,7 @@ function snapshot() {
     layoutPresets: state.layoutPresets,
     activePreset: state.activePreset,
     tierlists: state.tierlists, // ⚠️ 漏了这行就是「看着能用、关掉重开全没了」
+    diary: state.diary,         // 同上：漏一行，日记写得再认真也是白写
     settings: state.settings,
     cache: state.cache,
   };
@@ -389,6 +403,69 @@ export function resetTierlist(key, { presetId, nowMs = Date.now() } = {}) {
 /** 哪些季度排过（界面上给个「已排 N 个季度」用） */
 export function listTierlists() {
   return Object.keys(state.tierlists ?? {}).sort();
+}
+
+// ---------- 补番日记 ----------
+//
+// 存法见 diary.js 的文件头（评分用 1–10 整数、一部可以有多条、我的评分取最新一条）。
+// 这里只做两件事：把纯函数的产物写进 state，以及给界面提供只读入口。
+//
+// ⚠️ 只读入口（readDiary / myRatingOf）**不许有副作用**：界面每帧都会调它们，
+// 顺手「修一修」或「造一个空的」会让 state 因为一次渲染就变脏，进而触发落盘 ——
+// tierlist 那边就是靠这条规矩避开了「只是看一眼也多出一个空季度」。
+
+/** 日记整体（只读） */
+export function readDiary() {
+  return state.diary ?? {};
+}
+
+export function readDiaryOf(id) {
+  return entriesOf(state.diary, id);
+}
+
+export function readLatestDiary(id) {
+  return latestEntry(state.diary, id);
+}
+
+/** 最近一条带评分的记录（可能为 null） */
+export function readLatestRated(id) {
+  return latestRated(state.diary, id);
+}
+
+/** 我的评分：数字或 null */
+export function myRatingOf(id) {
+  return myRating(state.diary, id);
+}
+
+/**
+ * 追加一条日记。
+ * @returns {{ok:boolean, reason?:string, entry?:object}}
+ *   `ok:false` 时界面应当给出提示 —— 静默丢弃用户刚写的字是最不能接受的失败方式
+ */
+export function addDiaryEntry(id, { rating = null, note = '', at = Date.now() } = {}) {
+  const key = Number(id);
+  if (!Number.isFinite(key) || key <= 0) return { ok: false, reason: '这条作品没有可用的 id，评分存不下来' };
+
+  const { diary, entry } = addDiaryEntryPure(state.diary ?? {}, key, { rating, note, at });
+  if (!entry) return { ok: false, reason: '既没有评分也没有内容，没有东西可以记' };
+
+  update((s) => ({ ...s, diary }));
+  return { ok: true, entry };
+}
+
+/** 删一条；`at` 是那条记录的时间戳 */
+export function removeDiaryEntry(id, at) {
+  const key = Number(id);
+  if (!Number.isFinite(key) || key <= 0) return false;
+  const next = removeDiaryEntryPure(state.diary ?? {}, key, at);
+  if (next === (state.diary ?? {})) return false;
+  update((s) => ({ ...s, diary: next }));
+  return true;
+}
+
+/** 记录过日记的作品 id 列表 */
+export function listDiaryIds() {
+  return Object.keys(state.diary ?? {});
 }
 
 // ---------- 布局 ----------

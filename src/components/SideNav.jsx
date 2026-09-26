@@ -42,6 +42,16 @@ const ITEMS = [
       </svg>
     ),
   },
+  {
+    key: 'diary',
+    label: '补番日记',
+    icon: (
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6">
+        <path d="M4 3.2h9.2a2 2 0 0 1 2 2v11.6H6a2 2 0 0 1-2-2z" />
+        <path d="M6.6 6.6h6M6.6 9.6h6M6.6 12.6h3.6" />
+      </svg>
+    ),
+  },
   // ⚠️ 这一项和 App.jsx 的 VIEWS 是两处各写一份的，加视图时两边都要改
   {
     key: 'tier',
@@ -65,6 +75,9 @@ export default function SideNav({ view, onView, counts, version, onOpenSettings 
         <button
           key={it.key}
           type="button"
+          // `data-nav` 是给自动化用的把手：光靠按钮文字断言「补番日记」，
+          // 会跟页面里同名的小标题撞上，测出来是「有」但不知道是哪个。
+          data-nav={it.key}
           className={`sidenav__item${view === it.key ? ' is-active' : ''}`}
           onClick={() => onView(it.key)}
         >

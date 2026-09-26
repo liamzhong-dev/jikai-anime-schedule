@@ -24,8 +24,12 @@
     "live:shot": "node scripts/live-shot.cjs",
     "test": "node --test \"test/*.test.mjs\"",
     "check:desktop": "node scripts/check-desktop.mjs",
+    "check:desktop:diary": "node scripts/check-desktop.mjs --view=diary --profile=test/.tmp/profile-diary --season=2026q3",
+    "check:desktop:save": "node scripts/check-desktop.mjs --view=catchup --profile=test/.tmp/profile-catchup --season=2026q3 --click=8",
     "check:ipc": "node scripts/check-ipc.mjs",
-    "check:selfheal": "node scripts/check-selfheal.mjs"
+    "check:selfheal": "node scripts/check-selfheal.mjs",
+    "scan": "node scripts/scan-privacy.mjs",
+    "check:all": "npm test && npm run build && npm run check:tier && npm run check:tier-export && npm run check:desktop && npm run check:desktop:diary && npm run check:desktop:save && npm run check:ipc && npm run check:selfheal && npm run scan"
   },
   "dependencies": {
     "react": "^18.3.1",

@@ -7,6 +7,8 @@ import ScheduleView from './components/ScheduleView.jsx';
 import FollowingView from './components/FollowingView.jsx';
 import CatchupView from './components/CatchupView.jsx';
 import TierListView from './components/TierListView.jsx';
+import DiaryView from './components/DiaryView.jsx';
+import DiaryRatingInput from './components/DiaryRatingInput.jsx';
 import DetailDrawer from './components/DetailDrawer.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import ShortcutsOverlay from './components/ShortcutsOverlay.jsx';
@@ -19,7 +21,9 @@ import {
   patchCatchup, patchFollowing, patchSettingSection, patchSettings, readSeasonCacheRaw,
   removeCatchup, toggleFollow, unfollow, writeSeasonCache,
   ensureTierlist, patchTierlist, resetTierlist,
+  addDiaryEntry, removeDiaryEntry, readDiary, myRatingOf, readLatestRated, readDiaryOf,
 } from './core/store.js';
+import { compareToBangumi } from './core/diary.js';
 import { autoRankByScore } from './core/tierlist.js';
 import { collectImages, exportTierlistPng } from './core/tierExport.js';
 import { DISPLAY_VARIANT, EXPORT_VARIANT, coverEntries, coverVariant } from './core/covers.js';
@@ -42,7 +46,7 @@ import { deadlineStatus, progress, sortCatchup } from './core/catchup.js';
 
 // 这个常量和 SideNav 里的 ITEMS 是两处各写一份的 —— 加视图时两边都要改，
 // 只改一处会出现「导航能点到、但深链刷新就跳回来」。
-const VIEWS = ['season', 'schedule', 'following', 'catchup', 'tier'];
+const VIEWS = ['season', 'schedule', 'following', 'catchup', 'diary', 'tier'];
 
 /** 同步指示的最短显示时长（毫秒）：只为防「一闪而过」，不影响取数 */
 const MIN_SYNC_MS = 480;
@@ -870,7 +874,40 @@ export default function App() {
   );
 
   const activeCatchup = catchupRows.filter((r) => !r.item.archived);
-  const overdueCount = activeCatchup.filter(
+
+  // ---------- 补番日记 ----------
+
+  /**
+   * id ⟶ 条目。日记里记的可能是任意一季的番，所以查找范围比 catchupRows 宽：
+   * 全量内置数据 + 作品档案。
+   *
+   * 找不到时**返回占位条目而不是 null**：`compareToBangumi` 靠 `subject.score`
+   * 判断有没有 Bangumi 评分，占位条目的 score 是 null，正好落进「还差一边」那一档。
+   * 返回 null 也能work，但界面就得在两处各写一遍兜底，迟早漏一处。
+   */
+  const diaryLookup = useMemo(() => {
+    const map = new Map();
+    for (const a of pool) map.set(Number(a.id), a);
+    for (const [id, a] of Object.entries(st.subjects ?? {})) {
+      if (!map.has(Number(id))) map.set(Number(id), a);
+    }
+    return (key) => map.get(Number(key))
+      ?? { id: Number(key), titleZh: '', titleJa: `条目 ${key}`, cover: null, score: null, __missing: true };
+  }, [pool, st.subjects]);
+
+  const diaryData = readDiary();
+
+  const handleSaveDiary = useCallback((id, { rating, note }) => {
+    const res = addDiaryEntry(id, { rating, note, at: Date.now() });
+    // 失败（既没评分也没内容 / id 不可用）要把理由交给控件显示 ——
+    // 静默丢掉用户刚打的字是最不能接受的失败方式
+    if (res.ok) pushToast('记进补番日记了', '在「补番日记」里能看到跟 Bangumi 的比对');
+    return res;
+  }, [pushToast]);
+
+  const handleRemoveDiary = useCallback((id, at) => {
+    removeDiaryEntry(id, at);
+  }, []);  const overdueCount = activeCatchup.filter(
     (r) => deadlineStatus(r.item.deadline, now).level === 'overdue',
   ).length;
 
@@ -1120,6 +1157,19 @@ export default function App() {
                   results={catchupResults}
                   searchNote={searchNote}
                   onAddHit={addFromSearch}
+                  renderDiary={(anime) => (
+                    <DiaryRatingInput
+                      id={anime.id}
+                      rating={myRatingOf(anime.id)}
+                      note={readLatestRated(anime.id)?.note ?? ''}
+                      bgmScore={anime.score ?? null}
+                      count={readDiaryOf(anime.id).length}
+                      lastEntryAt={readLatestRated(anime.id)?.at ?? null}
+                      onSave={(payload) => handleSaveDiary(anime.id, payload)}
+                      onRemove={(at) => handleRemoveDiary(anime.id, at)}
+                      onOpenDiary={() => goView('diary')}
+                    />
+                  )}
                 />
               </WindowCard>
 
@@ -1152,6 +1202,24 @@ export default function App() {
                 </div>
               </WindowCard>
             </>
+          )}
+          {view === 'diary' && (
+            <WindowCard
+              id="diary-book"
+              title="补番日记"
+              hint={`${Object.keys(diaryData).length} 部 · ${Object.values(diaryData).reduce((n, d) => n + (d?.entries?.length ?? 0), 0)} 条记录`}
+              layout={st.layout}
+              defaultRect={{ x: 16, y: 16, w: 1000, h: 720 }}
+            >
+              <DiaryView
+                diary={diaryData}
+                lookup={diaryLookup}
+                now={now}
+                onOpen={setDrawer}
+                onRemove={handleRemoveDiary}
+                onGoCatchup={() => goView('catchup')}
+              />
+            </WindowCard>
           )}
           {view === 'tier' && (
             <WindowCard
@@ -1196,6 +1264,22 @@ export default function App() {
             pushToast('已加入补番清单', `${a.titleZh || a.titleJa} · 默认 21 天内补完`);
           }}
           onOpenExternal={(url) => url && platform.openExternal(url)}
+          renderDiary={(a) => (
+            // ⚠️ `key` 不能省：抽屉是同一个组件实例装不同的番，
+            // 没有 key 的话 React 会复用实例，草稿里的旧评分会跟着换到下一部上去。
+            <DiaryRatingInput
+              key={a.id}
+              id={a.id}
+              rating={myRatingOf(a.id)}
+              note={readLatestRated(a.id)?.note ?? ''}
+              bgmScore={a.score ?? null}
+              count={readDiaryOf(a.id).length}
+              lastEntryAt={readLatestRated(a.id)?.at ?? null}
+              onSave={(payload) => handleSaveDiary(a.id, payload)}
+              onRemove={(at) => handleRemoveDiary(a.id, at)}
+              onOpenDiary={() => { setDrawer(null); goView('diary'); }}
+            />
+          )}
         />
       )}
 

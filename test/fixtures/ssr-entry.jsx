@@ -14,6 +14,8 @@ import LibraryPanel from '../../src/components/LibraryPanel.jsx';
 import CatchupView from '../../src/components/CatchupView.jsx';
 import SettingsPanel from '../../src/components/SettingsPanel.jsx';
 import TierListView from '../../src/components/TierListView.jsx';
+import DiaryView from '../../src/components/DiaryView.jsx';
+import DiaryRatingInput from '../../src/components/DiaryRatingInput.jsx';
 import { makeDefaultTierlist } from '../../src/core/tierlist.js';
 import { load, seedInitialState } from '../../src/core/store.js';
 import { SAMPLE_ITEMS, SAMPLE_SEASON, buildSampleUserState } from './sample-state.js';
@@ -85,4 +87,55 @@ export async function renderTier(props = {}) {
     images: {},
   };
   return renderToStaticMarkup(<TierListView {...base} {...props} />);
+}
+
+/** 单独渲染补番日记视图：空态、有记录、缺 BGM 分三种分支要能用 props 直接喂 */
+export async function renderDiary(props = {}) {
+  await prepare();
+  // `onGoCatchup` 要给：空态那个「去补番清单打分」的按钮只在有回调时才渲染，
+  // 不给就成了「测空态文案」顺带把空态唯一的出口测没了。
+  const base = {
+    diary: {},
+    lookup: () => null,
+    now: Date.UTC(2026, 9, 10),
+    onGoCatchup: () => {},
+    onOpen: () => {},
+    onRemove: () => {},
+  };
+  return renderToStaticMarkup(<DiaryView {...base} {...props} />);
+}
+
+/** 单独渲染打分控件 */
+export async function renderDiaryInput(props = {}) {
+  await prepare();
+  const base = { id: 1001, rating: null, note: '', bgmScore: null, count: 0 };
+  return renderToStaticMarkup(<DiaryRatingInput {...base} {...props} />);
+}
+
+/**
+ * 补番卡片 + 真实打分控件的组合渲染。
+ *
+ * 为什么要单独一个入口：`render.test.mjs` 是纯 `.mjs`，**不能写 JSX**，
+ * 所以「把控件塞进卡片」这件事没法在测试文件里直接表达。
+ * 放在这里还有个额外好处：验的是真控件，不是测试里现造的一个替身。
+ *
+ * 打分用 `ratingOf(anime)` 喂，不往 anime 对象上偷偷挂一个字段 ——
+ * 挂字段的写法会让「这份数据里有这个字段」变成一件要靠记忆才知道的事。
+ */
+export async function renderCatchupWithDiary(rows = [], { ratingOf = () => null, noteOf = () => '' } = {}) {
+  await prepare();
+  return renderToStaticMarkup(
+    <CatchupView
+      rows={rows}
+      now={Date.UTC(2026, 9, 10)}
+      renderDiary={(anime) => (
+        <DiaryRatingInput
+          id={anime.id}
+          rating={ratingOf(anime)}
+          note={noteOf(anime)}
+          bgmScore={anime.score ?? null}
+        />
+      )}
+    />,
+  );
 }
