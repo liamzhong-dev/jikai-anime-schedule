@@ -22,7 +22,10 @@
     "live": "node scripts/live-check.mjs",
     "live:offline": "node scripts/live-check.mjs --offline",
     "live:shot": "node scripts/live-shot.cjs",
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --test \"test/*.test.mjs\"",
+    "check:desktop": "node scripts/check-desktop.mjs",
+    "check:ipc": "node scripts/check-ipc.mjs",
+    "check:selfheal": "node scripts/check-selfheal.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

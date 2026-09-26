@@ -121,3 +121,49 @@ export function coverCrop({ srcW, srcH, dstW, dstH }) {
   }
   return { sx: 0, sy: 0, sw, sh };
 }
+
+/**
+ * 造一批「取图请求」：`{ key, url }`，`key` 是**条目自己的 id**。
+ *
+ * ⚠️ 为什么 `key` 必须是 id 而不是 url：
+ * 封面要按变体取（界面用 `c` 缩略图、导出用 `l` 原图），而条目上存的 `cover`
+ * 是原图地址 —— 于是「取图时用的地址」和「条目上的地址」天然是两个值。
+ * 拿 url 当键的话，存的一侧和查的一侧各推一次，只要任何一处理解不同就查不到，
+ * 而 JS 只给 `undefined`、不报错（v1.1 桌面端 82 张封面全退成色块就是这么来的）。
+ *
+ * 用 id 当键之后，「该取哪一档」变成纯内部实现，消费方根本碰不到地址。
+ *
+ * @param {Array<{id:*, cover:string}>} list
+ * @param {'l'|'c'|'m'|'s'|'g'} variant
+ * @returns {Array<{key:string, url:string}>} 没有封面地址的条目会被丢掉
+ */
+export function coverEntries(list, variant) {
+  const out = [];
+  for (const a of Array.isArray(list) ? list : []) {
+    const url = coverVariant(a?.cover, variant).url;
+    if (url) out.push({ key: String(a?.id), url });
+  }
+  return out;
+}
+
+/**
+ * 把「按 url 存」的封面表翻译成「按条目 key 存」。
+ *
+ * 取图那一层只能按 url 收（它不知道条目），但对**外只暴露 key 键的表** ——
+ * 这样变体地址永远出不了模块，也就不会再有「键对不上」这类 bug。
+ *
+ * @param {Array<{key:string,url:string}>} entries
+ * @param {Object<string,string>} byUrl  url -> dataUrl
+ * @returns {Object<string,string>}      key -> dataUrl
+ */
+export function mapCoversByKey(entries, byUrl) {
+  const out = {};
+  if (!byUrl) return out;
+  for (const e of Array.isArray(entries) ? entries : []) {
+    const v = byUrl[e?.url];
+    // `e?.key` 也用可选链：entries 里混进 null 时 `e.key` 会直接抛，
+    // 而这一类「脏数据」在列表里其实很常见
+    if (v && e?.key != null) out[String(e.key)] = v;
+  }
+  return out;
+}

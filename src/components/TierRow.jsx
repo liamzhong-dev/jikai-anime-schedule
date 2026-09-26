@@ -82,7 +82,7 @@ export default function TierRow({
             {showInsert && insert.index === i ? <span className="tier-row__insert" /> : null}
             <TierItem
               anime={lookup?.[it.key] ?? { id: it.key, titleZh: it.label ?? `条目 ${it.key}` }}
-              image={images[lookup?.[it.key]?.cover] ?? null}
+              image={images[it.key] ?? null}
               remote={remote}
               dragging={false}
               onPointerDown={(e) => onBeginDrag?.(e, { key: it.key, rowId: row.id })}

@@ -22,7 +22,7 @@ import {
 } from './core/store.js';
 import { autoRankByScore } from './core/tierlist.js';
 import { collectImages, exportTierlistPng } from './core/tierExport.js';
-import { DISPLAY_VARIANT, EXPORT_VARIANT, coverVariant } from './core/covers.js';
+import { DISPLAY_VARIANT, EXPORT_VARIANT, coverEntries, coverVariant } from './core/covers.js';
 import { useCovers } from './core/useCovers.js';
 import { platform } from './platform/index.js';
 import { allBuiltinItems, builtinItems, BUILTIN_SEASONS } from './data/builtin/index.js';
@@ -556,37 +556,19 @@ export default function App() {
   // 不是原图（约 45MB）。界面上的图块只有 100×120，用原图纯属浪费：
   // 全季总量差 17 倍，还要整份经 IPC 转 base64 送过来。
   // 原图只在「按下导出」那一次去取（见 handleExportTier）。
-  const tierCoverUrls = useMemo(() => {
-    if (view !== 'tier') return [];
-    const out = [];
-    for (const a of season) {
-      const url = coverVariant(a.cover, DISPLAY_VARIANT).url;
-      if (url) out.push(url);
-    }
-    return out;
-  }, [season, view]);
+  // ⚠️ 键是**条目 id**，不是封面地址。地址分变体（界面 `c`、导出 `l`），
+  // 拿地址当键的话，存的一侧和查的一侧各推一次，推错一次就是一整屏色块，
+  // 而 JS 只给 undefined 不报错。见 `coverEntries` 的注释。
+  const tierCoverEntries = useMemo(
+    () => (view === 'tier' ? coverEntries(season, DISPLAY_VARIANT) : []),
+    [season, view],
+  );
 
-  const tierCovers = useCovers({ group: seasonKey, urls: tierCoverUrls, enabled: view === 'tier' });
-
-  /**
-   * 取回来的图是按**变体地址**存的（`c` 那一档），而界面查表用的是条目上的
-   * 原始 `cover`（`l` 那一档）—— 两边键不一样，直接拿 `images[a.cover]` 永远查不到。
-   *
-   * ⚠️ 这个 bug 在浏览器壳里看不出来：那边走的是直连降级，压根不查这张表。
-   * 是桌面壳自检报出 `cached: 0` 才暴露的 —— 拿不到图时数据也就全对。
-   *
-   * 所以这里翻译一次：把变体地址上的图映射回**条目原本的 cover 字段**，
-   * 界面上就还是 `images[a.cover]` 这种自然写法。
-   */
-  const tierCoverMap = useMemo(() => {
-    const m = {};
-    if (!tierCoverUrls.length) return m;
-    for (const a of season) {
-      const variantUrl = coverVariant(a.cover, DISPLAY_VARIANT).url;
-      if (variantUrl && tierCovers.images[variantUrl]) m[a.cover] = tierCovers.images[variantUrl];
-    }
-    return m;
-  }, [season, tierCoverUrls, tierCovers.images]);
+  const tierCovers = useCovers({
+    group: seasonKey,
+    entries: tierCoverEntries,
+    enabled: view === 'tier',
+  });
 
   // 本地缓存通道用不了（浏览器壳），或这次一张都没取到 → 显示退回直连远端地址。
   // 桌面壳里绝不能这么做：那会先由浏览器下一遍 45MB，主进程再下一遍进缓存。
@@ -1183,7 +1165,7 @@ export default function App() {
                 seasonKey={seasonKey}
                 tierlist={tierlist}
                 pool={season}
-                images={tierCoverMap}
+                images={tierCovers.images}
                 coversNote={coversNote}
                 coversRemote={coversRemote}
                 onPatch={(patch) => patchTierlist(seasonKey, patch)}

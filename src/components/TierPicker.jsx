@@ -46,7 +46,7 @@ export default function TierPicker({
             <TierItem
               key={a.id}
               anime={a}
-              image={images[a.cover] ?? null}
+              image={images[String(a.id)] ?? null}
               remote={remote}
               onPointerDown={(e) => onBeginDrag?.(e, { key: String(a.id), rowId: null })}
               onPick={() => onPick?.(a)}

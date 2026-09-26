@@ -10,11 +10,19 @@
 
 const { app, BrowserWindow, Notification, Menu, dialog, globalShortcut, ipcMain, shell } = require('electron');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const netBridge = require('./net.cjs');
 const { createTray } = require('./tray.cjs');
 const { CoverCache } = require('./covers.cjs');
+/**
+ * ⚠️ 这一行是被 IPC 冒烟逼出来的：`update:check` 一直在用 `updater.checkUpdate`，
+ * 但这个文件**从来没被 require 过** —— 一点「检查更新」就抛 `ReferenceError`。
+ * 藏了这么久是因为自动更新入口默认隐藏（features.js），没人点得到，也就没人触发。
+ * 这就是「没跑过的代码」最典型的形状：不是没写，是从没执行。
+ */
+const updater = require('./updater.cjs');
 
 const DEV_URL = process.env.JIKAI_DEV_URL || '';
 
@@ -35,7 +43,53 @@ if (SMOKE_PNG) {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu-sandbox');
 }
+
+/**
+ * IPC 冒烟：`JIKAI_IPC_SMOKE=1` —— 把主进程所有 IPC handler 挨个真跑一遍，
+ * 打一张 PASS/FAIL 表然后退出（有 FAIL 就退出码非 0）。
+ *
+ * 为什么要有这个：
+ *   桌面端 25 个 handler 里真正被跑过的只有四五个，剩下的**从来没执行过** ——
+ *   其中最刺眼的是 `file:save-binary`：v1.1 主打功能是「导出 PNG」，
+ *   而导出真正落盘的那一步在桌面端一次都没跑过（真机导出只验过浏览器壳）。
+ *   「没跑过」不等于「没问题」，只是问题还没轮到显形。
+ *
+ * 为什么用注册表（handlers）而不是在冒烟里另写一份等价实现：
+ *   另写一份只能证明「那份复制品是对的」。这里调的就是 ipcMain 真正注册的那个函数。
+ */
+const CRASH_TEST = process.env.JIKAI_CRASH_TEST === '1';
+const IPC_SMOKE = process.env.JIKAI_IPC_SMOKE === '1';
+
+/**
+ * 测试用轨迹标记（只在 `JIKAI_CRASH_TEST=1` 时生效）。
+ *
+ * 为什么需要它：自愈链路里「没走到」和「走到了但卡住」是两个完全不同的原因，
+ * 而 stdout 在重开的子进程里**根本传不回来**（`cmd /c start` 重新拉起的进程不继承管道），
+ * 只能靠落地文件。有了分段轨迹，才能一眼看出断在哪一步，不用逐段屏蔽代码去二分。
+ */
+const trace = (text) => {
+  if (!CRASH_TEST || !process.env.JIKAI_CRASH_MARKER) return;
+  try {
+    fs.appendFileSync(process.env.JIKAI_CRASH_MARKER, `${text}\n`, 'utf8');
+  } catch { /* 测试钩子，写不了就算了 */ }
+};
+
+/**
+ * handler 注册表：注册时顺手存一份，冒烟模式直接调它。
+ *
+ * 用 `handle()` 而不是直接 `ipcMain.handle()`，就是为了这里 ——
+ * 否则冒烟只能绕开 handler 自己重造一遍，那就失去意义了。
+ */
+const handlers = Object.create(null);
+function handle(channel, fn) {
+  handlers[channel] = fn;
+  ipcMain.handle(channel, fn);
+}
+
 const ICON_PNG = path.join(__dirname, '..', 'build', 'icons', 'icon.png');
+
+/** 应用根目录：渲染进程崩溃后重开时要把它作为第一个参数传回去（见 G5 那处注释） */
+const APP_ROOT = path.join(__dirname, '..');
 
 const stateFile = () => path.join(app.getPath('userData'), 'state.json');
 const wallpaperFile = () => path.join(app.getPath('userData'), 'wallpaper.json');
@@ -60,6 +114,101 @@ let coverCache = null;
 
 // 从托盘启动（开机自启）时不弹窗，直接蹲在托盘里
 const START_HIDDEN = process.argv.includes('--hidden');
+
+/**
+ * 渲染进程崩过一次后重开时会带上这个标记（计划 G5）。
+ * 它同时承担两个作用：告诉新进程「别再重试了」，以及「这次要把沙盒关掉」。
+ */
+const RETRY_FLAG = '--no-sandbox-retry';
+const RETRIED = process.argv.includes(RETRY_FLAG);
+
+/**
+ * 崩过一次之后的这次重开，把 GPU 沙盒也关掉（计划 G5）。
+ * 注意这里**只在重试时生效**：正常机器上沙盒该开着，不能为了怕崩就全局降级。
+ */
+if (RETRIED) {
+  // 测试用的落地标记：写在所有东西之前，用来区分「重开的进程压根没起来」
+  // 和「起来了但没走到 did-finish-load」—— 两种失败要从头就分得开，否则只能瞎猜。
+  if (CRASH_TEST && process.env.JIKAI_CRASH_MARKER) {
+    try {
+      fs.appendFileSync(process.env.JIKAI_CRASH_MARKER, 'relaunched-process-started\n', 'utf8');
+    } catch { /* 测试钩子，写不了就算了 */ }
+  }
+  if (CRASH_TEST && RETRIED && process.env.JIKAI_CRASH_MARKER) {
+    const m = process.env.JIKAI_CRASH_MARKER;
+    const note = (t) => { try { fs.appendFileSync(m, `${t}\n`, 'utf8'); } catch { /* 算了 */ } };
+    process.on('exit', (code) => note(`exit:${code}`));
+    process.on('uncaughtException', (e) => note(`uncaught:${e?.message}`));
+    process.on('unhandledRejection', (e) => note(`rejection:${String(e)}`));
+  }
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+  app.commandLine.appendSwitch('no-sandbox');
+}
+
+/**
+ * 启动崩溃记忆器（计划 G5）。
+ *
+ * ⚠️ 为什么需要它 —— 本机实测（沙盒内外都试过）：不带任何降级时，
+ * Electron 会打出九次 `GPU process exited unexpectedly`，然后
+ * `FATAL: gpu_data_manager_impl_private.cc(423)] GPU process isn't usable. Goodbye.`，
+ * **进程直接死掉，退出码 3，窗口一个都没出来**。
+ * 这种失败发生在 `ready` 之前，渲染层、IPC、`render-process-gone` 全都来不及注册，
+ * 只盯着「渲染进程崩了要不要重开」是堵不住它的。
+ *
+ * 所以这里换个思路：**不猜失败原因，只记结果**。
+ *   每次启动先写一个「已开始、还没活」的标记；
+ *   窗口真的显示出来了才把这个标记改成「健康」。
+ * 于是下一次启动时如果还留着「已开始」，就说明上一次是**没起来就死了** ——
+ * 不管原因是什么，这一次都直接降级。比对着具体错误信号处理更稳，
+ * 因为 Chromium 内部的致命错误不走 Electron 的事件。
+ *
+ * 降级结果会被**记住**：否则每次都「先正常试一次 → 崩 → 降级成功 → 又想试正常」，
+ * 用户每开一次都要先看一次崩溃。
+ */
+const boot = (() => {
+  const tryPath = () => {
+    try {
+      return path.join(app.getPath('userData'), 'boot.json');
+    } catch {
+      return '';
+    }
+  };
+  const file = tryPath();
+  const read = () => {
+    if (!file) return {};
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8')) || {};
+    } catch {
+      return {};
+    }
+  };
+  const write = (patch) => {
+    if (!file) return;
+    try {
+      fs.writeFileSync(file, JSON.stringify({ ...read(), ...patch }), 'utf8');
+    } catch { /* 记不住就算了，不影响启动 */ }
+  };
+
+  const prev = read();
+  // 上一次留着 started（没走到 healthy）＝ 上次没起来就死了
+  const crashedLastTime = prev.phase === 'started';
+  const shouldDegrade = crashedLastTime || prev.degrade === true;
+  if (crashedLastTime) write({ degrade: true });
+  write({ phase: 'started' });
+
+  return {
+    shouldDegrade,
+    crashedLastTime,
+    /** 窗口真的显示出来了调用一次，把标记抹掉 */
+    healthy: () => write({ phase: 'healthy' }),
+  };
+})();
+
+if (boot.shouldDegrade) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+}
 
 /** 外链白名单：只允许 http/https，避免被 file:// 或自定义协议劫持 */
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
@@ -122,9 +271,58 @@ function createWindow() {
     },
   });
 
+  trace('c1-browserwindow-ok');
+
   win.once('ready-to-show', () => {
+    // 窗口真的显示出来了 = 这次启动是健康的，把「崩溃记忆」抹掉
+    boot.healthy();
     if (!START_HIDDEN && !process.argv.includes('--tray')) win.show();
   });
+
+  /**
+   * 自愈链路的测试钩子：`JIKAI_CRASH_TEST=1` 起的应用会主动把渲染进程打死。
+   *
+   * 为什么需要它：渲染进程崩溃这种事平时不会自己发生，于是自愈代码**永远没被执行过** ——
+   * 这正是本项目踩过最大的坑（桌面专属路径从未运行）。光看代码不知道重开会不会被引擎拒绝。
+   * 所以这里是唯一一处专为测试写的分支，严格卡在两个条件上：只对 started-by-测试 生效，
+   * 且重试那次会立刻打印结果退出，不会打扰真实用户。
+   */
+  if (CRASH_TEST) {
+    /**
+     * 标记文件而不是 stdout：`app.relaunch()` 起来的新进程**不会继承这里的输出管道**，
+     * 打出来的字根本到不了终端 —— 一开始就因为没有输出而误判成「没重开」。
+     * 写文件绕开了 stdio 继承问题，重开到底有没有发生，看文件就知道。
+     */
+    const marker = process.env.JIKAI_CRASH_MARKER || '';
+    const mark = (text) => {
+      if (!marker) return;
+      try {
+        fs.appendFileSync(marker, `${text}\n`, 'utf8');
+      } catch { /* 测试钩子，写不了就算了 */ }
+    };
+
+    win.webContents.once('did-finish-load', () => {
+      mark('r3-loaded');
+      setTimeout(() => {
+        if (RETRIED) {
+          mark('relaunched');
+          app.exit(0);
+          return;
+        }
+        mark('crashing');
+        win.webContents.forcefullyCrashRenderer();
+      }, 1500);
+    });
+
+    /**
+     * 另一条失败路径：页面**加载失败**时 `did-finish-load` 永远不来，
+     * 标记文件里只会停在上一步，只能看出「没走完」却看不出为什么。
+     * 把失败码也记下来，省一轮瞎猜。
+     */
+    win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+      mark(`load-fail:${code}:${desc}:${String(url).slice(0, 60)}`);
+    });
+  }
 
   // ---------- 自检：JIKAI_SMOKE=<png 绝对路径> ----------
   //
@@ -173,7 +371,9 @@ function createWindow() {
   if (DEV_URL) {
     win.loadURL(hash ? `${DEV_URL.replace(/\/$/, '')}/#${hash}` : DEV_URL);
   } else {
-    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), hash ? { hash } : undefined);
+    const file = path.join(__dirname, '..', 'dist', 'index.html');
+    trace(`c2-load-file:${fs.existsSync(file) ? 'exists' : 'MISSING'}`);
+    win.loadFile(file, hash ? { hash } : undefined);
   }
 
   // 关窗不退进程：提醒要能继续跑，所以先藏到托盘
@@ -206,6 +406,57 @@ function createWindow() {
 
   win.on('closed', () => {
     mainWindow = null;
+  });
+
+  /**
+   * 渲染进程没了就自愈一次（计划 G5）。
+   *
+   * 症状是「窗口开着、里面全白」—— 用户看到的是一个活着的空壳，
+   * 而控制台里只有一句 `Renderer process killed`。这种故障在浏览器壳里不存在
+   * （浏览器会重新加载标签页），所以它是**桌面端独有的盲区**。
+   *
+   * 三条不能省的细节：
+   *  1. 重开前必须 `releaseSingleInstanceLock()` —— 否则新进程认为自己是第二份，直接退出，
+   *     表现是「点了没反应」，比崩了还难查。
+   *  2. **只重试一次**（用 argv 里的标记判断）。不设上限会在起不来的机器上无限重启。
+   *  3. 降级不等于默认：`--no-sandbox` 只在**已经崩过一次**之后才加，正常机器保持沙盒开着。
+   */
+  win.webContents.on('render-process-gone', (_e, details) => {
+    trace(`gone:${details?.reason}`);
+    // clean-exit 是正常关闭（比如关闭窗口），不该触发重启
+    if (details?.reason === 'clean-exit') return;
+    if (isQuitting || SMOKE_PNG || IPC_SMOKE) return;
+    if (process.argv.includes(RETRY_FLAG)) {
+      console.warn(`[jikai] 渲染进程再次崩溃（${details?.reason}），降级后仍起不来，不再重试`);
+      return;
+    }
+    console.warn(`[jikai] 渲染进程崩溃（${details?.reason}），关沙盒重开一次`);
+    app.releaseSingleInstanceLock();
+    isQuitting = true;
+    try {
+      /**
+       * 用 `app.relaunch()`，不要自己 `spawn`。
+       *
+       * 这里绕过一大圈弯路，把结论钉住：
+       *   自己 spawn（无论 `detached` 还是包一层 `cmd /c start`）**都会失败** ——
+       *   `detached` 的那份会跟着父进程的作业链一起被硬杀，
+       *   `cmd /c start` 那套在这个环境里压根拉不起进程（标记文件是空的）。
+       *   Electron 自带的 relaunch 是唯一能走的：它等当前实例退干净了才起新实例。
+       *
+       * ⚠️ 但**不能同时又 spawn 又 relaunch** —— 两个实例会去抢单实例锁，
+       *   症状是重开的进程只跑完主脚本第一行就没了，看着像 relaunch 坏了。
+       *   这个假象让我一度把正确写法改掉，绕了很久。
+       *
+       * `releaseSingleInstanceLock()` 必须在前面：新实例要能拿到锁，
+       * 否则它认为自己是「第二份」，直接退出。
+       */
+      trace('will-relaunch');
+      app.relaunch({ args: [APP_ROOT, RETRY_FLAG] });
+      trace('after-relaunch-call');
+    } catch (err) {
+      console.warn(`[jikai] 重开失败：${err?.message ?? String(err)}`);
+    }
+    app.quit();
   });
 
   return win;
@@ -292,9 +543,366 @@ function setGlobalHotkey(spec) {
   }
 }
 
+// ---------- IPC 冒烟 ----------
+
+/** 1×1 的 PNG，用来验「导出落盘」这条链路：够小，但仍是合法 PNG（会校验文件头） */
+const SMOKE_PNG_DATAURL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+
+/**
+ * 一张 1×1 的最小 JPEG，给本地 HTTP 服务当「远端封面」用。
+ * 必须是**真能解码的图** —— cover:warm 里若存的图无法解码，
+ * 界面读出来就是一张黑框，而 handler 全程不报错，这条断言就失去意义了。
+ */
+const SMOKE_JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwcJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPDs0NDP/wAALCAABAAEBAREA/8QAFAABAQAAAAAAAAAAAAAAAAAAAAn/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAA/AKgA/9k=',
+  'base64',
+);
+
+/**
+ * 把主进程所有 IPC handler 真跑一遍。
+ *
+ * 三条铁律：
+ *   1. **不碰真实数据** —— 会改 state / wallpaper / nameIndex 的，先备份到临时目录，
+ *      测完全部还原。冒烟跑崩了也不能把用户的档位排布弄没。
+ *   2. **有副作用的只验形状不真执行** —— 开机自启（写注册表）、全局快捷键、
+ *      自动更新（要联网）都只走「肯定安全」的那条分支。
+ *   3. **不真开外部浏览器** —— `shell:open` 只测「危险协议被挡住」，
+ *      挡住了就等于这条链路是通的（真开一次浏览器对冒烟没有任何额外信息量）。
+ */
+async function runIpcSmoke() {
+  const results = [];
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jikai-ipc-'));
+
+  const record = (name, ok, note = '') => results.push({ name, ok: Boolean(ok), note: String(note) });
+
+  /** 调真实 handler；抛异常算 FAIL 而不是让整个冒烟崩掉 */
+  const call = async (channel, ...args) => handlers[channel](null, ...args);
+
+  const step = async (name, fn) => {
+    if (typeof fn !== 'function') {
+      record(name, false, 'handler 没注册');
+      return null;
+    }
+    try {
+      const r = await fn();
+      return r;
+    } catch (err) {
+      record(name, false, err?.message ?? String(err));
+      return null;
+    }
+  };
+
+  // ---- 会把真实文件改掉的，先备份 ----
+  const backup = (file) => {
+    try {
+      if (fs.existsSync(file)) fs.copyFileSync(file, path.join(tmp, `backup-${path.basename(file)}`));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const restore = (file) => {
+    try {
+      const b = path.join(tmp, `backup-${path.basename(file)}`);
+      if (fs.existsSync(b)) fs.copyFileSync(b, file);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const statePath = stateFile();
+  const wallPath = wallpaperFile();
+  const indexPath = nameIndexFile();
+  backup(statePath);
+  backup(wallPath);
+  backup(indexPath);
+
+  // ---- 1. 只读的，随便跑 ----
+  await step('app:info', async () => {
+    const r = await call('app:info');
+    record('app:info', r && r.isDesktop === true && typeof r.version === 'string', JSON.stringify(r?.platform));
+  });
+
+  await step('cover:stats', async () => {
+    const r = await call('cover:stats');
+    record('cover:stats', r && typeof r.totalFiles === 'number', `${r?.totalFiles} 个 / ${r?.totalBytes} 字节`);
+  });
+
+  await step('autolaunch:get', async () => {
+    const r = await call('autolaunch:get');
+    record('autolaunch:get', r && typeof r.openAtLogin === 'boolean', `supported=${r?.supported}`);
+  });
+
+  // ---- 2. 封面缓存：只读模式取一张肯定没有的，验证它「不发网络、也不崩」----
+  await step('cover:get(readOnly)', async () => {
+    const r = await call('cover:get', {
+      group: '__ipc_smoke__',
+      url: 'https://lain.bgm.tv/pic/cover/c/00/00/smoke_none.jpg',
+      readOnly: true,
+    });
+    // readOnly 的核心约定是「绝不联网」，所以这里必然是 miss，不能是 hit
+    record('cover:get(readOnly)', r && (r.status === 'miss' || r.status === 'error'), `status=${r?.status}`);
+  });
+
+  await step('cover:clear(空 group)', async () => {
+    const r = await call('cover:clear', { group: '__ipc_smoke__' });
+    record('cover:clear(空 group)', r && Number(r.removed) === 0, `removed=${r?.removed}`);
+  });
+
+  // ---- 3. 落盘：这是整份冒烟里最值钱的一条 ----
+  // v1.1 主打功能是「导出 PNG」，而这一步（弹保存框 + 主进程写盘）在桌面端从未跑过。
+  // 这里把 dialog 换成「直接给一个临时路径」，handler 里其余代码原样执行。
+  const saveBinTo = path.join(tmp, 'smoke-export.png');
+  const realSaveDialog = dialog.showSaveDialog;
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: saveBinTo });
+
+  await step('file:save-binary', async () => {
+    const r = await call('file:save-binary', { name: 'smoke-export.png', dataUrl: SMOKE_PNG_DATAURL });
+    const onDisk = fs.existsSync(saveBinTo);
+    const magic = onDisk ? fs.readFileSync(saveBinTo).subarray(0, 8).toString('hex') : '';
+    // PNG 文件头是 89 50 4E 47 0D 0A 1A 0A
+    const isPng = magic === '89504e470d0a1a0a';
+    record(
+      'file:save-binary',
+      r?.ok === true && onDisk && isPng,
+      `ok=${r?.ok} bytes=${r?.bytes} 落盘=${onDisk} PNG头=${isPng}`,
+    );
+  });
+
+  await step('file:save-binary(坏 dataUrl)', async () => {
+    const r = await call('file:save-binary', { name: 'bad.png', dataUrl: 'not-a-dataurl' });
+    // 给坏数据必须明确报失败，不能假装成功 —— 静默成功就是「点了有反应、其实没写文件」
+    record('file:save-binary(坏 dataUrl)', r?.ok === false, `error=${r?.error}`);
+  });
+
+  const saveTextTo = path.join(tmp, 'smoke-export.json');
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: saveTextTo });
+  await step('file:save-text', async () => {
+    const r = await call('file:save-text', { name: 'smoke.json', text: '{"smoke":1}' });
+    const txt = fs.existsSync(saveTextTo) ? fs.readFileSync(saveTextTo, 'utf8') : '';
+    record('file:save-text', r?.ok === true && txt === '{"smoke":1}', `落盘内容=${txt.slice(0, 20)}`);
+  });
+
+  // 取消保存也要如实回给渲染层（不然界面会一直转圈）
+  dialog.showSaveDialog = async () => ({ canceled: true, filePath: '' });
+  await step('file:save-text(取消)', async () => {
+    const r = await call('file:save-text', { name: 'x.json', text: '{}' });
+    record('file:save-text(取消)', r?.ok === false, `error=${r?.error}`);
+  });
+  dialog.showSaveDialog = realSaveDialog;
+
+  // ---- 4. 会改真实文件的：测完还原 ----
+  /**
+   * ⚠️ 这一条**不能跳过**。
+   * `state:write` 是用户所有数据（档位排布、补番进度、设置）落盘的**唯一出口** ——
+   * 它坏了的表现不是报错，而是「关掉重开，昨天排的东西全没了」。
+   * 之前这里写的是「没有 state.json 就跳过」，等于**最容易坏的这条路永远不测**。
+   * 现在改成：原来没有就临时造一个、测完删掉；原来有就原样还原。
+   */
+  const stateExisted = fs.existsSync(statePath);
+  await step('state:read / state:write', async () => {
+    const before = await call('state:read');
+    const base = before && typeof before === 'object' ? before : {};
+    const probe = { ...base, _smokeProbe: { tierlists: { '2026q2': { templateId: 'smoke' } } } };
+    const w = await call('state:write', probe);
+    const after = await call('state:read');
+    const roundTrip = JSON.stringify(after) === JSON.stringify(probe);
+
+    // 还原：原来有就写回去，原来没有就删掉（不能凭空留一个文件）
+    // ⚠️ `writeJsonFile(file, null)` 落的是 `{}` 而不是删除 —— 要真删必须自己 rm
+    if (stateExisted) await call('state:write', base);
+    else
+      try {
+        fs.rmSync(statePath, { force: true });
+      } catch {
+        /* 本来就没有 */
+      }
+    const stillThere = fs.existsSync(statePath);
+
+    record(
+      'state:read / state:write',
+      w === true && roundTrip && stillThere === stateExisted,
+      `写=${w} 往返一致=${roundTrip} 原文件${stateExisted ? '已还原' : `已删除(残留=${stillThere})`}`,
+    );
+  });
+
+  await step('wallpaper 写 / 清 / 还原', async () => {
+    const w = await call('wallpaper:write', { _smoke: true });
+    const got = await call('wallpaper:read');
+    const cleared = await call('wallpaper:clear');
+    const after = await call('wallpaper:read');
+    // clear 写的是 {}（不是 null）—— 断言要跟着实现走，别写成「必须是 null」
+    const empty = !after || Object.keys(after).length === 0;
+    record('wallpaper 写 / 清 / 还原', w === true && got?._smoke === true && cleared === true && empty, `写=${w} 读回=${got?._smoke} 清空=${empty}`);
+  });
+
+  await step('nameindex 写 / 清 / 还原', async () => {
+    const w = await call('nameindex:write', { _smoke: true, items: [] });
+    const got = await call('nameindex:read');
+    const cleared = await call('nameindex:clear');
+    const after = await call('nameindex:read');
+    const empty = !after || Object.keys(after).length === 0;
+    record('nameindex 写 / 清 / 还原', w === true && got?._smoke === true && cleared === true && empty, `写=${w} 清空=${empty}`);
+  });
+
+  restore(statePath);
+  restore(wallPath);
+  restore(indexPath);
+  record('真实数据已还原', true, `state / wallpaper / nameIndex 各还原一次（备份在 ${tmp}）`);
+
+  // ---- 5. 有副作用的：只走安全的那条分支 ----
+  await step('shell:open(危险协议必须被挡)', async () => {
+    const bad = await call('shell:open', 'javascript:alert(1)');
+    const bad2 = await call('shell:open', 'file:///C:/Windows/win.ini');
+    // 真开浏览器对冒烟没额外信息量，但「危险协议被挡住」必须验 —— 这是安全边界
+    record('shell:open(危险协议必须被挡)', bad === false && bad2 === false, `js=${bad} file=${bad2}`);
+  });
+
+  await step('notify', async () => {
+    const r = await call('notify', { title: '冒烟', body: '这条通知可以无视' });
+    // 无头环境里通知往往不支持，返回 false 也是**正确**的 —— 这里只要求它不抛
+    record('notify', typeof r === 'boolean', `返回值=${r}`);
+  });
+
+  await step('hotkey:set(空=解绑，不注册)', async () => {
+    const r = await call('hotkey:set', '');
+    record('hotkey:set(空=解绑，不注册)', r && typeof r.ok === 'boolean', `ok=${r?.ok} spec=${r?.spec}`);
+  });
+
+  await step('update:check(没配地址必须直接拒绝)', async () => {
+    const r = await call('update:check', { url: '' });
+    // 没配地址还去发请求的话，冒烟就会卡在联网上 —— 这条同时也是「不发请求」的断言
+    record('update:check(没配地址必须直接拒绝)', r && (r.ok === false || r.rejected === true), JSON.stringify(r).slice(0, 80));
+  });
+
+  await step('net:proxy(设回空)', async () => {
+    const r = await call('net:proxy', '');
+    record('net:proxy(设回空)', r !== undefined, `返回值=${typeof r}`);
+  });
+
+  // ---- 6. 网络：起一个本地服务，让 handler 走完整的网络栈 ----
+  // 不本地起服务就只能拿假 URL 测「报错对不对」，那等于没测主路径 ——
+  // 而 http:json 正是「更新番剧数据」那条路，一天不用它，用户看到的就是三季前的旧数据。
+  let port = 0;
+  let server = null;
+  try {
+    server = await new Promise((resolve, reject) => {
+      const s = require('node:http').createServer((req, res) => {
+        if (req.url === '/json') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, from: 'smoke' }));
+        } else if (req.url === '/img') {
+          res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+          res.end(SMOKE_JPEG);
+        } else {
+          res.writeHead(404).end('nope');
+        }
+      });
+      s.on('error', reject);
+      s.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    port = server.address().port;
+  } catch (err) {
+    record('本地 HTTP 服务起得来', false, String(err?.message ?? err));
+  }
+
+  if (server) {
+    const base = `http://127.0.0.1:${port}`;
+
+    await step('http:json', async () => {
+      const r = await call('http:json', { url: `${base}/json`, timeoutMs: 5000 });
+      // ⚠️ 成功字段是 `data` 不是 `json`（net.cjs 里两个 fetch 都用 data）
+      record('http:json', r?.ok === true && r?.data?.from === 'smoke', `ok=${r?.ok} from=${r?.data?.from}`);
+    });
+
+    await step('http:json(404 必须明确失败，不能给空对象)', async () => {
+      const r = await call('http:json', { url: `${base}/nope`, timeoutMs: 5000 });
+      record('http:json(404)', r && (r.ok === false || r.json === undefined), `ok=${r?.ok}`);
+    });
+
+    await step('http:binary(必须能解回原图)', async () => {
+      const r = await call('http:binary', { url: `${base}/img`, timeoutMs: 5000 });
+      // fetchBinary 给的是 base64（`data`），不是 dataURL —— 拼 dataURL 是 covers.cjs 的事。
+      // 所以这里断言「解回的字节与原图逐字节一致」：这才证明二进制没被 UTF-8 解码毁掉。
+      // ⚠️ net.cjs 那条注释说的正是这个坑：JPEG 里全是非法 UTF-8 序列，一 toString 图就废了。
+      const back = typeof r?.data === 'string' ? Buffer.from(r.data, 'base64') : Buffer.alloc(0);
+      const same = back.length === SMOKE_JPEG.length && back.equals(SMOKE_JPEG);
+      const isJpeg = back.subarray(0, 2).toString('hex') === 'ffd8' && back.subarray(-2).toString('hex') === 'ffd9';
+      record(
+        'http:binary(必须能解回原图)',
+        r?.ok === true && same && isJpeg,
+        `ok=${r?.ok} bytes=${r?.bytes} mime=${r?.mime} 逐字节一致=${same} JPEG结构=${isJpeg}`,
+      );
+    });
+
+    await step('cover:warm(真下载 + 缓存)', async () => {
+      const g = '__ipc_smoke__';
+      await call('cover:clear', { group: g });
+      const r = await call('cover:warm', {
+        group: g,
+        urls: [`${base}/img`],
+        readOnly: false,
+      });
+      const got = await call('cover:get', { group: g, url: `${base}/img`, readOnly: true });
+      await call('cover:clear', { group: g });
+      // warm 完必须能 readOnly 命中 —— 这就是「不断网也能出图」的那条链路
+      record('cover:warm(真下载 + 缓存)', !!got?.dataUrl, `warm=${JSON.stringify(r).slice(0, 40)} 只读命中=${!!got?.dataUrl}`);
+    });
+
+    await step('tray:state(托盘未建也不能抛)', async () => {
+      // 冒烟模式不建托盘，`tray` 是 null —— 这里验的正是那个可选链没漏
+      const r = await call('tray:state', { view: 'tier', todayCount: 3 });
+      record('tray:state(托盘未建也不能抛)', r === true, `返回值=${r}`);
+    });
+
+    await step('autolaunch:set(写回原值)', async () => {
+      const cur = await call('autolaunch:get');
+      // 写同一个值：语义上是空操作，但**整条写注册表路径都真跑了一遍**
+      const r = await call('autolaunch:set', cur?.enabled === true);
+      record('autolaunch:set(写回原值)', r !== undefined, `原值=${cur?.enabled} 返回=${JSON.stringify(r).slice(0, 40)}`);
+    });
+
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  // ⚠️ 反向自检：故意造一条假 FAIL，确认它**真的会被统计进去**。
+  // 没有这一条的危害是隐蔽的 —— 如果哪天 `record` 被改坏、所有结果都算 PASS，
+  // 冒烟会永远绿着骗人。这里先自证一次「FAIL 是会暴露的」，再把这条从结果里摘掉。
+  // 用「前后差值」而不是绝对等于 1 —— 前面若已有真 FAIL，写死 1 会误判自身失效
+  const failsBefore = results.filter((r) => !r.ok).length;
+  const idx = results.length;
+  record('__自检__', false, '这条必须被算成失败');
+  const selfCheckCaught = results.filter((r) => !r.ok).length === failsBefore + 1;
+  results.splice(idx, 1);
+  record(
+    '冒烟自身的失败检测',
+    selfCheckCaught,
+    selfCheckCaught ? '假 FAIL 已被计入，断言是真的' : '❌ 假 FAIL 没被统计，这套断言可能是空的',
+  );
+
+  // ---- 汇总 ----
+  const failed = results.filter((r) => !r.ok);
+  console.log('IPC_SMOKE_BEGIN');
+  for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'} ${r.name}${r.note ? ` — ${r.note}` : ''}`);
+  console.log(`IPC_SMOKE_END ${JSON.stringify({ total: results.length, failed: failed.length })}`);
+
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  } catch { /* 临时目录 */ }
+
+  return failed.length;
+}
+
 // ---------- 启动 ----------
 
 if (!app.requestSingleInstanceLock()) {
+  if (CRASH_TEST && process.env.JIKAI_CRASH_MARKER) {
+    try {
+      fs.appendFileSync(process.env.JIKAI_CRASH_MARKER, 'second-instance-quit\n', 'utf8');
+    } catch { /* 测试钩子 */ }
+  }
   app.quit();
 } else {
   // Windows 上不设 AppUserModelId，通知会显示成 electron.app.Electron
@@ -303,41 +911,48 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => showWindow());
 
   app.whenReady().then(async () => {
+    if (CRASH_TEST && process.env.JIKAI_CRASH_MARKER) {
+      try {
+        fs.appendFileSync(process.env.JIKAI_CRASH_MARKER, 'r2-ready\n', 'utf8');
+      } catch { /* 测试钩子 */ }
+    }
     Menu.setApplicationMenu(null);
+    trace('p1-menu');
     await netBridge.applyProxy('');
+    trace('p2-proxy');
 
     // ---- IPC ----
-    ipcMain.handle('state:read', () => readJsonFile(stateFile()));
-    ipcMain.handle('state:write', (_e, state) => writeJsonFile(stateFile(), state));
+    handle('state:read', () => readJsonFile(stateFile()));
+    handle('state:write', (_e, state) => writeJsonFile(stateFile(), state));
 
-    ipcMain.handle('wallpaper:read', () => readJsonFile(wallpaperFile()));
-    ipcMain.handle('wallpaper:write', (_e, payload) => writeWallpaper(payload));
-    ipcMain.handle('wallpaper:clear', () => writeWallpaper(null));
+    handle('wallpaper:read', () => readJsonFile(wallpaperFile()));
+    handle('wallpaper:write', (_e, payload) => writeWallpaper(payload));
+    handle('wallpaper:clear', () => writeWallpaper(null));
 
-    ipcMain.handle('shell:open', (_e, url) => {
+    handle('shell:open', (_e, url) => {
       if (!isSafeUrl(url)) return false;
       shell.openExternal(url);
       return true;
     });
 
-    ipcMain.handle('notify', (_e, { title, body } = {}) => {
+    handle('notify', (_e, { title, body } = {}) => {
       if (!Notification.isSupported()) return false;
       new Notification({ title: String(title ?? '次回'), body: String(body ?? ''), icon: ICON_PNG }).show();
       return true;
     });
 
-    ipcMain.handle('http:json', (_e, payload = {}) => netBridge.fetchJson(payload));
-    ipcMain.handle('http:binary', (_e, payload = {}) => netBridge.fetchBinary(payload));
+    handle('http:json', (_e, payload = {}) => netBridge.fetchJson(payload));
+    handle('http:binary', (_e, payload = {}) => netBridge.fetchBinary(payload));
 
     // ---- 封面缓存 ----
     coverCache = new CoverCache(app.getPath('userData'), {
       fetchBinary: (opts) => netBridge.fetchBinary(opts),
     });
 
-    ipcMain.handle('cover:get', (_e, payload = {}) => coverCache.get(payload));
-    ipcMain.handle('cover:stats', () => coverCache.stats());
-    ipcMain.handle('cover:clear', (_e, payload = {}) => coverCache.clear(payload || {}));
-    ipcMain.handle('cover:warm', async (_e, payload = {}) => {
+    handle('cover:get', (_e, payload = {}) => coverCache.get(payload));
+    handle('cover:stats', () => coverCache.stats());
+    handle('cover:clear', (_e, payload = {}) => coverCache.clear(payload || {}));
+    handle('cover:warm', async (_e, payload = {}) => {
       return coverCache.warm({
         ...payload,
         // 预热一季动辄几十张，一次性 invoke 会让界面干等；
@@ -351,12 +966,12 @@ if (!app.requestSingleInstanceLock()) {
     });
 
     // ---- 名称索引（单独文件） ----
-    ipcMain.handle('nameindex:read', () => readJsonFile(nameIndexFile()));
-    ipcMain.handle('nameindex:write', (_e, payload) => writeJsonFile(nameIndexFile(), payload));
-    ipcMain.handle('nameindex:clear', () => writeJsonFile(nameIndexFile(), null));
+    handle('nameindex:read', () => readJsonFile(nameIndexFile()));
+    handle('nameindex:write', (_e, payload) => writeJsonFile(nameIndexFile(), payload));
+    handle('nameindex:clear', () => writeJsonFile(nameIndexFile(), null));
 
     // 保存二进制文件：导出 PNG 用。渲染层给的是 dataURL，这里剥掉前缀再解码。
-    ipcMain.handle('file:save-binary', async (_e, { name = 'jikai.png', dataUrl = '' } = {}) => {
+    handle('file:save-binary', async (_e, { name = 'jikai.png', dataUrl = '' } = {}) => {
       const m = /^data:([^;,]+)?(;charset=[^;,]+)?;base64,(.*)$/s.exec(String(dataUrl));
       if (!m) return { ok: false, error: '不是合法的 dataURL' };
       const mime = m[1] || 'application/octet-stream';
@@ -381,12 +996,12 @@ if (!app.requestSingleInstanceLock()) {
     });
 
     // 检查更新：只负责把更新源 JSON 取回来，比版本号在渲染层（core/update.js）
-    ipcMain.handle('update:check', (_e, payload = {}) => updater.checkUpdate(payload));
+    handle('update:check', (_e, payload = {}) => updater.checkUpdate(payload));
 
     // 代理变了要立刻生效，同时把结果回给设置面板
-    ipcMain.handle('net:proxy', async (_e, proxy) => netBridge.applyProxy(proxy));
+    handle('net:proxy', async (_e, proxy) => netBridge.applyProxy(proxy));
 
-    ipcMain.handle('app:info', () => ({
+    handle('app:info', () => ({
       version: app.getVersion(),
       name: app.getName(),
       platform: process.platform,
@@ -395,12 +1010,12 @@ if (!app.requestSingleInstanceLock()) {
       packaged: app.isPackaged,
     }));
 
-    ipcMain.handle('autolaunch:get', () => getAutoLaunch());
-    ipcMain.handle('autolaunch:set', (_e, on) => setAutoLaunch(on));
+    handle('autolaunch:get', () => getAutoLaunch());
+    handle('autolaunch:set', (_e, on) => setAutoLaunch(on));
 
-    ipcMain.handle('hotkey:set', (_e, spec) => setGlobalHotkey(spec));
+    handle('hotkey:set', (_e, spec) => setGlobalHotkey(spec));
 
-    ipcMain.handle('tray:state', (_e, payload) => {
+    handle('tray:state', (_e, payload) => {
       lastTrayState = { ...lastTrayState, ...(payload ?? {}) };
       tray?.setState({
         view: lastTrayState.view,
@@ -415,7 +1030,7 @@ if (!app.requestSingleInstanceLock()) {
       return true;
     });
 
-    ipcMain.handle('file:save-text', async (_e, { name = 'jikai.json', text = '' } = {}) => {
+    handle('file:save-text', async (_e, { name = 'jikai.json', text = '' } = {}) => {
       const { canceled, filePath } = await dialog.showSaveDialog(mainWindow ?? undefined, {
         title: '保存文件',
         defaultPath: path.join(app.getPath('downloads'), name),
@@ -430,7 +1045,16 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
+    // IPC 冒烟：跑完就退。不建托盘也不开窗口 ——
+    // 那两部分由 check:desktop 管，这里只关心「主进程这 25 个 handler 到底能不能跑」。
+    if (IPC_SMOKE) {
+      const failed = await runIpcSmoke();
+      app.exit(failed ? 1 : 0);
+      return;
+    }
+
     // ---- 托盘 ----
+    trace('p3-tray-start');
     tray = createTray({
       onToggleWindow: toggleWindow,
       onCommand: (cmd) => {
@@ -450,7 +1074,9 @@ if (!app.requestSingleInstanceLock()) {
     const initial = getAutoLaunch();
     tray.setState({ version: app.getVersion(), autoLaunch: initial.openAtLogin });
 
+    trace('p3-tray-done');
     mainWindow = createWindow();
+    trace('p4-window-created');
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();

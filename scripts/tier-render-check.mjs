@@ -151,6 +151,18 @@ check(countOf(dom, 'tier-item__art') > 5, `素材池里的图块太少（${count
 // 那时 `<img>` 已经被 React 换成 `<span>` 了 —— 拿它做断言会假红。
 check(countOf(dom, 'data-cover="remote"') > 5, `浏览器壳的封面降级没生效（data-cover="remote" 有 ${countOf(dom, 'data-cover="remote"')} 个）`);
 check(countOf(dom, 'data-cover="none"') === 0, `有 ${countOf(dom, 'data-cover="none"')} 个图块既没缓存也没远端地址`);
+
+/**
+ * ⚠️ 反向断言（计划 G4）：浏览器壳**不允许**出现 `cache`。
+ * 浏览器没有本地封面缓存通道，一旦出现 `cache` 说明「能力判断」错了 ——
+ * 界面会在一个拿不到缓存的壳里走缓存分支，结果是一整屏色块，
+ * 而且**看起来很像「图还没加载完」**，没有这条断言根本抓不到。
+ * 它是 `check:desktop` 里那条「桌面必须 remote === 0」的镜像。
+ */
+check(
+  countOf(dom, 'data-cover="cache"') === 0,
+  `浏览器壳不该出现缓存封面，实际 ${countOf(dom, 'data-cover="cache"')} 个 —— 平台能力判断错了`,
+);
 check(dom.includes('Tier List'), '侧栏没有 Tier List 导航项');
 check(dom.includes('导出 PNG'), '工具栏没有导出按钮');
 // 拖拽模式跑完之后 TOP 档已经有东西了，空档就只剩 6 个 —— 断言要跟着模式走

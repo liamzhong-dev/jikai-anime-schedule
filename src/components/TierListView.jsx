@@ -159,7 +159,7 @@ export default function TierListView({
           className="tier-ghost"
           style={{ left: drag.x, top: drag.y }}
         >
-          <TierItem anime={dragAnime} image={images[dragAnime.cover] ?? null} ghost />
+          <TierItem anime={dragAnime} image={images[String(dragAnime.id)] ?? null} ghost />
         </div>
       ) : null}
     </div>

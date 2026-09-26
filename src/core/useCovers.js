@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { platform } from '../platform/index.js';
+import { mapCoversByKey } from './covers.js';
 
 /**
- * 批量取封面，返回 `url -> dataUrl` 的映射。
+ * 批量取封面，返回 `条目 key -> dataUrl` 的映射。
+ *
+ * ⚠️ 入参是 `entries: [{key, url}]`，不是一串 url；返回的键也是 `key`（条目 id），
+ * 不是 url。变体地址（界面 `c`、导出 `l`）是这一层的内部实现，**不许外泄** ——
+ * 外泄一次就意味着消费方要自己再推一遍「该用哪一档」，而每多一个消费方就多一次
+ * 推错的机会（v1.1 桌面端 82 张封面全退成色块，就是三个组件各自推错了）。
  *
  * 为什么显示也要走缓存，而不是直接 `<img src={远端地址}>`：
  *   1. **断网就没图**。实测 `lain.bgm.tv` 在代理关掉时完全不可达 ——
@@ -34,12 +40,13 @@ import { platform } from '../platform/index.js';
 /** 每攒够这么多张才 setState 一次，避免 82 次重渲染 */
 const BATCH = 8;
 
-export function useCovers({ group, urls = [], enabled = true, concurrency = 5 } = {}) {
+export function useCovers({ group, entries = [], enabled = true, concurrency = 5 } = {}) {
   const [images, setImages] = useState({});
   const [progress, setProgress] = useState(null);
   const [supported, setSupported] = useState(true);
   const [error, setError] = useState(null);
 
+  const urls = entries.map((e) => e?.url).filter(Boolean);
   const sig = urls.join('|');
   const doneSig = useRef('');
 
@@ -58,7 +65,9 @@ export function useCovers({ group, urls = [], enabled = true, concurrency = 5 } 
     setError(null);
     setProgress({ phase: 'warm', done: 0, total: urls.length });
 
+    // 内部按 url 收（取图那层不知道条目），对外只给 key 键的表
     const out = {};
+    const flush = () => { if (alive) setImages(mapCoversByKey(entries, out)); };
     const pending = new Set(urls);
 
     /** 扫一遍还没拿到的；readOnly=true 时只读缓存，绝不联网 */
@@ -79,9 +88,9 @@ export function useCovers({ group, urls = [], enabled = true, concurrency = 5 } 
           }
           // 联网那一趟要分批刷，不然 82 张刷 82 次
           since += 1;
-          if (!readOnly && alive && since % BATCH === 0) setImages({ ...out });
+          if (!readOnly && since % BATCH === 0) flush();
         }
-        if (alive) setImages({ ...out });
+        flush();
       } finally {
         reading = false;
       }
@@ -129,7 +138,7 @@ export function useCovers({ group, urls = [], enabled = true, concurrency = 5 } 
       if (pending.size) await pass(false);
       if (!alive) return;
 
-      setImages({ ...out });
+      flush();
       setProgress(null);
     })().catch((err) => {
       if (alive) {

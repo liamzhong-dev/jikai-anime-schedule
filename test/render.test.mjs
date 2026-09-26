@@ -290,13 +290,23 @@ test('Tier List：封面走缓存还是直连，写在 data-cover 里', async ()
   const web = await renderTier({ pool: SAMPLE_ITEMS, coversRemote: true });
   assert.ok(countOf(web, 'data-cover="remote"') > 5, '浏览器壳应当退回直连');
 
-  // 缓存里已经有图时才算 cache
+  // 缓存里已经有图时才算 cache。
+  // ⚠️ 键是**条目 id** 不是封面地址 —— 这条断言顺手就把新契约钉住了：
+  // 拿地址当键的话这里会是 0，测试会红。
   const withImg = await renderTier({
+    pool: SAMPLE_ITEMS,
+    coversRemote: true,
+    images: { [String(SAMPLE_ITEMS[0].id)]: 'data:image/jpeg;base64,AAAA' },
+  });
+  assert.equal(countOf(withImg, 'data-cover="cache"'), 1, '缓存里有图时应当算 cache');
+
+  // 反向：拿地址当键必须查不到（v1.1 桌面端那个 bug 的形状）
+  const byCover = await renderTier({
     pool: SAMPLE_ITEMS,
     coversRemote: true,
     images: { [SAMPLE_ITEMS[0].cover]: 'data:image/jpeg;base64,AAAA' },
   });
-  assert.equal(countOf(withImg, 'data-cover="cache"'), 1, '缓存里有图时应当算 cache');
+  assert.equal(countOf(byCover, 'data-cover="cache"'), 0, '拿封面地址当键不该命中');
 });
 
 test('Tier List：档位可改色（色值渲染进去了）、空的档位有占位提示', async () => {
