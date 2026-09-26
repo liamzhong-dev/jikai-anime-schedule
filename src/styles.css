@@ -12,6 +12,23 @@
    ========================================================================== */
 
 :root {
+  /*
+   * ---- 内容比例：两个全局倍率（由 App 写在 documentElement 上）----
+   *
+   * `--fs` 文字、`--cs` 封面。它们是**倍率**而不是绝对值，各元素用
+   * `calc(原来的px * var(--fs, 1))` 套上去 —— 这样加一处样式不需要先想
+   * 「这一档该是多少 px」，照着原来的数字写就行，也永远不会漏掉某一页。
+   *
+   * 为什么要全局：这两个档位原本只挂在本季网格上，于是用户在本季调好了，
+   * 切到 TierList 一看一个像素都没动 —— 那感觉不像「这页不支持」，
+   * 更像功能坏了。现在任何一处封面/字号都认这两个变量。
+   *
+   * 兜底写 1：`var(--fs, 1)` 的第二个参数。组件单独 SSR 时没有 App 去设它们，
+   * 不写兜底会整片塌下去。
+   */
+  --fs: 1;
+  --cs: 1;
+
   /* ---- 兜底：夜航主题 ---- */
   --bg: #0c0e13;
   --bg-rgb: 12,14,19;
@@ -467,6 +484,14 @@ html:not([data-frost='on']) .modal {
   transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 .window__btn:hover { color: var(--text); border-color: var(--line-2); background: var(--panel-2); }
+
+/*
+ * 「内容大小」的入口。每张开窗卡片右上角都有它 —— 而不是只放在本季网格的工具栏里，
+ * 因为工具栏那一个，用户到了 TierList 就找不着了，然后以为这个功能只支持那一页。
+ * 稍微宽一点：里面是两个字母，26px 的正方形挤不下。
+ */
+.window__btn--scale { width: 34px; font-size: 12px; letter-spacing: 0.5px; }
+.window__btn--scale:hover { color: var(--accent); border-color: var(--accent); }
 
 .window__body { flex: 1; overflow: auto; padding: 14px; }
 
@@ -973,7 +998,7 @@ html:not([data-frost='on']) .modal {
 }
 .queue__row--hot { border-color: rgba(var(--ok-rgb), 0.42); background: var(--ok-soft); }
 
-.queue__cover { width: 40px; height: 56px; flex: 0 0 40px; border-radius: var(--r-sm); }
+.queue__cover { width: calc(40px * var(--cs, 1)); height: calc(56px * var(--cs, 1)); flex: 0 0 calc(40px * var(--cs, 1)); border-radius: var(--r-sm); }
 .queue__cover .cover__glyph { font-size: 1.36em; }
 
 .queue__info { flex: 1; min-width: 0; }
@@ -990,7 +1015,7 @@ html:not([data-frost='on']) .modal {
 
 /* ---------- 补番清单 ---------- */
 /* 同一行的卡片拉齐高度，操作按钮与截止日期压在底部，看上去才齐整 */
-.board { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 12px; align-items: stretch; }
+.board { display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(232px * var(--cs, 1)), 1fr)); gap: 12px; align-items: stretch; }
 
 .catchup {
   display: flex;
@@ -1010,7 +1035,7 @@ html:not([data-frost='on']) .modal {
 /* 顶部那条「按名字搜」：搜全量名称索引，用来把本季之外的老番加进补番清单 */
 .catchup__search { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .catchup__search .input { flex: 1; min-width: 0; }
-.catchup__cover { width: 38px; height: 54px; flex: 0 0 38px; border-radius: var(--r-sm); }
+.catchup__cover { width: calc(38px * var(--cs, 1)); height: calc(54px * var(--cs, 1)); flex: 0 0 calc(38px * var(--cs, 1)); border-radius: var(--r-sm); }
 .catchup__cover .cover__glyph { font-size: 1.28em; }
 .catchup__titlewrap { min-width: 0; flex: 1; }
 
@@ -1083,12 +1108,12 @@ html:not([data-frost='on']) .modal {
 .drawer__close:hover { color: var(--text); border-color: var(--line-2); }
 
 .drawer__head { display: flex; gap: 14px; padding: 16px; border-bottom: 1px solid var(--line); }
-.drawer__cover { width: 92px; height: 132px; flex: 0 0 92px; border-radius: var(--r); }
-.drawer__cover .cover__glyph { font-size: 34px; }
+.drawer__cover { width: calc(92px * var(--cs, 1)); height: calc(132px * var(--cs, 1)); flex: 0 0 calc(92px * var(--cs, 1)); border-radius: var(--r); }
+.drawer__cover .cover__glyph { font-size: calc(34px * var(--cs, 1)); }
 .drawer__titlewrap { min-width: 0; flex: 1; padding-right: 26px; }
-.drawer__title { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.35; }
-.drawer__sub { font-size: 11.5px; color: var(--text-3); margin-top: 3px; }
-.drawer__meta { font-size: 11.5px; color: var(--text-2); margin-top: 7px; }
+.drawer__title { margin: 0; font-size: calc(15px * var(--fs, 1)); font-weight: 600; line-height: 1.35; }
+.drawer__sub { font-size: calc(11.5px * var(--fs, 1)); color: var(--text-3); margin-top: 3px; }
+.drawer__meta { font-size: calc(11.5px * var(--fs, 1)); color: var(--text-2); margin-top: 7px; }
 .drawer__pills { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
 .drawer__pills .pill { margin-left: 0; }
 
@@ -1104,13 +1129,13 @@ html:not([data-frost='on']) .modal {
   border: 1px solid var(--line);
 }
 .drawer__countdown--hot { border-color: rgba(var(--ok-rgb), 0.42); background: var(--ok-soft); }
-.drawer__countdown-num { font-size: 30px; font-weight: 600; letter-spacing: -1px; line-height: 1; color: var(--accent); font-variant-numeric: tabular-nums; }
-.drawer__countdown-unit { font-size: 12px; color: var(--text-2); }
-.drawer__countdown-text { font-size: 13px; color: var(--text-2); }
+.drawer__countdown-num { font-size: calc(30px * var(--fs, 1)); font-weight: 600; letter-spacing: -1px; line-height: 1; color: var(--accent); font-variant-numeric: tabular-nums; }
+.drawer__countdown-unit { font-size: calc(12px * var(--fs, 1)); color: var(--text-2); }
+.drawer__countdown-text { font-size: calc(13px * var(--fs, 1)); color: var(--text-2); }
 
 .drawer__actions { display: flex; gap: 7px; flex-wrap: wrap; margin: 12px 0; }
-.drawer__summary { font-size: 12.5px; color: var(--text-2); line-height: 1.75; margin: 4px 0 0; }
-.drawer__section { font-size: 12px; font-weight: 600; color: var(--text-2); margin: 18px 0 8px; }
+.drawer__summary { font-size: calc(12.5px * var(--fs, 1)); color: var(--text-2); line-height: 1.75; margin: 4px 0 0; }
+.drawer__section { font-size: calc(12px * var(--fs, 1)); font-weight: 600; color: var(--text-2); margin: 18px 0 8px; }
 
 .eplist { display: flex; flex-direction: column; gap: 4px; }
 .ep {
@@ -1537,22 +1562,22 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
 /* 结果那一行（导入完成 / 失败）区别于普通说明：它是「刚刚发生了什么」 */
 .ssec__result { color: var(--text-2); font-weight: 500; }
 
-.tier__note { font-size: 11px; color: var(--text-2); }
+.tier__note { font-size: calc(11px * var(--fs, 1)); color: var(--text-2); }
 .tier__select { width: auto; min-width: 168px; }
 
 .tier__body { display: flex; gap: 12px; flex: 1 1 auto; min-height: 0; }
 
 /* ---- 素材池 ---- */
 .tier-pool {
-  flex: 0 0 244px; width: 244px;
+  flex: 0 0 calc(244px * var(--cs, 1)); width: calc(244px * var(--cs, 1));
   display: flex; flex-direction: column; gap: 8px; min-height: 0;
   padding-right: 10px; border-right: 1px solid var(--line);
 }
 .tier-pool__head { display: flex; align-items: baseline; justify-content: space-between; }
-.tier-pool__title { font-size: 12.5px; font-weight: 600; }
-.tier-pool__count { font-size: 11px; color: var(--text-3); }
+.tier-pool__title { font-size: calc(12.5px * var(--fs, 1)); font-weight: 600; }
+.tier-pool__count { font-size: calc(11px * var(--fs, 1)); color: var(--text-3); }
 .tier-pool__search { width: 100%; }
-.tier-pool__hint { font-size: 11px; color: var(--text-3); }
+.tier-pool__hint { font-size: calc(11px * var(--fs, 1)); color: var(--text-3); }
 .tier-pool__grid {
   flex: 1 1 auto; min-height: 0; overflow: auto;
   display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px;
@@ -1572,11 +1597,11 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
   flex: 0 0 96px; width: 96px;
   border-radius: 8px; padding: 6px 4px;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
-  font-weight: 700; font-size: 15px; text-align: center;
+  font-weight: 700; font-size: calc(15px * var(--fs, 1)); text-align: center;
   cursor: text;
 }
 .tier-row__text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tier-row__count { font-size: 10.5px; font-weight: 500; opacity: 0.72; }
+.tier-row__count { font-size: calc(10.5px * var(--fs, 1)); font-weight: 500; opacity: 0.72; }
 .tier-row__color {
   width: 26px; height: 15px; padding: 0; border: none; border-radius: 4px;
   background: transparent; cursor: pointer;
@@ -1599,7 +1624,7 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
 .tier-row__del:hover:not(:disabled) { opacity: 1; background: rgba(0, 0, 0, 0.42); }
 .tier-row__del:disabled { opacity: 0.3; cursor: not-allowed; }
 .tier-row__input {
-  width: 84px; text-align: center; font-size: 12px; font-weight: 600;
+  width: 84px; text-align: center; font-size: calc(12px * var(--fs, 1)); font-weight: 600;
   border-radius: 5px; border: 1px solid rgba(0, 0, 0, 0.25);
   background: rgba(255, 255, 255, 0.9); color: #1a1d24; padding: 2px 4px;
 }
@@ -1611,42 +1636,42 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
 }
 .tier-row.is-target .tier-row__body { border-color: var(--accent); background: var(--accent-soft); }
 .tier-row__insert { flex: 0 0 3px; width: 3px; align-self: stretch; border-radius: 2px; background: var(--accent); }
-.tier-row__empty { align-self: center; padding: 0 8px; font-size: 11.5px; color: var(--text-3); }
+.tier-row__empty { align-self: center; padding: 0 8px; font-size: calc(11.5px * var(--fs, 1)); color: var(--text-3); }
 
 /* ---- 图块 ---- */
 .tier-item {
-  position: relative; width: 100px; flex: 0 0 100px;
+  position: relative; width: calc(100px * var(--cs, 1)); flex: 0 0 calc(100px * var(--cs, 1));
   cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none;
 }
 .tier-item:active { cursor: grabbing; }
 .tier-item.is-dragging { opacity: 0.32; }
 .tier-item__art {
-  position: relative; width: 100px; height: 120px;
+  position: relative; width: 100%; height: calc(120px * var(--cs, 1));
   border-radius: 8px; overflow: hidden;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
 }
 .tier-item__img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .tier-item__glyph {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  font-size: 34px; font-weight: 700; color: rgba(255, 255, 255, 0.9);
+  font-size: calc(34px * var(--cs, 1)); font-weight: 700; color: rgba(255, 255, 255, 0.9);
 }
 .tier-item__score {
   position: absolute; left: 4px; top: 4px;
-  padding: 1px 5px; border-radius: 5px; font-size: 10.5px; font-weight: 600;
+  padding: 1px 5px; border-radius: 5px; font-size: calc(10.5px * var(--fs, 1)); font-weight: 600;
   background: rgba(8, 10, 14, 0.68); color: #ffd479;
 }
 .tier-item__name {
-  margin-top: 4px; font-size: 11px; line-height: 1.25; color: var(--text-2);
+  margin-top: 4px; font-size: calc(11px * var(--fs, 1)); line-height: 1.25; color: var(--text-2);
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tier-item__x, .tier-item__add {
   position: absolute; opacity: 0; transition: opacity 0.12s;
   border: none; border-radius: 50%; cursor: pointer;
-  width: 20px; height: 20px; line-height: 18px; font-size: 11px; text-align: center;
+  width: calc(20px * var(--cs, 1)); height: calc(20px * var(--cs, 1)); line-height: calc(18px * var(--cs, 1)); font-size: calc(11px * var(--fs, 1)); text-align: center;
   background: rgba(8, 10, 14, 0.78); color: #fff;
 }
 .tier-item__x { right: 2px; top: 2px; }
-.tier-item__add { right: 2px; bottom: 22px; font-size: 14px; }
+.tier-item__add { right: 2px; bottom: calc(22px * var(--cs, 1)); font-size: calc(14px * var(--fs, 1)); }
 .tier-item:hover .tier-item__x, .tier-item:hover .tier-item__add { opacity: 1; }
 .tier-item__x:hover { background: var(--danger); }
 .tier-item__add:hover { background: var(--accent); }
@@ -1681,14 +1706,14 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
   background: var(--panel-2);
 }
 .diary__stat { display: flex; flex-direction: column; gap: 1px; min-width: 54px; }
-.diary__stat b { font-size: 17px; line-height: 1.15; }
-.diary__stat span { font-size: 11px; color: var(--text-3); }
-.diary__gap { margin-left: auto; font-size: 11.5px; color: var(--text-2); }
-.diary__note { font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+.diary__stat b { font-size: calc(17px * var(--fs, 1)); line-height: 1.15; }
+.diary__stat span { font-size: calc(11px * var(--fs, 1)); color: var(--text-3); }
+.diary__gap { margin-left: auto; font-size: calc(11.5px * var(--fs, 1)); color: var(--text-2); }
+.diary__note { font-size: calc(11.5px * var(--fs, 1)); color: var(--text-3); line-height: 1.6; }
 
 .diary__tabs { display: flex; gap: 6px; }
 .tab {
-  padding: 4px 10px; font-size: 12px; cursor: pointer;
+  padding: 4px 10px; font-size: calc(12px * var(--fs, 1)); cursor: pointer;
   border: 1px solid var(--line-2); border-radius: 999px;
   background: transparent; color: var(--text-2);
 }
@@ -1700,25 +1725,25 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
   padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r);
   background: var(--panel-2);
 }
-.diary__cover { flex: 0 0 auto; width: 40px; height: 56px; border-radius: 6px; overflow: hidden; }
+.diary__cover { flex: 0 0 auto; width: calc(40px * var(--cs, 1)); height: calc(56px * var(--cs, 1)); border-radius: 6px; overflow: hidden; }
 .diary__main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .diary__title {
   padding: 0; border: none; background: transparent; cursor: pointer;
-  color: var(--text); font-size: 13px; font-weight: 600; text-align: left;
+  color: var(--text); font-size: calc(13px * var(--fs, 1)); font-weight: 600; text-align: left;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .diary__title:hover { color: var(--accent); }
-.diary__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11.5px; }
+.diary__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: calc(11.5px * var(--fs, 1)); }
 .diary__mine { color: var(--text); font-weight: 600; }
 .diary__bgm { color: var(--text-2); }
-.diary__summary { font-size: 11.5px; color: var(--text-3); line-height: 1.55;
+.diary__summary { font-size: calc(11.5px * var(--fs, 1)); color: var(--text-3); line-height: 1.55;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .diary__tl-head { display: flex; align-items: baseline; gap: 8px; }
-.diary__time { margin-left: auto; font-size: 11px; color: var(--text-3); }
-.diary__note-text { font-size: 12px; color: var(--text-2); line-height: 1.6; }
+.diary__time { margin-left: auto; font-size: calc(11px * var(--fs, 1)); color: var(--text-3); }
+.diary__note-text { font-size: calc(12px * var(--fs, 1)); color: var(--text-2); line-height: 1.6; }
 
 .diary-cmp {
-  padding: 1px 7px; border-radius: 999px; font-size: 11px;
+  padding: 1px 7px; border-radius: 999px; font-size: calc(11px * var(--fs, 1));
   border: 1px solid transparent; white-space: nowrap;
 }
 .diary-cmp--agree { color: var(--ok); background: var(--ok-soft); border-color: rgba(var(--ok-rgb), 0.34); }
@@ -1729,12 +1754,12 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
 .diary__history { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .diary__history-list { list-style: none; margin: 0; padding: 6px 8px; min-width: 190px;
   border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--panel); }
-.diary__history-list li { display: flex; gap: 6px; align-items: baseline; font-size: 11px; color: var(--text-2); padding: 2px 0; }
+.diary__history-list li { display: flex; gap: 6px; align-items: baseline; font-size: calc(11px * var(--fs, 1)); color: var(--text-2); padding: 2px 0; }
 .diary__history-list time { color: var(--text-3); flex: 0 0 auto; }
 .diary__history-note { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .diary__history-del { padding: 0 4px; border: none; background: transparent; color: var(--text-3); cursor: pointer; font-size: 11px; }
 .diary__history-del:hover { color: var(--danger); }
-.diary__empty-hint { margin-top: 6px; font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+.diary__empty-hint { margin-top: 6px; font-size: calc(11.5px * var(--fs, 1)); color: var(--text-3); line-height: 1.6; }
 
 /* ---- 卡片上的打分控件 ---- */
 .diary-input { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
@@ -1983,24 +2008,24 @@ body.print .rb { border-color: transparent !important; }
 
 .history__stats { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end; }
 .history__stat { display: flex; flex-direction: column; gap: 1px; min-width: 54px; }
-.history__stat b { font-size: 17px; line-height: 1.15; }
-.history__stat span { font-size: 11px; color: var(--text-3); }
+.history__stat b { font-size: calc(17px * var(--fs, 1)); line-height: 1.15; }
+.history__stat span { font-size: calc(11px * var(--fs, 1)); color: var(--text-3); }
 
-.history__summary { font-size: 12px; color: var(--text-2); line-height: 1.6; }
-.history__note { font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+.history__summary { font-size: calc(12px * var(--fs, 1)); color: var(--text-2); line-height: 1.6; }
+.history__note { font-size: calc(11.5px * var(--fs, 1)); color: var(--text-3); line-height: 1.6; }
 
 .history__highlight {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 9px 12px; border-radius: 10px;
   background: var(--accent-soft); border: 1px solid var(--line);
 }
-.history__hl-label { font-size: 11px; color: var(--text-2); }
+.history__hl-label { font-size: calc(11px * var(--fs, 1)); color: var(--text-2); }
 .history__hl-title {
   border: 0; background: none; padding: 0; cursor: pointer;
-  font: inherit; font-size: 13.5px; font-weight: 600; color: var(--text);
+  font: inherit; font-size: calc(13.5px * var(--fs, 1)); font-weight: 600; color: var(--text);
 }
 .history__hl-title:hover { color: var(--accent); }
-.history__hl-meta { margin-left: auto; font-size: 11px; color: var(--text-2); }
+.history__hl-meta { margin-left: auto; font-size: calc(11px * var(--fs, 1)); color: var(--text-2); }
 
 .history__list { display: flex; flex-direction: column; }
 
@@ -2013,9 +2038,9 @@ body.print .rb { border-color: transparent !important; }
 }
 .history__when {
   display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 1px;
-  font-size: 11.5px; color: var(--text-2);
+  font-size: calc(11.5px * var(--fs, 1)); color: var(--text-2);
 }
-.history__year { font-size: 10px; color: var(--text-3); }
+.history__year { font-size: calc(10px * var(--fs, 1)); color: var(--text-3); }
 
 /* 竖轴：每行自己画一段，首尾两行各砍掉半截，看上去就连成一条贯穿的线 */
 .history__spine { position: relative; display: flex; align-items: center; justify-content: center; }
@@ -2034,25 +2059,95 @@ body.print .rb { border-color: transparent !important; }
 .history__dot--follow { background: var(--accent); }
 .history__dot--finish { background: var(--accent-2); }
 
-.history__cover { width: 40px; height: 56px; border-radius: 6px; overflow: hidden; align-self: center; }
+.history__cover { width: calc(40px * var(--cs, 1)); height: calc(56px * var(--cs, 1)); border-radius: 6px; overflow: hidden; align-self: center; }
 .history__main { display: flex; flex-direction: column; gap: 4px; justify-content: center; min-width: 0; }
 .history__title {
   align-self: flex-start; border: 0; background: none; padding: 0; cursor: pointer;
-  font: inherit; font-size: 13px; font-weight: 600; color: var(--text); text-align: left;
+  font: inherit; font-size: calc(13px * var(--fs, 1)); font-weight: 600; color: var(--text); text-align: left;
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .history__title:hover { color: var(--accent); }
-.history__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11.5px; }
+.history__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: calc(11.5px * var(--fs, 1)); }
 .history__kind { font-weight: 600; }
 .history__kind--follow { color: var(--accent); }
 .history__kind--finish { color: var(--accent-2); }
 .history__span { color: var(--text-2); }
 .history__span--muted { color: var(--text-3); }
 
-.history__empty-hint { margin-top: 8px; font-size: 11.5px; color: var(--text-3); line-height: 1.7; }
+.history__empty-hint { margin-top: 8px; font-size: calc(11.5px * var(--fs, 1)); color: var(--text-3); line-height: 1.7; }
 
 /* 属性栏窄下来时把三栏堆成一栏，否则在 13 寸屏上画布会被挤成一条缝 */
 @media (max-width: 1180px) {
   .report { grid-template-columns: 1fr; }
   .report__side, .report__inspector { max-height: 32vh; }
 }
+
+/* ==========================================================================
+   右下角「内容大小」浮盘
+
+   这一层的字号一律写死 px，不跟 --fs / --cs 走：它是**调节工具本身**，
+   跟着被调的东西一起放大缩小，就没法再微调自己的显示比例了。
+   ========================================================================== */
+.scaledock {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 60;
+  width: 232px;
+  padding: 11px 13px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border-radius: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
+}
+
+.scaledock__head { display: flex; align-items: center; gap: 8px; }
+.scaledock__title { flex: 1 1 auto; font-size: 12.5px; font-weight: 600; }
+.scaledock__x {
+  width: 22px; height: 22px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: transparent; color: var(--text-3);
+  font-size: 11px; cursor: pointer;
+}
+.scaledock__x:hover { color: var(--text); border-color: var(--line-2); background: var(--panel-2); }
+
+.scaledock__row { display: flex; flex-direction: column; gap: 5px; }
+.scaledock__label {
+  display: flex; align-items: baseline; justify-content: space-between;
+  font-size: 11.5px; color: var(--text-2);
+}
+.scaledock__label em { font-style: normal; color: var(--text); font-variant-numeric: tabular-nums; }
+
+.scaledock__range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(var(--text-rgb), 0.16);
+  outline: none;
+  accent-color: var(--accent);
+}
+.scaledock__range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.4);
+}
+
+.scaledock__note { margin: 0; font-size: 11px; color: var(--text-3); }
+
+.scaledock__reset {
+  padding: 6px 10px;
+  border: 1px solid var(--line-2); border-radius: var(--r-sm);
+  background: transparent; color: var(--text-2);
+  font-size: 11.5px; cursor: pointer;
+}
+.scaledock__reset:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.scaledock__reset:disabled { opacity: 0.45; cursor: default; }

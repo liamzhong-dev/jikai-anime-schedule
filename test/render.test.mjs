@@ -34,7 +34,7 @@ await build({
   logLevel: 'silent',
 });
 
-const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport, renderHistory, renderSearchBox, renderSeasonPicker, renderWindowCard, renderWallpaperFrame, renderSeasonView } = await import(pathToFileURL(outfile).href);
+const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport, renderHistory, renderSearchBox, renderSeasonPicker, renderWindowCard, renderWallpaperFrame, renderSeasonView, renderScaleDock } = await import(pathToFileURL(outfile).href);
 
 const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 // 有些约定只存在于样式表里（比如「取景框和壁纸用同一种铺法」），
@@ -1209,4 +1209,108 @@ test('性能那一块：浏览器壳和拿不到 appInfo 时整块都不出现',
   const none = await renderSettingsTabs({});
   assert.equal(none.includes('data-render-mode'), false, '拿不到 appInfo 就不该硬画一块空的出来');
   assert.equal(none.includes('再试一次'), false);
+});
+
+/* ── 内容大小：所有页面的卡片共用一个档位 ───────────────── */
+
+test('右下角那个浮盘：收起来的时候什么都没有', async () => {
+  assert.equal(await renderScaleDock({ open: false }), '', '收起来时不该在页面上留下任何东西');
+
+  const html = await renderScaleDock();
+  assert.ok(html.includes('data-scale-dock="1"'), '要有这一块');
+  assert.ok(html.includes('data-scale-cover-range="1"'), '封面尺寸那条滑块');
+  assert.ok(html.includes('data-scale-font-range="1"'), '文字大小那条滑块');
+  assert.ok(html.includes('data-scale-close="1"'), '要能收起来 —— 浮在内容上面，不能只有一个孔洞');
+});
+
+test('浮盘上的数字就是当前真正在用的档位', async () => {
+  const html = await renderScaleDock({ cardMin: 160, fontScale: 1.2 });
+  assert.ok(html.includes('>160px<'), '封面那档按一格宽的 px 显示');
+  assert.ok(html.includes('>120%<'), '文字那档按百分比显示');
+  // 倍率就是别的页面缩略图实际套用的那个数，摆出来让人知道自己在调什么
+  assert.ok(html.includes('data-scale-cover="143%"'), '封面倍率要显示出来（160/112≈143%）');
+});
+
+test('浮盘：已经是默认大小时「回到默认」按不下去', async () => {
+  const def = await renderScaleDock({ cardMin: 112, fontScale: 1 });
+  assert.ok(def.includes('已经是默认大小'));
+  assert.ok(/data-scale-reset="1"[^>]*disabled/.test(def), '默认状态该禁用，按下去没有任何变化才是困惑的');
+
+  const moved = await renderScaleDock({ cardMin: 180, fontScale: 1.3 });
+  assert.ok(moved.includes('回到默认'), '调过之后这句要变回可点');
+  assert.equal(/data-scale-reset="1"[^>]*disabled/.test(moved), false);
+});
+
+test('每张窗口卡片右上角都有「内容大小」的入口', async () => {
+  const html = await renderWindowCard();
+  assert.ok(html.includes('data-card-scale="1"'), '每张卡都得有这个入口 —— 否则又变成「只有某一页能调」');
+  assert.ok(html.includes('data-maxed="0"'), '初始不是全屏');
+
+  // 反向：拿不到 Provider 时不给按钮。给了也是点了没反应，那比没有更糟
+  const bare = await renderWindowCard({ withProvider: false });
+  assert.equal(bare.includes('data-card-scale'), false);
+});
+
+/*
+ * ⚠️ 反向断言，比上面的正面断言值钱：
+ * 这些封面尺寸以前是各自写死的 px，之间没有任何联系 —— 用户在本季把封面调到最大，
+ * 切到 TierList 一格没动，看上去就像功能坏了。这种「一半有效」永远不会报错，
+ * 只有真去挨个页面拉一遍滑块才会发现。所以这里把「封面容器里出现绝对 px」一律判成错。
+ *
+ * 报告那几处（`rb-*`、`report__pool-cover`）是**有意不接**的：那是导出长图的版式，
+ * 跟着屏幕上的倍率变，预览和导出的图就会不一样 —— 宁可不一致，也不能让稿子对不上。
+ */
+test('所有页面的封面都接在同一个倍率上，不许再各写各的 px', async () => {
+  for (const sel of ['queue__cover', 'catchup__cover', 'diary__cover', 'history__cover', 'drawer__cover', 'tier-item__art']) {
+    const re = new RegExp(`\\.${sel}[^{]*\\{[^}]*var\\(--cs`, 'm');
+    assert.ok(re.test(CSS), `.${sel} 要用 var(--cs) 派生，否则这一页的封面不跟着「封面尺寸」走`);
+  }
+
+  /*
+   * ⚠️ 判「值里有没有 var(--」而不是判「值是不是以 calc 开头」——
+   * `flex: 0 0 calc(40px * var(--cs, 1))` 这个值里也有 `40px`，
+   * 只看开头会把已经接好的写法判成错的。
+   */
+  const coverPx = (propRe) =>
+    [...CSS.matchAll(/^\.(?:queue|catchup|diary|history|drawer)__cover[^{]*\{[^}]*\}/gm)]
+      .flatMap((rule) => [...rule[0].matchAll(new RegExp(`(?:${propRe}):([^;}]+)`, 'g'))])
+      .filter((m) => /[0-9.]+px/.test(m[1]) && !m[1].includes('var(--'));
+  const hard = coverPx('width|height|flex');
+  assert.equal(
+    hard.length,
+    0,
+    `封面容器的尺寸要写成 calc(原来的px * var(--cs, 1))：\n${hard.map((m) => m[0].trim()).join('\n')}`,
+  );
+
+  // 图块宽度变了，装它的格子也该跟着变，否则封面会戳到格子外面
+  const artPx = [...CSS.matchAll(/^\.tier-item__art\s*\{[^}]*\}/gm)]
+    .flatMap((rule) => [...rule[0].matchAll(/(?:width|height):([^;}]+)/g)])
+    .filter((m) => /[0-9.]+px/.test(m[1]) && !m[1].includes('var(--'));
+  assert.equal(artPx.length, 0, `图块的尺寸要跟着倍率：\n${artPx.map((m) => m[0].trim()).join('\n')}`);
+});
+
+test('TierList / 日记 / 历程里的字号跟着 --fs 走', async () => {
+  /*
+   * 这三处以前全是写死的 px —— 也是「只有本季能调」的另一个面：
+   * 封面调完了字还是原来那么大，图大字小，看着更像没生效。
+   */
+  for (const sel of ['tier-item__name', 'tier-row__empty', 'diary__note', 'history__meta', 'drawer__title']) {
+    const re = new RegExp(`\\.${sel}[^{]*\\{[^}]*calc\\([0-9.]+px \\* var\\(--fs`, 'm');
+    assert.ok(re.test(CSS), `.${sel} 的字号要用 var(--fs) 派生`);
+  }
+
+  /*
+   * 有两类是**有意留着不接**的：`__del` / `__x` / `__num` / `__undo` 这些是要点准的小控件，
+   * 跟着字号长大会错位；`diary-input` 那一组是打分输入区，属于控件不是内容。
+   * 把它们写进白名单，是为了以后有人照着这个名单加一处时能看清界线在哪。
+   */
+  const KEPT_FIXED = /(?:__|-)(?:del|x|undo|num)\b|diary-input/;
+  const hard = [
+    ...CSS.matchAll(/^\.(?:tier|diary|history|drawer)[-\w]*[^{]*\{[^}]*font-size:(?!\s*calc\()\s*[0-9.]+px/gm),
+  ].filter((m) => !KEPT_FIXED.test(m[0].split('{')[0]));
+  assert.equal(
+    hard.length,
+    0,
+    `这几处不该有写死的字号（改成 calc(原来的px * var(--fs, 1))）：\n${hard.map((m) => m[0].trim()).join('\n')}`,
+  );
 });

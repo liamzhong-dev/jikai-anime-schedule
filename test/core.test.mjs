@@ -15,6 +15,7 @@ import {
 } from '../src/core/wallpaper.js';
 import {
   CARD_MIN, FONT_SCALE, clampCardMin, clampFontScale, fitRect,
+  COVER_SCALE, clampCoverScale, coverScaleFromCardMin,
 } from '../src/core/layout.js';
 import { bangumiIdOf, mapItem, availableSeasons, currentSeason } from '../src/data/bangumiData.js';
 import { buildMockArchive, buildMockSeason, buildMockUserState } from './fixtures/fictional-data.js';
@@ -601,4 +602,47 @@ test('一格宽档位：越界夹回，坏值用默认', () => {
   assert.equal(clampCardMin(1), CARD_MIN.min);
   assert.equal(clampCardMin(9999), CARD_MIN.max);
   assert.ok(CARD_MIN.min < CARD_MIN.def && CARD_MIN.def < CARD_MIN.max, '默认值要落在范围里');
+});
+
+/*
+ * 封面倍率：本季网格那一档（cardMin 的 px 数）要能换算成全站统一的比率 ——
+ * TierList / 追番 / 补番 / 日记 / 历程的缩略图照它一起放大缩小。
+ *
+ * 这条是「所有页面的卡片都能调」的落点：以前 cardMin 只喂给本季的网格，
+ * 别的页面各自写死自己的 px，于是用户在本季调好了，切过去一看一个像素都没动。
+ */
+test('封面倍率：默认档必须正好是 1', () => {
+  assert.equal(coverScaleFromCardMin(CARD_MIN.def), 1, '默认的一格宽换算出来必须是原尺寸');
+  // 换默认值也不该悄悄改变别的页面：这一条钉死「基准是当前默认」这个约定
+  assert.equal(coverScaleFromCardMin(CARD_MIN.def), COVER_SCALE.def);
+  for (const empty of [null, undefined, '']) {
+    assert.equal(coverScaleFromCardMin(empty), 1, `coverScaleFromCardMin(${JSON.stringify(empty)}) 应当是 1`);
+  }
+});
+
+test('封面倍率：跟着一格宽单调放大，且不会长到离谱', () => {
+  const small = coverScaleFromCardMin(CARD_MIN.min);
+  const big = coverScaleFromCardMin(CARD_MIN.max);
+  assert.ok(small < 1, `最小档（${small}）应该小于 1：那时候一行塞更多封面，图该变小`);
+  assert.ok(big > 1, `最大档（${big}）应该大于 1`);
+  // 单调：往右拉一格，倍率只能涨不能跌 —— 反过来就是「拉大了图反而变小」
+  let prev = 0;
+  for (let v = CARD_MIN.min; v <= CARD_MIN.max; v += 4) {
+    const cur = coverScaleFromCardMin(v);
+    assert.ok(cur >= prev, `cardMin=${v} 的倍率（${cur}）比上一档（${prev}）还小`);
+    prev = cur;
+  }
+  assert.ok(big <= COVER_SCALE.max, '倍率本身也得有上限，否则缩略图能把卡片撑破');
+});
+
+test('封面倍率：直接给倍率时把 0 和负数挡在门外', () => {
+  // 倍率要拿去做乘法、也可能被拿去做除法 —— 0 和负数会让缩略图塌成一条线
+  for (const bad of [0, -1, NaN, Infinity]) {
+    assert.equal(clampCoverScale(bad), COVER_SCALE.def, `clampCoverScale(${bad}) 应当是默认值`);
+  }
+  for (const empty of [null, undefined, '']) {
+    assert.equal(clampCoverScale(empty), COVER_SCALE.def);
+  }
+  assert.equal(clampCoverScale(1.5), 1.5);
+  assert.equal(clampCoverScale(99), COVER_SCALE.max);
 });

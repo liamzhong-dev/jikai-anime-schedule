@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { setLayout } from '../core/store.js';
 import { fitRect } from '../core/layout.js';
+import { useCardScaleToggle } from './ScaleDock.jsx';
 
 /**
  * 卡片式窗口：拖标题栏移动、双击标题栏最大化、按钮折叠。
@@ -22,14 +23,36 @@ export default function WindowCard({ id, title, hint, actions, children, default
   const [dragging, setDragging] = useState(false);
   const [maxed, setMaxed] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  /*
+   * `maxed` 的一份 ref 副本。
+   * 下面那个「外部摆位变了要同步」的 effect 需要读它，而把 `maxed` 写进依赖
+   * 会让 effect 在每次最大化时都跑一遍 —— 那正好会把它自己刚设的状态又推翻。
+   */
+  const maxedRef = useRef(false);
+  // 拿不到 context（组件被单独渲染）就没有这个按钮 —— 宁可没有，也不要一个点了没反应的按钮
+  const toggleScale = useCardScaleToggle();
   const drag = useRef(null);
   const restore = useRef(null);
   const rootRef = useRef(null);
   const fitted = useRef(false);
 
-  // 外部（例如换视图后 store 被重置）改了布局时同步一次
+  /*
+   * 外部改了摆位（切换布局预设、一键整理排列）时同步一次。
+   *
+   * ⚠️ **处在最大化时必须顺便退出最大化**：最大化那套样式是 `calc(100%)`，
+   * 完全不看 `rect` —— 新的摆位写进来了，窗口却纹丝不动。用户看到的是
+   * 「切了模板，别的卡都排好了，就那张全屏的一动没动」，像是预设对它没生效。
+   * 更糟的是 `restore` 里还压着**旧的**位置：等他点「还原」，卡片会跳回
+   * 模板之前的那个地方 —— 于是两处都错，而且两处都指向「用户刚才拖过」。
+   */
   useEffect(() => {
-    if (saved && !dragging) setRect(saved);
+    if (!saved || dragging) return;
+    setRect(saved);
+    if (maxedRef.current) {
+      maxedRef.current = false;
+      restore.current = null;
+      setMaxed(false);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved?.x, saved?.y, saved?.w, saved?.h]);
 
@@ -102,9 +125,11 @@ export default function WindowCard({ id, title, hint, actions, children, default
       setRect(restore.current);
       setLayout(id, restore.current);
       restore.current = null;
+      maxedRef.current = false;
       setMaxed(false);
     } else {
       restore.current = { ...rect };
+      maxedRef.current = true;
       setMaxed(true);
     }
   };
@@ -118,7 +143,12 @@ export default function WindowCard({ id, title, hint, actions, children, default
   if (dragging) cls.push('window--dragging');
 
   return (
-    <section className={cls.join(' ')} style={style} ref={rootRef}>
+    /*
+     * `data-window-id` 与 `data-maxed`：桌面端自检靠它们认「这张卡是谁、现在是不是全屏」。
+     * 不去读 `'window--max'` 那个类名 —— 类名是给 CSS 的，哪天改个样式这条断言就静默失效，
+     * 而且失效的样子是「永远通过」，比报错坏得多。
+     */
+    <section className={cls.join(' ')} style={style} ref={rootRef} data-window-id={id} data-maxed={maxed ? '1' : '0'}>
       <header
         className="window__bar"
         onPointerDown={start()}
@@ -128,6 +158,17 @@ export default function WindowCard({ id, title, hint, actions, children, default
         {hint ? <span className="window__hint">{hint}</span> : null}
         <div className="window__actions" onPointerDown={(e) => e.stopPropagation()}>
           {actions}
+          {toggleScale ? (
+            <button
+              type="button"
+              className="window__btn window__btn--scale"
+              data-card-scale="1"
+              title="内容大小 —— 封面与文字的比例"
+              onClick={toggleScale}
+            >
+              Aa
+            </button>
+          ) : null}
           <button
             type="button"
             className="window__btn"

@@ -109,7 +109,7 @@ export default function SideNav({ view, onView, counts, version, onOpenSettings 
         </button>
       ))}
       <div className="sidenav__spacer" />
-      <button type="button" className="sidenav__item sidenav__item--foot" onClick={onOpenSettings} title="设置">
+      <button type="button" className="sidenav__item sidenav__item--foot" onClick={onOpenSettings} title="设置" data-open-settings="1">
         <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6">
           <circle cx="10" cy="10" r="2.6" />
           <path d="M10 2.6v2M10 15.4v2M2.6 10h2M15.4 10h2M4.8 4.8l1.4 1.4M13.8 13.8l1.4 1.4M15.2 4.8l-1.4 1.4M6.2 13.8l-1.4 1.4" />

@@ -25,6 +25,7 @@ import SeasonPicker from '../../src/components/SeasonPicker.jsx';
 import SeasonView from '../../src/components/SeasonView.jsx';
 import WindowCard from '../../src/components/WindowCard.jsx';
 import WallpaperFrame from '../../src/components/WallpaperFrame.jsx';
+import ScaleDock, { ScaleDockProvider } from '../../src/components/ScaleDock.jsx';
 import { makeDefaultTierlist } from '../../src/core/tierlist.js';
 import { seasonRange } from '../../src/core/time.js';
 import { makeDefaultReport } from '../../src/core/report.js';
@@ -272,7 +273,14 @@ export async function renderSeasonPicker(props = {}) {
  * 数起来会混进别的卡片（`% 8` 那种断言看着聪明，其实只要有张卡被折叠 /
  * 最大化就散了）。一张卡正好八条边，数得清楚。
  */
-export async function renderWindowCard(props = {}) {
+/**
+ * 单独渲染一张窗口卡片。
+ *
+ * 默认外面包着 Provider —— 真实界面里它总是在 Provider 下面的，
+ * 我们要验的正是「那颗右上角按钮在不在」。
+ * `withProvider: false` 专门给「没有 Provider 时不该冒出按钮」那条断言用。
+ */
+export async function renderWindowCard({ withProvider = true, ...props } = {}) {
   await prepare();
   const base = {
     id: 'test-card',
@@ -282,7 +290,10 @@ export async function renderWindowCard(props = {}) {
     defaultRect: { x: 16, y: 16, w: 640, h: 420 },
     children: <div className="probe-body">内容</div>,
   };
-  return renderToStaticMarkup(<WindowCard {...base} {...props} />);
+  const card = <WindowCard {...base} {...props} />;
+  return renderToStaticMarkup(
+    withProvider ? <ScaleDockProvider onToggle={() => {}}>{card}</ScaleDockProvider> : card,
+  );
 }
 
 /**
@@ -322,4 +333,22 @@ export async function renderSeasonView(props = {}) {
   };
   return renderToStaticMarkup(<SeasonView {...base} {...props} />);
 }
+
+/**
+ * 单独渲染右下角那个「内容大小」浮盘。
+ *
+ * 值与回调都从外面灌：它自己不碰 store，于是「现在调到了多少」在 SSR 里是可断言的 ——
+ * 藏在组件内部 state 里的话，SSR 读到的永远是初始态，什么都验不出来。
+ */
+export async function renderScaleDock(props = {}) {
+  const base = {
+    open: true,
+    cardMin: 112,
+    fontScale: 1,
+    onChange: () => {},
+    onClose: () => {},
+  };
+  return renderToStaticMarkup(<ScaleDock {...base} {...props} />);
+}
+
 

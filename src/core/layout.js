@@ -55,6 +55,37 @@ export function clampCardMin(v) {
   return Math.max(CARD_MIN.min, Math.min(CARD_MIN.max, Math.round(n)));
 }
 
+/*
+ * 缩略图的整体倍率。
+ *
+ * 为什么要有这一层：`cardMin` 说的是「本季网格一格留多宽」，只有那个网格认它；
+ * 追番 / 补番 / TierList / 日记 / 历程里的缩略图各自写死自己的 px。
+ * 于是用户在本季把封面调到最大，换到 TierList 一看，一个像素都没动 ——
+ * 那感觉就像功能坏了，其实是两个页面根本不共用一档。
+ *
+ * 现在由 `cardMin` 派生出一个**倍率**喂给所有封面：只有一个滑块，全站一起变。
+ * 不额外新增一个设置键，是为了不让「封面尺寸」在设置里出现两次。
+ */
+export const COVER_SCALE = { def: 1, min: 0.6, max: 2, step: 0.02 };
+
+export function clampCoverScale(v) {
+  if (v === null || v === undefined || v === '') return COVER_SCALE.def;
+  const n = Number(v);
+  // 0 和负数在这里没有意义（会出现除零 / 缩略图反向塌成一条线），退回默认
+  if (!Number.isFinite(n) || n <= 0) return COVER_SCALE.def;
+  return Math.round(Math.max(COVER_SCALE.min, Math.min(COVER_SCALE.max, n)) * 100) / 100;
+}
+
+/**
+ * 「封面尺寸」那一档 → 全站倍率。
+ *
+ * `CARD_MIN.def` 是基准：本季网格保持默认宽度时，别处的缩略图也正好是它们原来的尺寸
+ * —— 这是有意对齐的，换个默认值不该让整个软件所有页面的图一起变大。
+ */
+export function coverScaleFromCardMin(cardMin) {
+  return clampCoverScale(clampCardMin(cardMin) / CARD_MIN.def);
+}
+
 /**
  * 把一张卡的摆位缩到画布里去。
  *

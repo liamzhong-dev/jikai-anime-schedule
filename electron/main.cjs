@@ -783,6 +783,81 @@ function createWindow() {
         }
 
         /*
+         * ---------- 全屏的卡片要不要跟着布局预设走：JIKAI_SMOKE_MAXSYNC=1 ----------
+         *
+         * 用户报的是：某张卡全屏之后，再去「布局预设」里套一套模板，别的卡都排好了，
+         * 就那张全屏的一动没动。根因是最大化那套样式写成 calc(100%)，压根不看 rect ——
+         * 新的摆位写进来了，窗口照旧铺满，看着就像预设对它没生效。
+         *
+         * 这条只能由桌面端来答：它是 useEffect 的时序行为，SSR 读到的是初始态；
+         * 单元测试里也没有真的 React 运行时。
+         */
+        const MAXSYNC = process.env.JIKAI_SMOKE_MAXSYNC || '';
+        if (MAXSYNC) {
+          const napMs = (ms) => new Promise((r) => setTimeout(r, ms));
+          const CARD = process.env.JIKAI_SMOKE_MAXSYNC_CARD || 'season-grid';
+          const PRESET = process.env.JIKAI_SMOKE_MAXSYNC_PRESET || 'builtin-focus';
+          const sel = '[data-window-id="' + CARD + '"]';
+
+          const readCard = () =>
+            win.webContents
+              .executeJavaScript(
+                '(() => { const el = document.querySelector(' +
+                  JSON.stringify(sel) +
+                  '); if (!el) return { found: 0 };' +
+                  ' const cs = getComputedStyle(el);' +
+                  ' return { found: 1, maxed: el.getAttribute("data-maxed"),' +
+                  ' left: Math.round(parseFloat(cs.left)), top: Math.round(parseFloat(cs.top)),' +
+                  ' w: Math.round(parseFloat(cs.width)), h: Math.round(parseFloat(cs.height)) }; })()',
+              )
+              .catch((e) => ({ found: 0, error: String(e?.message ?? e) }));
+
+          const clickIn = (js) =>
+            win.webContents.executeJavaScript(js).then((v) => v).catch((e) => ({ error: String(e?.message ?? e) }));
+
+          const before = await readCard();
+
+          /*
+           * 点最大化。这里用页面内的 click 而不是 sendInputEvent：
+           * 要验的是「摆位同步」这条链路，不是「按钮能不能被点到」 ——
+           * 后者由 CARDOPEN 那条真鼠标用例守着。混进来只会让失败原因变模糊。
+           */
+          const maxed =
+            before && before.found
+              ? await clickIn(
+                  '(() => { const el = document.querySelector(' +
+                    JSON.stringify(sel) +
+                    '); if (!el) return 0;' +
+                    ' const btn = Array.from(el.querySelectorAll(".window__btn")).find((b) => b.title === "最大化");' +
+                    ' if (!btn) return 0; btn.click(); return 1; })()',
+                )
+              : 0;
+          await napMs(400);
+          const afterMax = await readCard();
+
+          // 打开设置 → 切到布局页 → 套一套别的预设（这套动作就是用户报的那几步）
+          const opened = await clickIn('(() => { const b = document.querySelector("[data-open-settings]"); if (!b) return 0; b.click(); return 1; })()');
+          await napMs(500);
+          const tabbed = await clickIn('(() => { const b = document.querySelector("[data-tab=layout]"); if (!b) return 0; b.click(); return 1; })()');
+          await napMs(300);
+          const applied = await clickIn(
+            '(() => { const b = document.querySelector(' +
+              JSON.stringify('[data-preset-apply="' + PRESET + '"]') +
+              '); if (!b) return 0; b.click(); return 1; })()',
+          );
+          await napMs(700);
+          // 把设置收起来，否则它挡着卡片（不收也能量，但截图会看不清）
+          await clickIn('(() => { const c = document.querySelector(".drawer__mask"); if (c) c.click(); return 1; })()');
+          await napMs(400);
+          const afterPreset = await readCard();
+
+          console.log(
+            'SMOKE_MAXSYNC ' +
+              JSON.stringify({ card: CARD, preset: PRESET, before, maxed, afterMax, opened, tabbed, applied, afterPreset }),
+          );
+        }
+
+        /*
          * ---------- 鼠标扫过卡片网格：JIKAI_PERF=1 时才跑 ----------
          *
          * 「卡」最可能藏在两处，而这两处都只能由主进程来量：

@@ -12,6 +12,7 @@ import DiaryRatingInput from './components/DiaryRatingInput.jsx';
 import HistoryView from './components/HistoryView.jsx';
 import ReportView from './components/ReportView.jsx';
 import { CoverProvider } from './components/CoverContext.jsx';
+import ScaleDock, { ScaleDockProvider } from './components/ScaleDock.jsx';
 import DetailDrawer from './components/DetailDrawer.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import ShortcutsOverlay from './components/ShortcutsOverlay.jsx';
@@ -38,6 +39,7 @@ import {
   addBlock, autoWallSubjects, blockById, makeBlock, moveBlock, nextBlockId, patchBlock, removeBlock,
 } from './core/report.js';
 import { buildReportHtml, canvasHtmlOf, collectStyles } from './core/reportHtml.js';
+import { coverScaleFromCardMin } from './core/layout.js';
 import { DISPLAY_VARIANT, EXPORT_VARIANT, coverCoverage, coverEntries, coverVariant } from './core/covers.js';
 import { useCovers } from './core/useCovers.js';
 import { platform } from './platform/index.js';
@@ -159,6 +161,11 @@ export default function App() {
   const [transferBusy, setTransferBusy] = useState('');
   const [transferNote, setTransferNote] = useState('');
   const [transferPending, setTransferPending] = useState(null);
+  /*
+   * 右下角那个「内容大小」浮盘开没开。
+   * 不进 store：它是一次性的界面状态，写进 state.json 只会让下次启动凭空多一块面板。
+   */
+  const [scaleOpen, setScaleOpen] = useState(false);
 
   const notified = useRef(new Set());
 
@@ -221,6 +228,22 @@ export default function App() {
     const root = globalThis.document?.documentElement;
     if (root) root.style.setProperty('--fs', String(st.settings.fontScale ?? 1));
   }, [st.settings.fontScale]);
+
+  /*
+   * 封面画多大的倍率。
+   *
+   * 和 `--fs` 一样挂在 root 上，理由也一样：**这是一整站的档位**。
+   * 之前它只有本季网格认（`--card-min` 就在那个网格上设），
+   * 于是用户在本季把封面拉满，切到 TierList 发现图一格没动 ——
+   * 页面之间体感不一致，比「没有这个功能」更像坏了。
+   *
+   * 倍率是从 `cardMin` 派生的（同一个滑块管全站），不是新的一档：
+   * 设置里已经有一个「封面尺寸」了，再来一个只会让人不知道拉哪个。
+   */
+  useEffect(() => {
+    const root = globalThis.document?.documentElement;
+    if (root) root.style.setProperty('--cs', String(coverScaleFromCardMin(st.settings.cardMin)));
+  }, [st.settings.cardMin]);
 
   // ---------- 代理：设置里一改就让主进程立刻生效 ----------
   useEffect(() => {
@@ -1295,6 +1318,7 @@ export default function App() {
     // 封面解析走上下文：七个用到 <Cover> 的地方不用各自去接缓存，
     // 也就不用各自决定「该用哪一档地址」—— 那正是 v1.1 桌面端出错的机制。
     <CoverProvider images={poolCovers.images} allowRemote={coversRemote}>
+    <ScaleDockProvider onToggle={() => setScaleOpen((v) => !v)}>
     <div className="app">
       <WallpaperLayer wallpaper={{ ...st.settings.wallpaper, dataUrl: wallpaper?.dataUrl ?? null }} />
 
@@ -1782,7 +1806,20 @@ export default function App() {
       />
 
       <Toasts toasts={toasts} />
+
+      {/*
+        浮在整窗右下角，而不是塞进某张卡片：这两个档位对所有页面的卡片一视同仁，
+        放进哪张卡都会让人以为它只管那一张。
+      */}
+      <ScaleDock
+        open={scaleOpen}
+        cardMin={st.settings.cardMin}
+        fontScale={st.settings.fontScale}
+        onChange={(patch) => patchSettings(patch)}
+        onClose={() => setScaleOpen(false)}
+      />
     </div>
+    </ScaleDockProvider>
     </CoverProvider>
   );
 }

@@ -217,6 +217,7 @@ export default function SettingsPanel({
                 type="button"
                 className={`tabs__btn${tab === k ? ' is-on' : ''}`}
                 onClick={() => setTab(k)}
+                data-tab={k}
               >
                 {label}
               </button>
@@ -793,6 +794,7 @@ export default function SettingsPanel({
                         <button
                           type="button"
                           className="btn btn--mini"
+                          data-preset-apply={p.id}
                           onClick={() => {
                             applyLayoutPreset(p.id);
                             onToast?.('已套用布局', p.name);
