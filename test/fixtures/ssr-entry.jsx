@@ -21,7 +21,12 @@ import { CoverProvider } from '../../src/components/CoverContext.jsx';
 import ReportView from '../../src/components/ReportView.jsx';
 import HistoryView from '../../src/components/HistoryView.jsx';
 import SearchBox from '../../src/components/SearchBox.jsx';
+import SeasonPicker from '../../src/components/SeasonPicker.jsx';
+import SeasonView from '../../src/components/SeasonView.jsx';
+import WindowCard from '../../src/components/WindowCard.jsx';
+import WallpaperFrame from '../../src/components/WallpaperFrame.jsx';
 import { makeDefaultTierlist } from '../../src/core/tierlist.js';
+import { seasonRange } from '../../src/core/time.js';
 import { makeDefaultReport } from '../../src/core/report.js';
 import { load, seedInitialState } from '../../src/core/store.js';
 import { SAMPLE_ITEMS, SAMPLE_SEASON, buildSampleUserState } from './sample-state.js';
@@ -228,3 +233,81 @@ export async function renderSearchBox(props = {}) {
   };
   return renderToStaticMarkup(<SearchBox {...base} {...props} />);
 }
+
+/**
+ * 单独渲染季度选择器。
+ *
+ * 展开与否是组件内部 state，SSR 默认只会渲染收起的样子。所以组件留了
+ * `initialOpen` / `initialQuery` 两个口子把状态灌进去 —— 否则
+ * 「搜 2011 年 7 月能不能落到 2011q3」这条分支在无头环境里根本验不到，
+ * 而那正是这个功能存在的全部理由。收起来那一面（显示当前季）由默认参数覆盖。
+ */
+export async function renderSeasonPicker(props = {}) {
+  await prepare();
+  const base = {
+    seasons: seasonRange('2010q1', '2027q1'),
+    value: SAMPLE_SEASON,
+    values: [],
+    onPick: () => {},
+  };
+  return renderToStaticMarkup(<SeasonPicker {...base} {...props} />);
+}
+
+/**
+ * 单独渲染一张卡片窗口。
+ *
+ * 必须单独渲：缩放把手现在有八个，而「八个都在」这件事在整个 App 的 HTML 里
+ * 数起来会混进别的卡片（`% 8` 那种断言看着聪明，其实只要有张卡被折叠 /
+ * 最大化就散了）。一张卡正好八条边，数得清楚。
+ */
+export async function renderWindowCard(props = {}) {
+  await prepare();
+  const base = {
+    id: 'test-card',
+    title: '测试窗口',
+    hint: '给测试用',
+    layout: {},
+    defaultRect: { x: 16, y: 16, w: 640, h: 420 },
+    children: <div className="probe-body">内容</div>,
+  };
+  return renderToStaticMarkup(<WindowCard {...base} {...props} />);
+}
+
+/**
+ * 单独渲染壁纸取景框。
+ *
+ * 拖动本身是 pointer 事件，SSR 下动不了（换算部分由 core/wallpaper.js 的
+ * 纯函数测试守住）；这里要验的是**画出来的那一版和真正铺上去的是不是同一件事**
+ * —— 背景定位、比例、以及没图 / 没开的时候长什么样。
+ */
+export async function renderWallpaperFrame(props = {}) {
+  await prepare();
+  const base = {
+    dataUrl: 'data:image/png;base64,AAAA',
+    imgW: 1600,
+    imgH: 2400,
+    x: 30,
+    y: 70,
+    position: 'center',
+    disabled: false,
+    // 比例灌进去而不是读 innerWidth：SSR 里没有窗口，读出来会是兜底值，
+    // 那样「框和窗口同比例」这条就变成不可断言的了
+    aspect: 2,
+    onCommit: () => {},
+  };
+  return renderToStaticMarkup(<WallpaperFrame {...base} {...props} />);
+}
+
+/** 单独渲染番剧网格：验「一格宽」档位真的落到了网格上 */
+export async function renderSeasonView(props = {}) {
+  await prepare();
+  const base = {
+    season: SAMPLE_ITEMS,
+    following: {},
+    now: Date.UTC(2026, 9, 10),
+    onToggle: () => {},
+    onOpen: () => {},
+  };
+  return renderToStaticMarkup(<SeasonView {...base} {...props} />);
+}
+

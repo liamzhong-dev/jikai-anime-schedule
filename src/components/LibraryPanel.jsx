@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import SeasonPicker from './SeasonPicker.jsx';
 import { ageText, seasonLabel } from '../core/time.js';
 
 /**
@@ -48,10 +49,6 @@ export default function LibraryPanel({
     return nameIndex.builtAt;
   }, [nameIndex]);
 
-  const toggle = (key) => {
-    setPicked((cur) => (cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]));
-  };
-
   const doRun = () => {
     if (running) return;
     if (!picked.length && !rebuild) {
@@ -93,22 +90,21 @@ export default function LibraryPanel({
         <div className="srow">
           <div className="srow__label">
             <span>要更新的季度</span>
-            <em className="srow__hint">已选 {picked.length} 个</em>
+            <em className="srow__hint">已选 {picked.length} 个 · 可搜 2011 / 2011q3 / 2011 年 7 月</em>
           </div>
           <div className="srow__ctl">
-            <div className="seg" style={{ flexWrap: 'wrap', display: 'inline-flex' }}>
-              {seasons.map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  className={`seg__btn${picked.includes(k) ? ' is-on' : ''}`}
-                  onClick={() => toggle(k)}
-                  disabled={running}
-                >
-                  {seasonLabel(k)}
-                </button>
-              ))}
-            </div>
+            {/*
+              原来这里是一排按钮，而可选项来自 `availableSeasons()` —— **只有 9 季**，
+              所以 2011 年 7 月番根本选不到（想给老番建缓存是做不到的）。
+              现在跟顶栏共用同一个可搜索的选择器，候选扩到 2000 年至今。
+            */}
+            <SeasonPicker
+              mode="multi"
+              seasons={seasons}
+              values={picked}
+              onPick={setPicked}
+              disabled={running}
+            />
           </div>
         </div>
 

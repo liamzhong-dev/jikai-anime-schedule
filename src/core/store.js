@@ -9,6 +9,7 @@
 import { platform } from '../platform/index.js';
 import { DEFAULT_THEME } from '../theme/themes.js';
 import { DEFAULT_WALLPAPER } from '../theme/applyTheme.js';
+import { CARD_MIN, clampCardMin } from './layout.js';
 import { DEFAULT_API } from '../data/bangumiApi.js';
 import { DEFAULT_SOURCE } from '../data/sources.js';
 import { BUILTIN_PRESETS, presetById } from './layoutPresets.js';
@@ -63,6 +64,7 @@ const DEFAULTS = {
     theme: DEFAULT_THEME, // 配色主题
     panelAlpha: 1,        // 卡片不透明度（壁纸要透出来时调低）
     wallpaper: { ...DEFAULT_WALLPAPER },
+    cardMin: CARD_MIN.def, // 番剧网格一格的宽度（px）——「一屏塞几列」的档位
 
     api: { ...DEFAULT_API },
 
@@ -110,6 +112,9 @@ function mergeSettings(saved) {
     api: { ...DEFAULT_API, ...(s.api ?? {}) },
     tray: { ...DEFAULTS.settings.tray, ...(s.tray ?? {}) },
     update: { ...DEFAULTS.settings.update, ...(s.update ?? {}) },
+    // 老存档里没有这个字段；被手改过的值也在这里夹回来，
+    // 免得一个 3000px 的格宽让网格变成一列
+    cardMin: clampCardMin(s.cardMin),
   };
 }
 

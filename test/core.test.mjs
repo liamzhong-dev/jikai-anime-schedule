@@ -2,12 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  airingsInRange, clockCST, countdown, countdownLabel, dateCST, isLateNight,
-  parsePeriodDays, seasonLabel, seasonOf, sinceLabel, toCST, toJST, watchState, weekdayJST,
+  airingsInRange, allSeasons, clockCST, countdown, countdownLabel, dateCST, isLateNight,
+  matchSeasons, nextSeasonOf, parsePeriodDays, parseSeason, seasonLabel, seasonOf, seasonRange,
+  sinceLabel, toCST, toJST, watchState, weekdayJST,
 } from '../src/core/time.js';
 import { buildNight, buildWeek, upcomingWithin } from '../src/core/schedule.js';
 import { deadlineStatus, daysUntil, progress, sortCatchup } from '../src/core/catchup.js';
 import { filterSeason, matchKeyword, sortList } from '../src/core/filters.js';
+import {
+  POSITION_STEP, clampPercent, coverOverflow, describePosition, dragToPercent,
+  positionToPercent, resolvePosition,
+} from '../src/core/wallpaper.js';
+import {
+  CARD_MIN, RESIZE_CURSOR, RESIZE_DIRS, clampCardMin, fitRect, resizeRect,
+} from '../src/core/layout.js';
 import { bangumiIdOf, mapItem, availableSeasons, currentSeason } from '../src/data/bangumiData.js';
 import { buildMockArchive, buildMockSeason, buildMockUserState } from './fixtures/fictional-data.js';
 
@@ -362,4 +370,274 @@ test('演示用户状态：追番与补番卡都能对上真实条目', () => {
   }
   // deadline 要覆盖到逾期这一档，补番页才有得演示
   assert.ok(seed.catchup.some((c) => deadlineStatus(c.deadline, NOW).level === 'overdue'));
+});
+
+/* ---------------- 季度范围与搜索（顶栏 / 更新数据共用） ---------------- */
+
+test('季度区间：闭区间、新的在前、端点写反也认', () => {
+  const asc = seasonRange('2020q1', '2020q4');
+  assert.deepEqual(asc, ['2020q4', '2020q3', '2020q2', '2020q1']);
+  // 期望值从输入推：跨越的年数 × 4，不是写死的数字
+  const years = 2020 - 2020;
+  assert.equal(asc.length, years * 4 + 4);
+
+  // 夸年：2025q4 → 2026q1 中间不该断
+  assert.deepEqual(seasonRange('2025q4', '2026q1'), ['2026q1', '2025q4']);
+  // 写反了自动换过来，不报错 —— 端点多半是从界面上拿的
+  assert.deepEqual(seasonRange('2020q4', '2020q1'), asc);
+  // 认不出来的 key 给空数组，不要给一个「看着像结果」的东西
+  assert.deepEqual(seasonRange('乱七八糟', '2020q1'), []);
+});
+
+test('下一季：跨年进位', () => {
+  assert.equal(nextSeasonOf(Date.parse('2026-10-07T04:00:00.000Z')), '2027q1'); // 2026q4 → 下一季
+  assert.equal(nextSeasonOf(Date.parse('2026-01-07T04:00:00.000Z')), '2026q2'); // 2026q1 → 下一季
+  assert.equal(parseSeason('2027q1').year, 2027);
+  assert.equal(parseSeason('乱七八糟'), null);
+});
+
+test('全部季度：从 2000 年铺到下一季，2011 年 7 月番在里面', () => {
+  const list = allSeasons(ANCHOR);
+  assert.equal(list[0], nextSeasonOf(ANCHOR), '最新的应该是下一季（和 availableSeasons 口径一致）');
+  assert.equal(list[list.length - 1], '2000q1', '最早的是 fromYear 的冬季');
+  assert.equal(new Set(list).size, list.length, '不该有重复');
+
+  // 条数从两端现算，不手写
+  const span = Number(list[0].slice(0, 4)) - Number(list[list.length - 1].slice(0, 4));
+  assert.equal(list.length, span * 4 + 1);
+
+  // ⚠️ 这条就是这次要修的那个问题本身：老番以前**根本选不到**
+  assert.ok(list.includes('2011q3'), '2011 年 7 月番必须在可选列表里');
+  assert.ok(list.includes(currentSeason(ANCHOR)), '当前季当然也要在');
+});
+
+test('季度搜索：年份 / qN / 月份 / 季节名都能落到同一季', () => {
+  const LIST = ['2012q1', '2011q4', '2011q3', '2011q2', '2011q1', '2010q4'];
+
+  assert.deepEqual(matchSeasons(LIST, '2011q3'), ['2011q3'], 'qN 直接定位');
+  assert.deepEqual(matchSeasons(LIST, '2011Q3'), ['2011q3'], '大小写不敏感');
+  assert.deepEqual(matchSeasons(LIST, '2011'), ['2011q4', '2011q3', '2011q2', '2011q1'], '只给年份 = 那一年四季');
+  assert.deepEqual(matchSeasons(LIST, '2011 年 7 月'), ['2011q3'], '7 月开播 = 第三季');
+  assert.deepEqual(matchSeasons(LIST, '2011-07'), ['2011q3'], '月份不带「月」也认');
+  assert.deepEqual(matchSeasons(LIST, '2011 3'), ['2011q3'], '第二个数 1~4 当季度号');
+  assert.deepEqual(matchSeasons(LIST, '秋'), ['2011q4', '2010q4'], '季节名 = 所有年的那一季');
+  assert.deepEqual(matchSeasons(LIST, '2011 10'), ['2011q4'], '10 月开播 = 第四季');
+
+  // 空关键词给全部；limit 只截前 N 个
+  assert.deepEqual(matchSeasons(LIST, ''), LIST);
+  assert.deepEqual(matchSeasons(LIST, '', { limit: 2 }), ['2012q1', '2011q4']);
+});
+
+test('季度搜索：反向用例 —— 认不出来时必须给空，不能装作匹配上了', () => {
+  const LIST = ['2011q4', '2011q3', '2011q2', '2011q1'];
+  // 这是最要紧的一条：打错字却弹出一长串无关季度，比明确说「没匹配上」更让人困惑
+  assert.deepEqual(matchSeasons(LIST, 'zzz'), []);
+  assert.deepEqual(matchSeasons(LIST, '两千一十一'), []);
+  // 年份对不上、季度对得上 → 仍然为空（两个条件是和的关系，不是或）
+  assert.deepEqual(matchSeasons(LIST, '1999q3'), []);
+  // 不合法输入不该把整个界面搞崩
+  assert.deepEqual(matchSeasons(null, '2011'), []);
+  assert.deepEqual(matchSeasons(LIST, null).length, LIST.length);
+});
+
+/* ═══════════════════════════════════════════════════════════
+ * 壁纸取景框的几何
+ *
+ * 这一段是「设置里那个框拖起来对不对」的全部依据 —— 拖动只有在真机上才动得起来，
+ * 换算错了表现成「拖起来怪怪的」，不会报错，所以只能在这一层钉死。
+ * ═══════════════════════════════════════════════════════════ */
+
+test('壁纸位置：老关键字能升上来，新字段优先', () => {
+  assert.deepEqual(positionToPercent('top'), [50, 0]);
+  assert.deepEqual(positionToPercent('right'), [100, 50]);
+  assert.deepEqual(positionToPercent('center'), [50, 50]);
+  assert.deepEqual(positionToPercent('  LEFT  '), [0, 50], '大小写和空格不该影响');
+  assert.deepEqual(positionToPercent('斜着'), [50, 50], '认不出来按居中');
+  assert.deepEqual(positionToPercent(undefined), [50, 50]);
+  assert.deepEqual(positionToPercent(null), [50, 50]);
+
+  assert.deepEqual(resolvePosition({}), { x: 50, y: 50 });
+  assert.deepEqual(resolvePosition({ position: 'bottom' }), { x: 50, y: 100 });
+  // ⚠️ 两个都有时新字段赢。反过来（升上来的老关键字把新位置顶掉）会表现成
+  //    「拖好位置、一动别的设置就弹回去」，而且完全看不出是哪一步干的
+  assert.deepEqual(resolvePosition({ x: 12, y: 88, position: 'top' }), { x: 12, y: 88 });
+  // 只给一个轴：另一个轴按居中，不回落到关键字 —— 半套坐标本来就是坏数据，
+  // 一条规则（缺就居中）比两条规则（缺就看关键字）好预测
+  assert.deepEqual(resolvePosition({ x: 12, position: 'top' }), { x: 12, y: 50 });
+  assert.deepEqual(resolvePosition({ x: 999, y: -5 }), { x: 100, y: 0 });
+});
+
+test('百分比夹取：非数字一律走居中，不吐 NaN', () => {
+  assert.equal(clampPercent(0), 0);
+  assert.equal(clampPercent(100), 100);
+  assert.equal(clampPercent(150), 100);
+  assert.equal(clampPercent(-20), 0);
+  assert.equal(clampPercent(12.34), 12.3, '留一位小数就够了，多了是噪声');
+  assert.equal(clampPercent('abc'), 50);
+  assert.equal(clampPercent(NaN), 50);
+  assert.equal(clampPercent(null), 50);
+});
+
+test('cover 溢出量：分母是「图比框大出来的那一块」，不是框的边长', () => {
+  // 竖图铺进横框：宽度正好铺满（溢出 0 → 取 1 避免除零），高度溢出 600
+  assert.deepEqual(
+    coverOverflow({ imgW: 1600, imgH: 2400, boxW: 800, boxH: 600 }),
+    { x: 1, y: 600, known: true },
+  );
+  // 横图铺进同一个框：反过来，宽度溢出 100、高度正好铺满
+  assert.deepEqual(
+    coverOverflow({ imgW: 2400, imgH: 1600, boxW: 800, boxH: 600 }),
+    { x: 100, y: 1, known: true },
+  );
+  // 同比例：两个方向都不溢出
+  assert.deepEqual(
+    coverOverflow({ imgW: 1600, imgH: 1200, boxW: 800, boxH: 600 }),
+    { x: 1, y: 1, known: true },
+  );
+  // 不知道原图尺寸（老存档没存 imgW/imgH）：退化成按框的边长算，标记成 known=false
+  const unknown = coverOverflow({ imgW: null, imgH: null, boxW: 800, boxH: 600 });
+  assert.equal(unknown.known, false);
+  assert.deepEqual([unknown.x, unknown.y], [800, 600]);
+  assert.ok(Number.isFinite(unknown.x) && unknown.x > 0, '除零守卫必须在，否则位移会放大成无穷');
+});
+
+test('拖动换算：方向是反的 —— 把图往右拖，X 要变小', () => {
+  const base = { x: 50, y: 50, overflowX: 400, overflowY: 400 };
+  const right = dragToPercent({ ...base, dx: 100, dy: 0 });
+  assert.equal(right.x, 25, '往右拖 100px = 溢出量的 1/4 → X 减 25（跟拖地图一样，方向是反的）');
+  assert.equal(right.y, 50, '只拖水平方向，Y 不该动');
+
+  const up = dragToPercent({ ...base, dx: 0, dy: -200 });
+  assert.equal(up.y, 100, '往上拖 → 想看更靠下的部分 → Y 变大（同样是反的）');
+
+  // 夹住：拖出框外不该得到 -300% 这种值
+  assert.deepEqual(dragToPercent({ ...base, dx: 99999, dy: 99999 }), { x: 0, y: 0 });
+  assert.deepEqual(dragToPercent({ ...base, dx: -99999, dy: -99999 }), { x: 100, y: 100 });
+
+  // 溢出为 0 的维度不能除零 —— 出现 NaN 的话位置会直接飞掉，而界面上只是「图不见了」
+  const flat = dragToPercent({ x: 50, y: 50, dx: 10, dy: 10, overflowX: 0, overflowY: 0 });
+  assert.ok(Number.isFinite(flat.x) && Number.isFinite(flat.y), '不能出现 NaN');
+});
+
+test('位置说人话：三档 × 三档，坏值不吐 NaN', () => {
+  assert.equal(describePosition(50, 50), '水平居中 · 垂直居中');
+  assert.equal(describePosition(0, 0), '偏左 · 偏上');
+  assert.equal(describePosition(100, 100), '偏右 · 偏下');
+  assert.equal(describePosition(34, 66), '水平居中 · 垂直居中', '34 / 66 是分界点，落在「居中」这一档');
+  assert.equal(describePosition(33, 67), '偏左 · 偏下');
+  assert.equal(describePosition(NaN, 'x'), '水平居中 · 垂直居中');
+  assert.equal(POSITION_STEP, 2, '方向键一次的步长');
+});
+
+/* ═══════════════════════════════════════════════════════════
+ * 卡片窗口的缩放几何
+ * ═══════════════════════════════════════════════════════════ */
+
+test('缩放把手：八个方向齐、指针样式齐（斜角的命名是反的）', () => {
+  assert.equal(RESIZE_DIRS.length, 8);
+  assert.equal(new Set(RESIZE_DIRS).size, 8, '不能有重复方向');
+  for (const d of RESIZE_DIRS) assert.ok(RESIZE_CURSOR[d], `${d} 没有配鼠标指针`);
+  // ↗↙ 是一条对角线（ne / sw），↖↘ 是另一条（nw / se）—— 按直觉写必错
+  assert.equal(RESIZE_CURSOR.ne, RESIZE_CURSOR.sw);
+  assert.equal(RESIZE_CURSOR.nw, RESIZE_CURSOR.se);
+  assert.notEqual(RESIZE_CURSOR.ne, RESIZE_CURSOR.nw);
+});
+
+test('缩放：八条边各拖一次，方向都要对', () => {
+  const base = { x: 100, y: 100, w: 400, h: 300 };
+  assert.deepEqual(resizeRect({ base, dx: 50, dy: 30, dir: 'se' }), { x: 100, y: 100, w: 450, h: 330 });
+  assert.deepEqual(resizeRect({ base, dx: 50, dir: 'e' }), { x: 100, y: 100, w: 450, h: 300 }, 'e 只改宽');
+  assert.deepEqual(resizeRect({ base, dy: 30, dir: 's' }), { x: 100, y: 100, w: 400, h: 330 }, 's 只改高');
+
+  // 西侧：往左拖是变大，而且**右边缘必须钉住**（400+100=500）
+  const westOut = resizeRect({ base, dx: -50, dir: 'w' });
+  assert.deepEqual(westOut, { x: 50, y: 100, w: 450, h: 300 });
+  assert.equal(westOut.x + westOut.w, 500, '右边缘不动才是「往外拉」');
+  const westIn = resizeRect({ base, dx: 50, dir: 'w' });
+  assert.deepEqual(westIn, { x: 150, y: 100, w: 350, h: 300 }, '往右拖是变小，右边缘仍在 500');
+
+  // 北侧同理：100+300=400 是钉住的下边缘
+  const northOut = resizeRect({ base, dy: -50, dir: 'n' });
+  assert.deepEqual(northOut, { x: 100, y: 50, w: 400, h: 350 });
+  assert.equal(northOut.y + northOut.h, 400);
+
+  assert.deepEqual(resizeRect({ base, dx: -50, dy: -50, dir: 'nw' }), { x: 50, y: 50, w: 450, h: 350 });
+  assert.deepEqual(resizeRect({ base, dx: 50, dy: -50, dir: 'ne' }), { x: 100, y: 50, w: 450, h: 350 });
+  assert.deepEqual(resizeRect({ base, dx: -50, dy: 50, dir: 'sw' }), { x: 50, y: 100, w: 450, h: 350 });
+});
+
+test('缩放：夹到最小尺寸时，西 / 北侧的边缘不许跟着飘', () => {
+  const base = { x: 100, y: 100, w: 400, h: 300 };
+
+  const narrow = resizeRect({ base, dx: 500, dir: 'w' });
+  assert.equal(narrow.w, 300, '宽度到最小就该停住');
+  // ⚠️ 这是本段的重点：只写 `Math.max(minW, ...)` 而没把吃掉的那部分还给 x，
+  //    会得到 x=600 —— 表现成「宽度已经到底了，卡片还在往左飘」
+  assert.equal(narrow.x, 200, 'x 要正好等于「原右边缘 - 最小宽」');
+  assert.equal(narrow.x + narrow.w, 500, '任何时候右边缘都不该动');
+
+  const short = resizeRect({ base, dy: 500, dir: 'n' });
+  assert.equal(short.h, 160);
+  assert.equal(short.y, 240);
+  assert.equal(short.y + short.h, 400);
+
+  // 东南两侧不需要还 x / y：拉过头只是回到最小尺寸、原位不动
+  assert.deepEqual(resizeRect({ base, dx: -500, dy: -500, dir: 'se' }), { x: 100, y: 100, w: 300, h: 160 });
+});
+
+test('缩放：西 / 北侧不许越过画布左上角，东 / 南侧不限', () => {
+  const base = { x: 0, y: 0, w: 500, h: 400 };
+
+  const west = resizeRect({ base, dx: -300, dir: 'w' });
+  assert.equal(west.x, 0, 'x 不能变成负数（卡片会跑到画布外面去）');
+  assert.equal(west.w, 500, 'x 到 0 之后宽度就不该再涨');
+  assert.equal(west.x + west.w, 500, '右边缘始终不动');
+
+  const north = resizeRect({ base, dy: -300, dir: 'n' });
+  assert.equal(north.y, 0);
+  assert.equal(north.h, 400);
+
+  // 反向：东 / 南侧**不能**被夹 —— 用户就是要更大的卡片，画布会跟着滚。
+  // 顺手在这里也夹一刀的话，表现成「怎么拖都到不了底」，很难联想到是这里
+  const big = resizeRect({ base, dx: 2000, dy: 2000, dir: 'se' });
+  assert.deepEqual(big, { x: 0, y: 0, w: 2500, h: 2400 });
+});
+
+test('缩放：缺参数不崩，坏方向退化成右下角', () => {
+  assert.equal(resizeRect({}).w, 300, '没有 base 时给一套最小值，别吐 undefined');
+  const base = { x: 10, y: 10, w: 400, h: 300 };
+  assert.deepEqual(resizeRect({ base, dx: 50, dy: 50 }), resizeRect({ base, dx: 50, dy: 50, dir: 'se' }));
+  assert.deepEqual(resizeRect({ base, dx: 50, dy: 50, dir: '乱七八糟' }), resizeRect({ base, dx: 50, dy: 50, dir: 'se' }));
+});
+
+test('首次适配：装不下就缩进来，装得下就一个字段都不动', () => {
+  const r = { x: 16, y: 142, w: 1260, h: 660 };
+
+  const narrow = fitRect(r, { availW: 900, availH: 700 });
+  assert.equal(narrow.w, 900, '宽度要缩到画布里');
+  assert.equal(narrow.h, 660, '高度装得下就别动');
+  assert.equal(narrow.x, 16, '只改大小，不改摆位');
+  assert.equal(narrow.y, 142);
+
+  // 装得下的时候必须原样返回：每次挂载都偷偷缩一点的话，切几次视图卡片就没了
+  assert.deepEqual(fitRect(r, { availW: 1400, availH: 900 }), r);
+
+  // 极端窄窗：不能缩到比最小尺寸还小，否则卡片变成一条缝、把手也叠在一起
+  const tiny = fitRect(r, { availW: 120, availH: 80 });
+  assert.equal(tiny.w, 300);
+  assert.equal(tiny.h, 160);
+
+  // 量不出可用空间时原样返回（宁可摆大一点，也不要因为一次读不到尺寸就永久缩小）
+  assert.deepEqual(fitRect(r, {}), r);
+  assert.deepEqual(fitRect(r, { availW: NaN, availH: 0 }), r);
+});
+
+test('一格宽档位：越界夹回，坏值用默认', () => {
+  assert.equal(clampCardMin(160), 160);
+  assert.equal(clampCardMin('160'), 160, '存档里可能是字符串');
+  assert.equal(clampCardMin(undefined), CARD_MIN.def, '老存档里没这个字段');
+  assert.equal(clampCardMin('abc'), CARD_MIN.def);
+  assert.equal(clampCardMin(1), CARD_MIN.min);
+  assert.equal(clampCardMin(9999), CARD_MIN.max);
+  assert.ok(CARD_MIN.min < CARD_MIN.def && CARD_MIN.def < CARD_MIN.max, '默认值要落在范围里');
 });

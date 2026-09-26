@@ -120,6 +120,49 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
   background: rgba(var(--bg-rgb), var(--wp-dim));
 }
 
+/*
+ * ---------- 毛玻璃的开关（性能相关，别随手删） ----------
+ *
+ * 面板不透明时，下面这几层的 `backdrop-filter` **在视觉上什么都不做**，
+ * 却把「滚动番剧库」和「连续输入搜索词」从 60fps 打到 13fps ——
+ * 2026-09-26 在同一台机器上量的，同一组场景，只差这一个属性。
+ *
+ * 机制：`backdrop-filter` 会让元素**每帧**把身后的背景重新模糊一遍。
+ * 只要它内部的内容在动（哪怕动的是它自己的子容器、身后的背景压根没变），
+ * 这一层就得重画 —— 一个铺满屏幕的毛玻璃面板 = 每帧一次全屏模糊。
+ *
+ * 而它到底有没有意义，只看一件事：**身后的东西透不透得出来**。
+ * 面板不透明 → 身后全被盖住 → 白做；壁纸没开 → 身后是纯色 → 也白做。
+ * `theme/applyTheme.js` 的 `wantsFrost()` 就是按这两条算的，
+ * 结果写在 `<html data-frost>` 上。
+ *
+ * ⚠️ 这里写成「一处关掉全部」，而不是把每条规则都挂到 `[data-frost]` 下面 ——
+ * 这七处分散在文件的六个位置，一条一条改很容易漏，而漏掉的那条**不会有任何报错**，
+ * 只是继续每帧白模糊一遍，看起来就是「卡顿没修好」。
+ *
+ * 想手工感受差别：DevTools 里把 `html` 的 `data-frost` 改成 `on`，再滚一次番剧库。
+ *
+ * ⚠️ `.card__badge` 与 `.card__follow` **不在这个名单里**，是有意的：
+ * 它们底下压着封面原图，模糊是看得见的，而且实测它们几乎不花帧
+ * （把 `.window` 关掉而留着这两处，滚动就已经回到 61fps）。
+ *
+ * ⚠️ `.drawer__mask` 在名单里，这是个取舍：它的 `blur(2px)` 压在半透明遮罩上，
+ * 严格说**面板不透明时它也是看得见的**（身后那一页透过遮罩露出来）。
+ * 但 2px 的模糊本来就看不太出来，而它是一层**铺满屏幕**的 backdrop-filter：
+ * 实测打开抽屉再滚内容区，p95 帧间隔 90ms，去掉它降到 30ms。
+ * 观感几乎没变、顿挫少一大截，值。
+ */
+html:not([data-frost='on']) .sidenav,
+html:not([data-frost='on']) .topbar,
+html:not([data-frost='on']) .window,
+html:not([data-frost='on']) .drawer__mask,
+html:not([data-frost='on']) .drawer__panel,
+html:not([data-frost='on']) .toast,
+html:not([data-frost='on']) .settings,
+html:not([data-frost='on']) .modal {
+  backdrop-filter: none;
+}
+
 /* ---------- 侧边导航 ---------- */
 .sidenav {
   width: 84px;
@@ -427,15 +470,46 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 
 .window__body { flex: 1; overflow: auto; padding: 14px; }
 
-.window__resize {
+/*
+ * 八条边的缩放把手。
+ *
+ * 原来只有 `se` 一个角，想把卡片加宽必须先把鼠标摸到那个角上 ——
+ * 卡片比画布宽的时候那个角还在滚动条外面。八条边都能拖，就近就行。
+ *
+ * ⚠️ 左右两条只留 4px：卡片内容区右边就是它自己的滚动条，
+ * 边条一宽就会把滚动条最外侧几条像素抢走 —— 表现成「拖滚动条突然变成在缩放」。
+ * 上下两条不跟垂直滚动条抢，可以给到 5px 好点一些。
+ * 四个角 16px 见方，写在后面压住边条，免得拖到角上时吃的却是边条。
+ */
+.window__edge {
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 18px;
-  height: 18px;
-  cursor: nwse-resize;
-  background: linear-gradient(135deg, transparent 52%, var(--line-2) 52%, var(--line-2) 60%, transparent 60%);
+  z-index: 4;
   touch-action: none;
+  transition: background 0.12s ease;
+}
+.window__edge:hover { background: rgba(var(--accent-rgb), 0.35); }
+.window__edge--n,
+.window__edge--s { left: 12px; right: 12px; height: 5px; }
+.window__edge--n { top: 0; }
+.window__edge--s { bottom: 0; }
+.window__edge--e,
+.window__edge--w { top: 12px; bottom: 12px; width: 4px; }
+.window__edge--e { right: 0; }
+.window__edge--w { left: 0; }
+.window__edge--ne,
+.window__edge--nw,
+.window__edge--se,
+.window__edge--sw { width: 16px; height: 16px; }
+.window__edge--ne { top: 0; right: 0; }
+.window__edge--nw { top: 0; left: 0; }
+.window__edge--se { right: 0; bottom: 0; }
+.window__edge--sw { left: 0; bottom: 0; }
+/* 右下角那撮斜纹留着：它是最容易被发现的把手，也算个「这里能拖」的记号 */
+.window__edge--se {
+  background: linear-gradient(135deg, transparent 52%, var(--line-2) 52%, var(--line-2) 60%, transparent 60%);
+}
+.window__edge--se:hover {
+  background: linear-gradient(135deg, transparent 46%, rgba(var(--accent-rgb), 0.6) 46%, rgba(var(--accent-rgb), 0.6) 62%, transparent 62%);
 }
 
 /* ---------- 通用控件 ---------- */
@@ -490,6 +564,124 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .select:hover { border-color: var(--line-2); }
 .select--mini { padding: 4px 6px; font-size: 11.5px; }
 .select option { background: var(--panel-2); color: var(--text); }
+
+/* ---------- 季度选择器 ---------- */
+.spick { position: relative; display: inline-flex; }
+
+.spick__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  white-space: nowrap;
+}
+.spick__toggle:hover:not(:disabled) { border-color: var(--line-2); }
+.spick__toggle:disabled { opacity: 0.55; cursor: default; }
+.spick__caret { font-size: 9px; color: var(--text-3); }
+
+/* 点面板外面就收起来。铺满整屏但完全透明，不挡视觉只接事件 */
+.spick__backdrop { position: fixed; inset: 0; z-index: 45; }
+
+.spick__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 46;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  box-shadow: var(--shadow-lg);
+}
+
+.spick__input {
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  outline: none;
+}
+.spick__input:focus { border-color: var(--accent); }
+
+.spick__quick { display: flex; gap: 6px; }
+
+.spick__list { max-height: 292px; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+
+.spick__item {
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+.spick__item:hover { background: var(--panel); color: var(--text); }
+.spick__item.is-on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+.spick__note { padding: 8px; font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+.spick__foot { padding: 2px 8px 4px; font-size: 11.5px; color: var(--text-3); }
+
+/* ---------- 壁纸取景框（设置 · 外观） ---------- */
+.wpframe-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 260px;
+}
+/*
+ * 比例由行内 style 的 aspect-ratio 定（跟着真实窗口走），这里只管长相。
+ * `background-size: cover` 必须和 `.wallpaper` 那一条保持一致 ——
+ * 两边不一致的话，框里挑好的构图铺上去就变形了。
+ */
+.wpframe {
+  position: relative;
+  width: 100%;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background-color: var(--bg-2);
+  background-size: cover;
+  background-repeat: no-repeat;
+  cursor: grab;
+  touch-action: none;
+  overflow: hidden;
+}
+.wpframe:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.wpframe.is-dragging { cursor: grabbing; border-color: var(--accent); }
+.wpframe.is-off { cursor: default; opacity: 0.5; }
+
+/* 三分线只是参考线，不吃指针事件 */
+.wpframe__grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.3) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.3) 1px, transparent 1px);
+  background-size: 33.334% 33.334%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25) inset;
+  opacity: 0.6;
+}
+.wpframe.is-off .wpframe__grid { display: none; }
+
+.wpframe__row { display: flex; align-items: center; gap: 8px; }
+.wpframe__pos { flex: 1; font-size: 11.5px; color: var(--text-3); }
+.wpframe__note { font-size: 10.5px; color: var(--text-3); font-style: normal; line-height: 1.5; }
 
 .input {
   padding: 6px 10px;
@@ -594,7 +786,29 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .stat--danger .stat__value { color: var(--danger); }
 
 /* ---------- 番剧卡片 ---------- */
-.cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 14px 12px; }
+.cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-min, 112px), 1fr)); gap: 14px 12px; }
+
+/* 工具栏里的「一格留多宽」滑块：比 .slider 窄一档，塞得进一行 */
+.toolbar__range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 112px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(var(--text-rgb), 0.14);
+  outline: none;
+  accent-color: var(--accent);
+}
+.toolbar__range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.4);
+}
 
 .card { display: flex; flex-direction: column; }
 .card__cover {
@@ -605,8 +819,25 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 }
 .card:hover .card__cover { transform: translateY(-3px); box-shadow: 0 10px 22px rgba(0, 0, 0, 0.42); }
 
+/*
+ * 封面上的「打开详情」热区：铺满整张封面、完全透明。
+ * 番剧党认封面不认标题，点图比点下面那行小字自然得多。
+ * z-index 只给 1：徽标(2) 与星标(3) 要压在它上面，否则星标就点不着了。
+ */
+.card__open {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.card__open:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+
 .card__badge {
   position: absolute;
+  z-index: 2;
   left: 7px;
   top: 7px;
   display: inline-flex;
@@ -623,6 +854,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 
 .card__follow {
   position: absolute;
+  z-index: 3;
   right: 6px;
   top: 6px;
   width: 25px;
@@ -1266,7 +1498,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
     height: auto !important;
     max-height: 74vh;
   }
-  .window__resize { display: none; }
+  .window__edge { display: none; }
   .weekgrid { grid-template-columns: repeat(7, 118px); overflow-x: auto; padding-bottom: 6px; }
   .settings { width: 100%; }
   .theme-grid { grid-template-columns: 1fr; }

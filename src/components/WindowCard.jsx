@@ -1,11 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { setLayout } from '../core/store.js';
-
-const MIN_W = 300;
-const MIN_H = 160;
+import { RESIZE_CURSOR, RESIZE_DIRS, fitRect, resizeRect } from '../core/layout.js';
 
 /**
- * 卡片式窗口：拖标题栏移动、拖右下角缩放、双击标题栏最大化、按钮折叠。
+ * 卡片式窗口：拖标题栏移动、拖**八条边**缩放、双击标题栏最大化、按钮折叠。
  *
  * 拖动期间只动本地 state，松手才写回 store —— 否则每帧都会触发一次全局重渲染
  * 与一次落盘，拖起来会发涩。
@@ -20,12 +18,37 @@ export default function WindowCard({ id, title, hint, actions, children, default
   const [collapsed, setCollapsed] = useState(false);
   const drag = useRef(null);
   const restore = useRef(null);
+  const rootRef = useRef(null);
+  const fitted = useRef(false);
 
   // 外部（例如换视图后 store 被重置）改了布局时同步一次
   useEffect(() => {
     if (saved && !mode) setRect(saved);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved?.x, saved?.y, saved?.w, saved?.h]);
+
+  /*
+   * 首次挂载：默认摆位装不下就缩进来。
+   *
+   * 只在「这张卡用户还没摆过」时做一次（`saved` 为空）—— 已经摆过的是用户的
+   * 选择，哪怕他把卡片拖到画布外面也不该被纠正（多屏、临时挪开都很正常）。
+   * 不落盘：窗口重新变宽之后，默认摆位又该是原来的大小。
+   */
+  useEffect(() => {
+    if (fitted.current || saved) return;
+    fitted.current = true;
+    const parent = rootRef.current?.parentElement;
+    if (!parent) return;
+    setRect((r) => {
+      // 画布有 16px 内边距，而 absolute 定位的参照是 padding box，所以要减掉
+      const next = fitRect(r, {
+        availW: parent.clientWidth - r.x - 16,
+        availH: parent.clientHeight - r.y - 16,
+      });
+      return next.w === r.w && next.h === r.h ? r : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saved]);
 
   useEffect(() => {
     if (!mode) return undefined;
@@ -38,11 +61,7 @@ export default function WindowCard({ id, title, hint, actions, children, default
       if (mode === 'move') {
         setRect({ ...d.base, x: Math.max(0, d.base.x + dx), y: Math.max(0, d.base.y + dy) });
       } else {
-        setRect({
-          ...d.base,
-          w: Math.max(MIN_W, d.base.w + dx),
-          h: Math.max(MIN_H, d.base.h + dy),
-        });
+        setRect(resizeRect({ base: d.base, dx, dy, dir: d.dir }));
       }
     };
     const onUp = () => {
@@ -63,10 +82,10 @@ export default function WindowCard({ id, title, hint, actions, children, default
     };
   }, [mode, id]);
 
-  const start = (m) => (e) => {
+  const start = (m, dir = 'se') => (e) => {
     e.preventDefault();
     e.stopPropagation();
-    drag.current = { sx: e.clientX, sy: e.clientY, base: { ...rect } };
+    drag.current = { sx: e.clientX, sy: e.clientY, base: { ...rect }, dir };
     setMode(m);
   };
 
@@ -91,7 +110,7 @@ export default function WindowCard({ id, title, hint, actions, children, default
   if (mode) cls.push('window--dragging');
 
   return (
-    <section className={cls.join(' ')} style={style}>
+    <section className={cls.join(' ')} style={style} ref={rootRef}>
       <header
         className="window__bar"
         onPointerDown={start('move')}
@@ -116,9 +135,22 @@ export default function WindowCard({ id, title, hint, actions, children, default
       </header>
 
       {!collapsed && <div className="window__body">{children}</div>}
-      {!collapsed && !maxed && (
-        <div className="window__resize" title="拖动缩放" onPointerDown={start('resize')} />
-      )}
+      {/*
+        八条边都能拖。原来只有右下角一个把手，想把卡片加宽就得先摸到那个角 ——
+        卡片比画布宽的时候，那个角还得先把滚动条拖过去才够得着。
+      */}
+      {!collapsed && !maxed
+        ? RESIZE_DIRS.map((d) => (
+            <div
+              key={d}
+              className={`window__edge window__edge--${d}`}
+              data-window-resize={d}
+              title="拖动缩放"
+              style={{ cursor: RESIZE_CURSOR[d] }}
+              onPointerDown={start('resize', d)}
+            />
+          ))
+        : null}
     </section>
   );
 }

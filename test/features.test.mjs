@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { DEFAULT_THEME, THEMES, THEME_GROUPS, getTheme } from '../src/theme/themes.js';
-import { computeThemeVars, applyTheme, normalizeWallpaper, DEFAULT_WALLPAPER } from '../src/theme/applyTheme.js';
+import { computeThemeVars, applyTheme, normalizeWallpaper, wantsFrost, DEFAULT_WALLPAPER } from '../src/theme/applyTheme.js';
 import { hotkeysByGroup, HOTKEYS, isTypingTarget, lookup, normalizeEvent, shouldHandle } from '../src/core/hotkeys.js';
 import { compareVersions, describeUpdate, evaluateUpdate, normalizeManifest, parseVersion, resolveManifestUrl, toApiUrl } from '../src/core/update.js';
 import { ALL_CARD_IDS, BUILTIN_PRESETS, dropCardFromLayout, presetById } from '../src/core/layoutPresets.js';
@@ -104,7 +104,10 @@ test('壁纸参数会写进对应变量，且越界值被夹住', () => {
   assert.equal(vars['--wp-blur'], '12px');
   assert.equal(vars['--wp-brightness'], '1.5');
   assert.equal(vars['--wp-scale'], '1.2');
-  assert.equal(vars['--wp-position'], 'top');
+  // ⚠️ 这个变量 2026-09-26 换过语义：原来是五个关键字（'top' 这样直接塞给
+  //    background-position），现在是两个百分比 —— 设置里那个取景框改的就是它。
+  //    老存档只有关键字，所以要能升上来：top → 50% 0%。
+  assert.equal(vars['--wp-position'], '50% 0%');
   assert.equal(vars['--wp-dim'], '0.5');
   assert.match(vars['--wp-url'], /^url\("data:image\/png;base64,AAAA"\)$/);
 
@@ -115,9 +118,41 @@ test('壁纸参数会写进对应变量，且越界值被夹住', () => {
   assert.equal(clamped['--wp-blur'], '40px');
   assert.equal(clamped['--wp-brightness'], '0.2');
   assert.equal(clamped['--wp-scale'], '3');
-  assert.equal(clamped['--wp-position'], 'center');
+  // 认不出来的关键字按居中
+  assert.equal(clamped['--wp-position'], '50% 50%');
   assert.equal(clamped['--wp-dim'], '0.85');
 });
+
+test('壁纸位置：有 x/y 就用 x/y，没 x/y 才把老关键字升上来', () => {
+  // 老存档（只有关键字）
+  assert.equal(computeThemeVars('night', { wallpaper: { position: 'bottom' } })['--wp-position'], '50% 100%');
+  assert.equal(computeThemeVars('night', { wallpaper: { position: 'left' } })['--wp-position'], '0% 50%');
+  // 两个都有：新字段赢 —— 反过来「升过一次的老关键字把新位置顶掉」是最恶心的 bug，
+  // 表现成「拖了半天，一动别的设置位置就弹回去」
+  assert.equal(
+    computeThemeVars('night', { wallpaper: { position: 'top', x: 12, y: 88 } })['--wp-position'],
+    '12% 88%',
+  );
+  // 越界夹住、非数字退回居中
+  assert.equal(computeThemeVars('night', { wallpaper: { x: 300, y: -20 } })['--wp-position'], '100% 0%');
+  assert.equal(computeThemeVars('night', { wallpaper: { x: 'abc' } })['--wp-position'], '50% 50%');
+});
+
+test('wantsFrost：只有「面板半透明 + 壁纸开着」才值得做毛玻璃', () => {
+  const on = { enabled: true, dataUrl: 'data:x' };
+  // 两个条件都满足 → 开
+  assert.equal(wantsFrost({ panelAlpha: 0.6, wallpaper: on }), true);
+  // 面板不透明：毛玻璃在视觉上什么都不做，却实打实吃帧 —— 这就是卡顿的根因
+  assert.equal(wantsFrost({ panelAlpha: 1, wallpaper: on }), false);
+  // 没壁纸：身后是纯色，模糊同样白做
+  assert.equal(wantsFrost({ panelAlpha: 0.6, wallpaper: { enabled: false, dataUrl: 'data:x' } }), false);
+  assert.equal(wantsFrost({ panelAlpha: 0.6, wallpaper: null }), false);
+  // 缺省即最保守：不开
+  assert.equal(wantsFrost(), false);
+  // 反向：面板不透明度被夹到下限 0.3，仍然算「半透明」
+  assert.equal(wantsFrost({ panelAlpha: 0.05, wallpaper: on }), true);
+});
+
 
 test('normalizeWallpaper：没图就等于没开', () => {
   assert.equal(normalizeWallpaper({ enabled: true, dataUrl: null }).enabled, false);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
@@ -34,9 +34,12 @@ await build({
   logLevel: 'silent',
 });
 
-const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport, renderHistory, renderSearchBox } = await import(pathToFileURL(outfile).href);
+const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport, renderHistory, renderSearchBox, renderSeasonPicker, renderWindowCard, renderWallpaperFrame, renderSeasonView } = await import(pathToFileURL(outfile).href);
 
 const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// 有些约定只存在于样式表里（比如「取景框和壁纸用同一种铺法」），
+// SSR 出来的 HTML 里看不到 —— 那种断言只能直接读这个文件
+const CSS = readFileSync(path.resolve('src/styles.css'), 'utf8');
 const titles = SAMPLE_ITEMS.map((a) => escapeHtml(a.titleZh || a.titleJa));
 const countOf = (html, needle) => html.split(needle).length - 1;
 
@@ -55,7 +58,11 @@ test('默认视图：骨架、卡片窗口、进度条都在', async () => {
 
   // 卡片式窗口的拖拽 / 缩放把手
   assert.ok(html.includes('window__bar'), '窗口应有可拖拽标题栏');
-  assert.ok(html.includes('window__resize'), '窗口应有缩放把手');
+  // 2026-09-26：原来只有右下角一个把手（类名 window__resize），
+  // 加宽卡片得先摸到那个角 —— 卡片比画布宽时那个角还在滚动条外面。改成八条边。
+  for (const dir of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
+    assert.ok(html.includes(`data-window-resize="${dir}"`), `窗口应有 ${dir} 方向的缩放把手`);
+  }
 
   // 加载进度条
   assert.ok(html.includes('progressbar'), '顶栏应有进度条节点');
@@ -63,7 +70,17 @@ test('默认视图：骨架、卡片窗口、进度条都在', async () => {
 
 test('深链里的季度确实生效了，且内置数据真的渲染成了卡片', async () => {
   const html = await render();
-  assert.ok(html.includes(`value="${SAMPLE_SEASON}"`), `季度选择器里应有 ${SAMPLE_SEASON}`);
+  /*
+   * 原来断言的是 `value="2026q3"` —— 那会儿顶栏是个原生 `<select>`，选中项靠 value 表达。
+   * 现在换成了可搜索的季度选择器（可选季度从 9 个扩到一百多个，原生下拉滚不动），
+   * 当前季度改由 `data-season-current` 报出来。
+   * 断言的**意图没变**：深链里那个季度要真的落到界面上，而不是被默认值顶掉。
+   */
+  assert.ok(
+    html.includes(`data-season-current="${SAMPLE_SEASON}"`),
+    `季度选择器应报出当前季 ${SAMPLE_SEASON}`,
+  );
+  assert.ok(html.includes(`${SAMPLE_SEASON.slice(0, 4)} 年`), '当前季的日期文案要显示出来');
   // 卡片真的铺开了：光有容器不算
   assert.ok(countOf(html, 'card__title') > 5, '番剧卡片数量太少，内置数据可能没被用上');
   assert.ok(
@@ -771,4 +788,169 @@ test('跨季搜索：顶栏真的挂上了（组件好用 ≠ 接进了 App）',
   // 快捷键「/」靠这个属性找输入框，换掉的话快捷键会静默失效 —— 一并钉住
   assert.ok(html.includes('data-search-input="1"'), '快捷键「/」找的就是这个属性');
   assert.ok(html.includes('搜番剧名'), 'placeholder 要在');
+});
+
+/* ── 季度选择器 ────────────────────────────────────────────
+ *
+ * 这个功能存在的全部理由是「2011 年 7 月番以前选不到」，
+ * 所以断言必须**真的落到 2011q3 上**，而不是只验「面板画出来了」。
+ */
+
+test('季度选择器：收起时报出当前季', async () => {
+  const html = await renderSeasonPicker();
+  // 用 SAMPLE_SEASON 而不是写死 '2026q3' —— 内置季度表换一份，写死的那条就变成假红
+  assert.ok(html.includes(`data-season-current="${SAMPLE_SEASON}"`), '收起时要报出当前季');
+  assert.ok(html.includes(`${SAMPLE_SEASON.slice(0, 4)} 年`), '要显示人话的季度名，不是 key');
+  assert.equal(html.includes('data-season-panel='), false, '收起时不该有面板');
+});
+
+test('季度选择器：搜「2011 年 7 月」能落到 2011q3，且只落这一季', async () => {
+  const html = await renderSeasonPicker({ initialOpen: true, initialQuery: '2011 年 7 月' });
+  assert.ok(html.includes('data-season-item="2011q3"'), '7 月开播 = 2011q3，必须出现在结果里');
+  assert.equal(countOf(html, 'data-season-item='), 1, '7 月只对应一季，多列了就是季度换算错了');
+  assert.ok(html.includes('data-season-count="1"'), '计数要跟列表一致');
+});
+
+test('季度选择器：几种写法都要落到同一季（年份 / qN / 月份）', async () => {
+  // 「2011」放宽到全年四季：这不是错误，是「先看看那一年」
+  const year = await renderSeasonPicker({ initialOpen: true, initialQuery: '2011' });
+  assert.equal(countOf(year, 'data-season-item='), 4, '只给年份时应列出那一年四季');
+
+  // 这几种都得落到 2011q3。⚠️ 别把「秋」写进来 —— 它对应 **q4**，
+  // 放进来会得到一条「测试自己算错了季度」的红，而不是功能坏了
+  for (const w of ['2011q3', '2011-07', '2011 7', '2011 年 7 月']) {
+    const html = await renderSeasonPicker({ initialOpen: true, initialQuery: w });
+    assert.ok(html.includes('data-season-item="2011q3"'), `「${w}」应该能定位到 2011q3`);
+  }
+
+  // 季节名单独验：秋 = q4，所以该落在 2011q4 上
+  const autumn = await renderSeasonPicker({ initialOpen: true, initialQuery: '2011 秋' });
+  assert.ok(autumn.includes('data-season-item="2011q4"'), '「秋」要落到第四季');
+  assert.ok(!autumn.includes('data-season-item="2011q3"'), '「秋」不该把夏季也算进来');
+});
+
+test('季度选择器：搜不到就说没匹配上，绝不弹一堆无关季度', async () => {
+  const html = await renderSeasonPicker({ initialOpen: true, initialQuery: 'zzz' });
+  assert.ok(html.includes('data-season-empty="1"'), '要有「没匹配上」的说明');
+  assert.equal(countOf(html, 'data-season-item='), 0, '解析不出关键词时不该列出任何季度');
+});
+
+test('季度选择器：多选模式报出已选个数，并把勾中的标出来', async () => {
+  const html = await renderSeasonPicker({
+    mode: 'multi',
+    initialOpen: true,
+    initialQuery: '2011',
+    values: ['2026q3', '2011q3'],
+  });
+  assert.ok(html.includes('data-season-picked="2"'), '要在页脚报出已选个数');
+  assert.ok(html.includes('已选 2 个'), '数字也要说给人看');
+  // 「2011q3」在候选里且已选 → 要带选中样式；同一次搜索里的 2011q1 不该被标成选中
+  assert.equal(countOf(html, 'spick__item is-on'), 1, '只有已选的那条该带 is-on');
+  assert.ok(html.includes('data-season-recent="1"'), '多选模式要有「最近四季」快捷键');
+});
+
+/* ── 卡片：点封面 = 打开详情 ───────────────────────────── */
+
+test('番剧卡片：封面整块都是打开详情的入口，星标仍在它上面', async () => {
+  const html = await render({});
+  const cards = countOf(html, 'card__title');
+  assert.ok(cards > 5, '先得有卡片，才谈得上点');
+  assert.equal(
+    countOf(html, 'data-card-open='),
+    cards,
+    '每张卡都该有一个封面热区 —— 数量对不上就是有卡片漏了（以前只有标题能点）',
+  );
+  // 星标必须还在，且压在热区上面（z-index 三层：热区 1、徽标 2、星标 3）
+  assert.ok(countOf(html, 'card__follow') >= cards, '星标不能因为加了热区就没了');
+  assert.ok(html.includes('card__open'), '热区的类名要在，样式靠它定位');
+});
+
+/* ── 卡片窗口：八方向缩放 ─────────────────────────────── */
+
+test('卡片窗口：八个方向都有缩放把手，最多化和折叠时收起来', async () => {
+  const html = await renderWindowCard();
+  for (const dir of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
+    assert.ok(html.includes(`data-window-resize="${dir}"`), `缺了 ${dir} 方向的把手`);
+  }
+  // 一张卡正好八个。多出来的多半是把手被渲了两遍（那样命中判定会互相抢）
+  assert.equal(countOf(html, 'data-window-resize='), 8, '一张卡应该正好 8 个把手');
+  // 反向：旧的那个孤零零的角把手类名不该再出现，否则会多出一层和边条重叠的热区
+  assert.equal(html.includes('window__resize'), false, '旧的单角把手类名要彻底换掉');
+  // 把手要能挡住指针事件才算数（z-index 写在 CSS 里，这里只钉住它挂了类）
+  assert.equal(countOf(html, 'window__edge '), 8, '每条边都要有 window__edge 基类');
+});
+
+/* ── 壁纸取景框 ───────────────────────────────────────── */
+
+test('壁纸取景框：画出来的构图和真正铺上去的必须是同一件事', async () => {
+  const html = await renderWallpaperFrame();
+  // 位置：百分比直接进 background-position，跟 .wallpaper 那条规则同义
+  assert.ok(html.includes('background-position:30% 70%'), '取景框要按当前 x/y 画背景');
+  assert.ok(html.includes('data-wp-x="30"'), '当前 x 要报出来，自检靠它');
+  assert.ok(html.includes('data-wp-y="70"'), '当前 y 要报出来');
+  // 比例：框和窗口同比例，不然「框里看着正好」的构图铺上去就偏了
+  assert.ok(html.includes('data-wp-aspect="2"'), '比例要能从 props 灌进来');
+  assert.ok(html.includes('aspect-ratio:2'), '比例要真的落到行内样式上');
+  // 人话提示 + 回正
+  assert.ok(html.includes('偏左 · 偏下'), '要把位置说成人话（x=30 偏左、y=70 偏下）');
+  assert.ok(html.includes('data-wp-reset'), '要给一个一键回正的出口');
+
+  /*
+   * 「取景框和真壁纸用的是同一套铺法」这件事在 HTML 里看不到 —— 它在样式表里。
+   * 所以只能直接读样式表。这条看着笨，守的是最要命的一处不一致：
+   * 一边 cover 一边 contain 的话，框里挑好的构图铺到窗口上就会整个变形，
+   * 而界面上没有任何地方会报错。
+   */
+  for (const sel of ['.wallpaper {', '.wpframe {']) {
+    const i = CSS.indexOf(sel);
+    assert.ok(i >= 0, `样式表里找不到 ${sel}`);
+    const block = CSS.slice(i, CSS.indexOf('}', i));
+    assert.match(block, /background-size:\s*cover/, `${sel} 应该用 cover 铺满（跟另一边一致）`);
+  }
+});
+
+test('壁纸取景框：老存档只有关键字时也能升上来', async () => {
+  const html = await renderWallpaperFrame({ x: null, y: null, position: 'top' });
+  assert.ok(html.includes('data-wp-x="50"'), 'top → x 居中');
+  assert.ok(html.includes('data-wp-y="0"'), 'top → y 靠顶');
+  assert.ok(html.includes('background-position:50% 0%'), '升上来的结果要真的画出来');
+});
+
+test('壁纸取景框：没图 / 没开的时候是灰的，不给一个拖了没反应的框', async () => {
+  const empty = await renderWallpaperFrame({ dataUrl: null, disabled: false });
+  assert.ok(empty.includes('is-off'), '没选图时要标成不可交互');
+  assert.ok(empty.includes('选一张图片之后就能拖'), '要说清楚为什么拖不动');
+  assert.ok(empty.includes('tabindex="-1"'), '不可交互时不该进 Tab 序列');
+
+  const off = await renderWallpaperFrame({ disabled: true });
+  assert.ok(off.includes('is-off'), '壁纸关掉时同样不该能拖');
+});
+
+test('设置面板的外观页：五关键字下拉已被取景框取代', async () => {
+  const html = await renderSettingsTabs();
+  assert.ok(html.includes('data-wp-frame'), '外观页要有取景框');
+  assert.equal(
+    html.includes('<option value="center">居中</option>'),
+    false,
+    '旧的「对齐」下拉该换掉了 —— 五个关键字选不了中间那一大片位置',
+  );
+});
+
+/* ── 番剧网格：一格宽 ─────────────────────────────────── */
+
+test('番剧网格：一格宽档位落到网格的列宽上', async () => {
+  const loose = await renderSeasonView({ cardMin: 160 });
+  assert.ok(loose.includes('data-card-min="160"'), '档位要报出来');
+  assert.ok(loose.includes('--card-min:160px'), '列宽要真的跟着变，不然滑块是个摆设');
+  // 反向：档位没变的时候不能是上一轮的残留
+  assert.equal(loose.includes('--card-min:112px'), false, '160 的时候不该还写着 112');
+
+  const dflt = await renderSeasonView();
+  assert.ok(dflt.includes('--card-min:112px'), '没给值时用默认 112');
+
+  // 越界的档位要夹回来（老存档被手改过、或以后改了范围）
+  const wild = await renderSeasonView({ cardMin: 9999 });
+  assert.ok(wild.includes('--card-min:220px'), '超大档位要夹到上限');
+  const tiny = await renderSeasonView({ cardMin: 1 });
+  assert.ok(tiny.includes('--card-min:76px'), '过小的档位要夹到下限');
 });

@@ -40,7 +40,7 @@ import { DISPLAY_VARIANT, EXPORT_VARIANT, coverCoverage, coverEntries, coverVari
 import { useCovers } from './core/useCovers.js';
 import { platform } from './platform/index.js';
 import { allBuiltinItems, builtinItems, BUILTIN_SEASONS } from './data/builtin/index.js';
-import { availableSeasons, currentSeason, fetchCatalog } from './data/bangumiData.js';
+import { currentSeason, fetchCatalog } from './data/bangumiData.js';
 import { describeSyncReport, syncLibrary } from './data/sync.js';
 import { degradedText, loadSeason } from './data/sources.js';
 import { diagnose, probeSubject } from './data/bangumiApi.js';
@@ -50,7 +50,7 @@ import { isVisible } from './core/features.js';
 import { lookup, normalizeEvent, shouldHandle } from './core/hotkeys.js';
 import { THEMES } from './theme/themes.js';
 import { applyTheme } from './theme/applyTheme.js';
-import { MS_PER_DAY, clockCST, countdown, countdownLabel, seasonLabel, watchState } from './core/time.js';
+import { MS_PER_DAY, allSeasons, clockCST, countdown, countdownLabel, seasonLabel, watchState } from './core/time.js';
 import { buildWeek, upcomingWithin } from './core/schedule.js';
 import { deadlineStatus, progress, sortCatchup } from './core/catchup.js';
 
@@ -351,7 +351,17 @@ export default function App() {
       const payload = await readImageFile(file);
       await platform.writeWallpaper(payload);
       setWallpaper(payload);
-      patchSettingSection('wallpaper', { enabled: true, name: payload.name });
+      // imgW / imgH 是给「取景框」算拖动位移用的（cover 的溢出量要靠原图比例），
+      // 顺手存进设置里，之后就算读不到壁纸文件也还知道图有多大。
+      // 位置一起回正：换了一张图就是重新构图，沿用上一张的取景位置只会让人莫名其妙。
+      patchSettingSection('wallpaper', {
+        enabled: true,
+        name: payload.name,
+        imgW: payload.width,
+        imgH: payload.height,
+        x: 50,
+        y: 50,
+      });
       pushToast('壁纸已更新', `${payload.width}×${payload.height} · 约 ${Math.round(payload.bytes / 1024)} KB`);
     } finally {
       setWallpaperBusy(false);
@@ -806,7 +816,14 @@ export default function App() {
   }, [goView, loadData, seasonKey, drawer, settingsOpen, helpOpen, cycleTheme, toggleWallpaper, openSettings]);
 
   // ---------- 派生数据 ----------
-  const seasons = useMemo(() => availableSeasons(now), [now]);
+  /*
+   * 全部可选季度（2000 年至今，新的在前）。
+   *
+   * ⚠️ 这里原来用的是 `availableSeasons(now)` —— 它**写死只返回 9 季**，
+   * 于是顶栏切季度和「更新数据」勾季度都只能选到最近两年，
+   * 2011 年 7 月番根本选不到。`availableSeasons` 现在只用来算「最近四季」这类默认值。
+   */
+  const seasons = useMemo(() => allSeasons(now), [now]);
 
   const filteredSeason = useMemo(() => {
     const k = keyword.trim().toLowerCase();
@@ -1236,6 +1253,8 @@ export default function App() {
                   now={now}
                   onToggle={toggleFollow}
                   onOpen={setDrawer}
+                  cardMin={st.settings.cardMin}
+                  onCardMin={(v) => patchSettings({ cardMin: v })}
                 />
               </WindowCard>
             </>

@@ -241,3 +241,117 @@ export function seasonLabel(key) {
   const q = Number(m[2]);
   return `${year} 年 ${q * 3 - 2} 月 · ${SEASON_NAME[q]}`;
 }
+
+/* ---------------- 季度选择（顶栏 / 更新数据共用） ---------------- */
+
+/** "2026q4" → { year: 2026, q: 4 }；认不出来给 null */
+export function parseSeason(key) {
+  const m = /^(\d{4})q([1-4])$/i.exec(String(key ?? '').trim());
+  return m ? { year: Number(m[1]), q: Number(m[2]) } : null;
+}
+
+const seasonKeyOf = (year, q) => `${year}q${q}`;
+
+/** 下一季，跨年自动进位（2026q4 → 2027q1） */
+export function nextSeasonOf(utcMs) {
+  const s = parseSeason(seasonOf(utcMs));
+  if (!s) return '';
+  return s.q === 4 ? seasonKeyOf(s.year + 1, 1) : seasonKeyOf(s.year, s.q + 1);
+}
+
+/**
+ * 从一季到另一季的**闭区间**列表，新的在前（含两端）。
+ * 端点的先后写反了也不报错，自动换过来 —— 调用方多半是从界面上拿的，不值得为这个红一次。
+ */
+export function seasonRange(fromKey, toKey) {
+  const a = parseSeason(fromKey);
+  const b = parseSeason(toKey);
+  if (!a || !b) return [];
+  const idx = (s) => s.year * 4 + (s.q - 1);
+  let lo = idx(a);
+  let hi = idx(b);
+  if (lo > hi) { const t = lo; lo = hi; hi = t; }
+  const out = [];
+  for (let i = hi; i >= lo; i -= 1) out.push(seasonKeyOf(Math.floor(i / 4), (i % 4) + 1));
+  return out;
+}
+
+/**
+ * 全部可选季度：`fromYear` 的冬季 到 下一季，新的在前。
+ *
+ * 为什么要专门有它：原来顶栏与「更新 Bangumi 数据」都只给 `availableSeasons()` 那 **9 季**，
+ * 于是 2011 年 7 月番**根本选不到** —— 想给一部老番建缓存、想按老季度看时间表都做不到。
+ * `availableSeasons()` 保留原样：它现在只用来算「最近四季」这种默认值。
+ */
+export function allSeasons(utcMs, { fromYear = 2000 } = {}) {
+  return seasonRange(`${fromYear}q1`, nextSeasonOf(utcMs));
+}
+
+/** 冬春夏秋 → 季度号 */
+const SEASON_Q = { 冬: 1, 春: 2, 夏: 3, 秋: 4 };
+
+/**
+ * 按关键词筛季度。
+ *
+ * 认这几种写法（都是人真的会打的）：
+ *   `2011`            → 2011 年全部四季
+ *   `2011q3` / `2011Q3` → 就这一季
+ *   `2011 年 7 月` / `2011-07` → 7 月开播 = 2011q3（ACG 圈按 1/4/7/10 月开播分季）
+ *   `q3` / `秋`         → 所有年的秋季
+ *   `2011 3`           → 第二个数 1~4 当**季度**，5~12 当**月份**
+ *   ``（空）           → 全部，新的在前
+ *
+ * ⚠️ 一个都解析不出来时返回**空数组**，不是「全部」——
+ * 打了错别字却弹出一长串无关季度，比明确说「没匹配上」更让人困惑。
+ *
+ * @param {string[]} list 候选季度（新的在前）
+ * @param {string} query
+ * @param {{limit?: number}} [opts] `limit > 0` 时只返回前 N 个
+ */
+export function matchSeasons(list, query, { limit = 0 } = {}) {
+  const all = Array.isArray(list) ? list : [];
+  const raw = String(query ?? '').trim().toLowerCase();
+  if (!raw) return limit > 0 ? all.slice(0, limit) : all.slice();
+
+  const ym = /(\d{4})/.exec(raw);
+  const year = ym ? Number(ym[1]) : null;
+
+  let q = null;
+  const qm = /q([1-4])/.exec(raw);
+  if (qm) q = Number(qm[1]);
+
+  if (q == null) {
+    const mm = /(\d{1,2})\s*月/.exec(raw);
+    if (mm) {
+      const n = Number(mm[1]);
+      if (n >= 1 && n <= 12) q = Math.ceil(n / 3);
+    }
+  }
+
+  if (q == null) {
+    const sn = /(冬|春|夏|秋)/.exec(raw);
+    if (sn) q = SEASON_Q[sn[1]];
+  }
+
+  // 「2011 3」这种不带「月」也不带 q 的：把年份抠掉，剩下的数按规则判
+  if (q == null && year != null) {
+    const rest = /(\d{1,2})/.exec(raw.replace(String(year), ' '));
+    if (rest) {
+      const n = Number(rest[1]);
+      if (n >= 1 && n <= 4) q = n;              // 1~4 当季度
+      else if (n <= 12) q = Math.ceil(n / 3);    // 5~12 当月份
+    }
+  }
+
+  // 年和季都解析不出来 = 这串字没意义，别假装匹配上了
+  if (year == null && q == null) return [];
+
+  const out = all.filter((k) => {
+    const s = parseSeason(k);
+    if (!s) return false;
+    if (year != null && s.year !== year) return false;
+    if (q != null && s.q !== q) return false;
+    return true;
+  });
+  return limit > 0 ? out.slice(0, limit) : out;
+}

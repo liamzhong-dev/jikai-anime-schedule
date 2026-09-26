@@ -1,7 +1,7 @@
 import React from 'react';
 import ProgressBar from './ProgressBar.jsx';
 import SearchBox from './SearchBox.jsx';
-import { seasonLabel } from '../core/time.js';
+import SeasonPicker from './SeasonPicker.jsx';
 import { SOURCES } from '../data/sources.js';
 import { getTheme } from '../theme/themes.js';
 
@@ -27,11 +27,9 @@ export default function TopBar({
     <header className="topbar">
       <div className="topbar__title">{TITLES[view] ?? '次回'}</div>
 
-      <select className="select" value={seasonKey} onChange={(e) => onSeason(e.target.value)} title="切换季度">
-        {seasons.map((s) => (
-          <option key={s} value={s}>{seasonLabel(s)}</option>
-        ))}
-      </select>
+      {/* 季度选择器换成可搜索的：可选季度有一百多个，原生下拉只能滚着找，
+          而用户想的是「2011 年 7 月」这种坐标 */}
+      <SeasonPicker seasons={seasons} value={seasonKey} onPick={onSeason} />
 
       <SearchBox
         value={keyword}

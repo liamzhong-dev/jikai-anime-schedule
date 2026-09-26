@@ -39,6 +39,11 @@
  *
  * `--click=<n>` 会让界面真的被点一次（打分 n → 记下），跑完再回来读 state.json，
  * 验的是「点了以后到底有没有存进去」—— 这条链的后半段只存在于桌面壳里。
+ *
+ * `--wp` 会播种一张**真的壁纸**（`build/demo/wallpaper-night.png`，PNG 头里读尺寸），
+ * 并让探针打开设置面板、在取景框里按真实指针拖一下，跑完再回来读 state.json。
+ * 验的是「按住拖 → 像素换算 → store → 防抖 → IPC → 磁盘」整条链 ——
+ * 这里面除了「框画出来了」以外的每一环，单测和 SSR 都够不着。
  */
 
 import fs from 'node:fs';
@@ -55,6 +60,12 @@ const wait = arg('wait', '6000');
 const season = arg('season', '');
 const profile = arg('profile', '');
 const click = Number(arg('click', '0'));
+const wp = process.argv.includes('--wp');
+
+if (wp && !profile) {
+  console.error('✗ --wp 必须同时给 --profile：不给的话这次自检会去拖**用户真实存档**里的壁纸位置');
+  process.exit(2);
+}
 
 if (!fs.existsSync(path.join(dist, 'index.html'))) {
   console.error('✗ 没有 dist/，先跑一次 npm run build');
@@ -93,12 +104,51 @@ const SEARCH_INDEX = [
 ];
 
 /**
- * 给一次性 profile 播种，并算好「按这份输入应该得到什么」。
+ * 播种用的壁纸。
+ *
+ * 直接拿仓库里那一张（`build/demo/wallpaper-night.png`，已入库）——
+ * 尺寸从 PNG 头的 IHDR 里读，不写死：写死的话，哪天换了素材，
+ * 期望的「拖动余量」就跟着错，而症状是「拖了没反应」，看着像功能坏了。
+ *
+ * ⚠️ dataURL 是**必须**的：主进程 `readWallpaper` 读的就是它。
+ * 少了它、或者键名对不上，取景框就是灰的 —— 那正是这条自检要抓的东西。
+ */
+function buildWallpaperSeed() {
+  const file = path.join(root, 'build/demo/wallpaper-night.png');
+  if (!fs.existsSync(file)) {
+    console.error(`✗ 找不到播种用的壁纸 ${path.relative(root, file)}（npm run assets 生成过就有）`);
+    process.exit(2);
+  }
+  const buf = fs.readFileSync(file);
+  // PNG 签名 + IHDR：宽高是第 16 / 20 字节起的两个大端 32 位
+  if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) {
+    console.error(`✗ ${path.relative(root, file)} 不是 PNG，读不出尺寸`);
+    process.exit(2);
+  }
+  const width = buf.readUInt32BE(16);
+  const height = buf.readUInt32BE(20);
+  return {
+    width,
+    height,
+    payload: {
+      dataUrl: `data:image/png;base64,${buf.toString('base64')}`,
+      width,
+      height,
+      bytes: buf.length,
+      name: '自检壁纸',
+    },
+  };
+}
+
+/** 给一次性 profile 播种，并算好「按这份输入应该得到什么」。
  *
  * 期望值是从**输入数据**推出来的（内置番剧的 Bangumi 分 + 我们塞进去的评分），
  * 不是从界面抄回来的 —— 否则这个断言只是把实现又写了一遍，什么都没验。
  */
-function seedProfile(dir, forView) {
+/** 这一轮播种进去的壁纸信息（`--wp` 才有），断言要用它算期望 */
+let wallSeed = null;
+
+function seedProfile(dir, forView, withWallpaper) {
   if (SEEDS.length < 3) {
     console.error(`✗ 内置数据里凑不出三部有 Bangumi 评分的作品（只有 ${SEEDS.length} 部），没法播种`);
     process.exit(2);
@@ -236,6 +286,19 @@ function seedProfile(dir, forView) {
   }
 
   /*
+   * 壁纸是**独立文件**（跟真实实现一致：它一两百 KB，不跟 state 混在一起）。
+   * 但开关必须写在 `settings.wallpaper` 里 —— 两处都要有：只写文件的话
+   * 取景框还是灰的，而「灰的」和「没接上」看起来一模一样。
+   */
+  if (withWallpaper) {
+    wallSeed = buildWallpaperSeed();
+    state.settings = {
+      ...(state.settings ?? {}),
+      wallpaper: { enabled: true, name: '自检壁纸', imgW: wallSeed.width, imgH: wallSeed.height },
+    };
+  }
+
+  /*
    * ⚠️ 一定要真的落盘。这一段曾经漏掉过 `writeFileSync`，症状是断言全红、
    * 看着像功能坏了 —— 其实是脚本自己没播种。**脚本自己造出来的红，
    * 比不做测试更坏**：它会让人去改本来正确的代码（这条教训的反面版本在第 17 条）。
@@ -246,6 +309,7 @@ function seedProfile(dir, forView) {
   // 索引只有当这次自检真的需要时才写 —— 写了一份别的视图用不上的索引，
   // 会顺手把「没有索引时该怎么显示」这条分支从别的自检里遮掉。
   if (nameIndex) fs.writeFileSync(path.join(dir, 'nameIndex.json'), JSON.stringify(nameIndex), 'utf8');
+  if (wallSeed) fs.writeFileSync(path.join(dir, 'wallpaper.json'), JSON.stringify(wallSeed.payload), 'utf8');
   return expectation;
 }
 
@@ -265,6 +329,8 @@ if (click > 0) env.JIKAI_SMOKE_CLICK = String(click);
 // 只有搜索那一路才给探针递词：探针见到词就会往输入框里打字，
 // 别的视图不需要，平白多一步还可能干扰它们自己的断言。
 if (view === 'search') env.JIKAI_SMOKE_SEARCH = SEARCH_WORD;
+// 壁纸拖动那一路：让探针打开设置、在取景框里真拖一下
+if (wp) env.JIKAI_SMOKE_WPDRAG = '1';
 
 let expected = null;
 let profileDir = '';
@@ -291,7 +357,7 @@ if (profile) {
     try { fs.rmSync(path.join(profileDir, 'state.json'), { force: true }); } catch { /* 本来就没有 */ }
     console.warn(`! 存档目录删不掉（${err?.code ?? err?.name ?? 'ERR'}），已降级为只清 state.json`);
   }
-  expected = seedProfile(profileDir, view);
+  expected = seedProfile(profileDir, view, wp);
   env.JIKAI_USERDATA = profileDir;
 }
 
@@ -308,9 +374,18 @@ const output = await new Promise((resolve, reject) => {
 
 const line = output.out.split(/\r?\n/).find((l) => l.trim().startsWith('SMOKE_OK'));
 if (!line) {
-  console.error('✗ 桌面壳没有打出 SMOKE_OK（窗口没起来、还是渲染进程被杀了）');
-  const tail = (output.out + output.err).split(/\r?\n/).filter(Boolean).slice(-15);
-  for (const l of tail) console.error(`  ${l.slice(0, 200)}`);
+  console.error('✗ 桌面壳没有打出 SMOKE_OK（窗口没起来 / 渲染进程被杀了 / 已经有份程序开着）');
+  const all = (output.out + output.err).split(/\r?\n/).filter(Boolean);
+  for (const l of all.slice(-15)) console.error(`  ${l.slice(0, 200)}`);
+  /*
+   * ⚠️ 最常见的其实是第三种：**程序本来就开着**。应用是单实例的，第二份起不来就
+   * 直接 quit —— 而它一个字都不打印的话，报出来的症状是「窗口没起来」，
+   * 会让人去查渲染进程，查半天发现只是自己没关窗口。主进程现在会打一行
+   * SMOKE_FAIL 说明原因，这里顺手翻译一下。
+   */
+  if (all.some((l) => l.includes('已有实例在运行'))) {
+    console.error('  → 单实例锁被占：把正在运行的程序关掉再来；或者给 --profile 换一份一次性存档。');
+  }
   process.exit(1);
 }
 
@@ -553,6 +628,74 @@ if (view === 'search') {
   }
 }
 
+// ---- 壁纸取景框：按住拖一下，位置要一路走到磁盘上 ----
+// 这一条守的是「设置面板 → 指针拖动 → 像素换算 → store → 防抖 → IPC → state.json」。
+// 换算本身由 core.test.mjs 的纯函数守着，框画成什么样由 SSR 守着，
+// 但**这段中间的路只有真壳走得通** —— 而且它断掉时界面上什么都不报，
+// 只是「拖了半天，重开又回去了」。
+if (wp) {
+  const w = report.wpdrag ?? {};
+  check(
+    Number(w.frame) === 1,
+    `设置面板里没找到取景框（wpdrag=${JSON.stringify(w)}）—— 不是快捷键没打开设置，就是组件没接进外观页`,
+  );
+
+  if (Number(w.frame) === 1) {
+    check(w.off === false, '取景框是灰的：壁纸文件没被读到，或者 settings.wallpaper.enabled 没升上来');
+    check(w.box && !w.box.startsWith('0x'), `取景框量出来的尺寸不对（${w.box}），拖动换算的分母会是 1`);
+
+    const axis = w.axis;
+    const other = axis === 'x' ? 'y' : 'x';
+    check(
+      axis === 'x' || axis === 'y',
+      `选不出可拖的轴（余量 x/y = ${w.overflow?.x}/${w.overflow?.y}）`
+        + ' —— 这张图在框里几乎铺满了，自检换个尺寸的图再测，不是功能坏了',
+    );
+
+    if (axis === 'x' || axis === 'y') {
+      // 拖的是「余量的四分之一」，期望位置正好走 25 个百分点。
+      // 差得多说明换算的分母用错了（该用溢出量却用了框的边长）——
+      // 那种错在界面上只是「拖起来有点飘」，读代码看不出来。
+      // 容差按 ±1px 的取整误差折算：余量越小，同样的 1px 折成百分比就越大。
+      const tol = Math.max(2, 100 / Number(w.room) + 0.5);
+      const moved = Number(w.before?.[axis]) - Number(w.after?.[axis]);
+      check(
+        Math.abs(moved - 25) <= tol,
+        `沿 ${axis} 拖了余量的 1/4（${w.dist}px / 共 ${w.room}px），位置应当走 25 个百分点，`
+          + `实际走了 ${moved.toFixed(1)}（容差 ±${tol.toFixed(1)}）`,
+      );
+      check(moved > 0, `往正方向拖，位置该变小（跟拖地图一样是反的），实际 ${w.before?.[axis]} → ${w.after?.[axis]}`);
+    }
+
+    check(
+      Number(w.after?.[other]) === Number(w.before?.[other]),
+      `只拖了 ${axis} 方向，${other} 不该跟着动：${w.before?.[other]} → ${w.after?.[other]}`,
+    );
+    check(
+      typeof w.hint === 'string' && w.hint.includes('偏'),
+      `拖动之后那行人话没跟着变：${JSON.stringify(w.hint)}`,
+    );
+
+    // 真正的落点：防抖 → IPC → state.json
+    let state = null;
+    try {
+      state = JSON.parse(fs.readFileSync(path.join(profileDir, 'state.json'), 'utf8'));
+    } catch (err) {
+      check(false, `读不到存档 ${path.join(profileDir, 'state.json')}：${err?.message ?? String(err)}`);
+    }
+    const saved = state?.settings?.wallpaper ?? null;
+    check(
+      saved && Number(saved[axis]) === Number(w.after?.[axis]),
+      `拖完之后界面上是 ${w.after?.[axis]}，但 state.json 里存的是 ${saved?.[axis]}`
+        + ' —— 没落盘，重开就回到中间了',
+    );
+    check(
+      saved && Number(saved[other]) === Number(w.before?.[other]),
+      `state.json 里的 ${other} 被顺带改了：${saved?.[other]}（期望 ${w.before?.[other]}）`,
+    );
+  }
+}
+
 // ---- 内置数据在（离线开箱可用的前提）----
 check(report.library === 'yes', `内置作品库没加载（library=${report.library}），离线就开不了箱了`);
 
@@ -611,6 +754,20 @@ if (view === 'catchup') {
   console.log(`  补番卡片 ${report.diaryInputs} 张带打分控件`);
   if (expected?.click) {
     console.log(`  点击 ${expected.click} 分 → 界面显示 ${report.diaryLastRating} → 已确认写进 state.json`);
+  }
+}
+if (wp) {
+  const w = report.wpdrag ?? {};
+  if (Number(w.frame) === 1) {
+    console.log(
+      `  取景框 ${w.box} · 图 ${wallSeed ? `${wallSeed.width}×${wallSeed.height}` : '?'}`
+      + ` · 可挪余量 x/y = ${w.overflow?.x}/${w.overflow?.y}（拖 ${w.axis} 轴）`,
+    );
+    console.log(
+      `  拖 ${w.axis} 方向 ${w.dist}px：${w.before?.[w.axis]}% → ${w.after?.[w.axis]}%`
+      + `（期望走 25）· 另一轴 ${w.after?.[w.axis === 'x' ? 'y' : 'x']}% 未动 · 已确认写进 state.json`,
+    );
+    console.log(`  框里那行人话：${w.hint}`);
   }
 }
 console.log(`  截图：${path.relative(root, shot)}（${(fs.statSync(shot).size / 1024).toFixed(0)} KB）`);

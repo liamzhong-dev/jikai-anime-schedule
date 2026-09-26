@@ -6,6 +6,7 @@
  */
 
 import { DEFAULT_THEME, getTheme } from './themes.js';
+import { resolvePosition } from '../core/wallpaper.js';
 
 /** '#0c0e13' 或 'rgba(...)' / 'rgb(...)' 都吃 */
 function toRgb(color) {
@@ -43,12 +44,23 @@ export const DEFAULT_WALLPAPER = {
   blur: 0,           // 模糊半径 px
   brightness: 1,     // 亮度倍数
   scale: 1.04,       // 轻微放大，避免模糊时露出边缘
-  position: 'center',
+  position: 'center', // ⚠️ 老字段：五个关键字。新存档用下面的 x / y
+  x: null,           // 水平位置 0~100（background-position 的语义）
+  y: null,           // 垂直位置 0~100
+  imgW: null,        // 原图像素宽 —— 拖动时把位移换算成百分比要用
+  imgH: null,
   dim: 0.22,         // 压在壁纸上的暗角，保证文字可读
 };
 
 export function normalizeWallpaper(wp) {
   const w = { ...DEFAULT_WALLPAPER, ...(wp ?? {}) };
+  /*
+   * `x / y` 是新的定位方式（0~100，跟 CSS `background-position` 同义），
+   * 老存档里只有 `position` 那个关键字，所以这里要能升上来 —— 规则在
+   * resolvePosition 里（预览框问的是同一个问题，不能让两边各有一套）。
+   * 保留字段而不是「读到就改写」：读函数不该有副作用（写回去的时机由 store 决定）。
+   */
+  const pos = resolvePosition(w);
   return {
     ...w,
     enabled: Boolean(w.enabled && w.dataUrl),
@@ -58,6 +70,8 @@ export function normalizeWallpaper(wp) {
     scale: clamp(w.scale, 1, 3),
     dim: clamp(w.dim, 0, 0.85),
     position: ['center', 'top', 'bottom', 'left', 'right'].includes(w.position) ? w.position : 'center',
+    x: pos.x,
+    y: pos.y,
   };
 }
 
@@ -139,7 +153,8 @@ export function computeThemeVars(themeId, opts = {}) {
     '--wp-blur': `${wp.blur}px`,
     '--wp-brightness': String(wp.brightness),
     '--wp-scale': String(wp.scale),
-    '--wp-position': wp.position,
+    // 两个百分比，跟 CSS background-position 同义 —— 界面上那个可拖的预览框改的就是它俩
+    '--wp-position': `${wp.x}% ${wp.y}%`,
     '--wp-dim': String(wp.dim),
 
     // 覆盖层与原生控件
@@ -147,6 +162,30 @@ export function computeThemeVars(themeId, opts = {}) {
     '--on-cover': '#ffffff',
     '--scheme': theme.scheme,
   };
+}
+
+/**
+ * 要不要做毛玻璃（`backdrop-filter`）。
+ *
+ * ⚠️ 这不是个纯审美开关，是个性能决定。2026-09-26 在真机上量过：
+ * 面板不透明（`panelAlpha = 1`）时，那几层毛玻璃**在视觉上什么都不做**，
+ * 却把「滚番剧库」和「连续输入搜索词」从 60fps 打到 13fps
+ * （同一台机器、同一组场景，只差这一个属性）。
+ *
+ * 机制是：`backdrop-filter` 让元素每帧都要重新模糊一遍身后的背景 ——
+ * 只要它内部的内容在动（哪怕动的是它自己的子容器、背景压根没变），这一层就得重画。
+ * 所以一个铺满的毛玻璃面板 = 每帧一次全屏模糊。
+ *
+ * 而它**有没有意义**只看一件事：身后的东西透不透得出来。
+ * 面板不透明 → 身后完全被盖住 → 模糊白做；壁纸没开 → 身后是纯色 → 模糊也白做。
+ * 两个条件都满足才值得开。
+ *
+ * @param {{ panelAlpha?: number, wallpaper?: object }} opts
+ * @returns {boolean}
+ */
+export function wantsFrost(opts = {}) {
+  const alpha = clamp(opts.panelAlpha ?? 1, 0.3, 1);
+  return alpha < 0.999 && normalizeWallpaper(opts.wallpaper).enabled;
 }
 
 /** 把变量写到 root；非浏览器环境（SSR / 单测）直接跳过 */
@@ -157,6 +196,9 @@ export function applyTheme(themeId, opts = {}) {
   const theme = getTheme(themeId ?? DEFAULT_THEME);
   root.dataset.theme = theme.id;
   root.dataset.scheme = theme.scheme;
+  // 毛玻璃挂在这个属性下面（见 styles.css 里的说明）。写成属性而不是内联
+  // backdrop-filter：那些规则分散在七个选择器上，一处一处覆盖容易漏。
+  root.dataset.frost = wantsFrost(opts) ? 'on' : 'off';
   root.style.colorScheme = theme.scheme;
   for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
   return vars;

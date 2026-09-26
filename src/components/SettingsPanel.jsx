@@ -10,6 +10,7 @@ import { describeUpdate } from '../core/update.js';
 import { prettyKey } from './ShortcutsOverlay.jsx';
 import { platform } from '../platform/index.js';
 import LibraryPanel from './LibraryPanel.jsx';
+import WallpaperFrame from './WallpaperFrame.jsx';
 import {
   CONTACT_EMAIL,
   CONTACT_GITHUB_URL,
@@ -331,19 +332,19 @@ export default function SettingsPanel({
                     format={(v) => `${Math.round(v * 100)}%`}
                   />
                 </Row>
-                <Row label="对齐">
-                  <select
-                    className="select"
-                    value={wall.position ?? 'center'}
+                {/* 原来是五个关键字（居中/顶/底/左/右），中间那一大片位置选不了。
+                    现在换成一个和窗口同比例的取景框，拖到哪儿算哪儿。 */}
+                <Row label="画面位置" hint="框和窗口同比例，拖框里的图决定露出哪一块">
+                  <WallpaperFrame
+                    dataUrl={wp.dataUrl ?? null}
+                    imgW={wall.imgW ?? wp.width ?? null}
+                    imgH={wall.imgH ?? wp.height ?? null}
+                    x={wall.x}
+                    y={wall.y}
+                    position={wall.position}
                     disabled={!wall.enabled}
-                    onChange={(e) => patchSettingSection('wallpaper', { position: e.target.value })}
-                  >
-                    <option value="center">居中</option>
-                    <option value="top">顶部</option>
-                    <option value="bottom">底部</option>
-                    <option value="left">靠左</option>
-                    <option value="right">靠右</option>
-                  </select>
+                    onCommit={(p) => patchSettingSection('wallpaper', p)}
+                  />
                 </Row>
 
                 <Row label="卡片不透明度" hint="调低一点，壁纸就能从卡片里透出来">

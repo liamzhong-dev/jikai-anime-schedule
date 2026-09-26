@@ -182,6 +182,23 @@ if (RETRIED) {
 }
 
 /**
+ * 单实例锁：**在这里拿，不是在文件末尾**。
+ *
+ * ⚠️ 位置很要紧。抢不到锁的进程会在文件末尾 `app.quit()`，可下面那个
+ * 「启动崩溃记忆器」在它之前就写过了 —— 于是「用户本来就开着 → 又启动了一次」
+ * 会被记成「**上次启动没起来就死了**」，然后 `degrade: true` 被写进真实档案，
+ * 下一次真正的启动就变成软件渲染（界面发涩），而用户什么都没做错。
+ *
+ * 本机实测踩到过：自检脚本连着跑了三次，真实档案里的 boot.json 就变成
+ * `{"phase":"started","degrade":true}` —— 哥哥下次打开会发现「今天好像格外卡」，
+ * 而没有任何地方能指向「是那次自检干的」。
+ *
+ * 必须在 `app.setPath('userData')` 之后拿（同一个目录才能算出同一把锁），
+ * 也必须在 ready 之前（这是 Electron 允许的时机）。
+ */
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+/**
  * 启动崩溃记忆器（计划 G5）。
  *
  * ⚠️ 为什么需要它 —— 本机实测（沙盒内外都试过）：不带任何降级时，
@@ -229,11 +246,17 @@ const boot = (() => {
   // 上一次留着 started（没走到 healthy）＝ 上次没起来就死了
   const crashedLastTime = prev.phase === 'started';
   const shouldDegrade = crashedLastTime || prev.degrade === true;
-  if (crashedLastTime) write({ degrade: true });
-  write({ phase: 'started' });
+  /*
+   * ⚠️ 抢不到锁就**一个字都不许写**：这个进程马上会 quit，它写下的东西
+   * 会被下一次真正的启动当成「上次崩了」的证据。见上面单实例锁那一段。
+   */
+  if (hasSingleInstanceLock) {
+    if (crashedLastTime) write({ degrade: true });
+    write({ phase: 'started' });
+  }
 
   return {
-    shouldDegrade,
+    shouldDegrade: shouldDegrade && hasSingleInstanceLock,
     crashedLastTime,
     /** 窗口真的显示出来了调用一次，把标记抹掉 */
     healthy: () => write({ phase: 'healthy' }),
@@ -486,6 +509,247 @@ function createWindow() {
                box.dispatchEvent(new Event('input', { bubbles: true }));
                await new Promise((r) => setTimeout(r, 300));
              }
+
+             /*
+              * ---------- 壁纸取景框拖动：JIKAI_SMOKE_WPDRAG=1 ----------
+              *
+              * 这条链是 设置面板 → 指针拖动 → 像素换算 → store → 防抖落盘 → IPC → 磁盘。
+              * 除了「框画出来了」，后面每一环**都只在真壳里存在**：单测和 SSR 只能验到
+              * 换算是对的、框渲染出来了，验不了「真的按住拖一下，位置会不会落盘」。
+              * 合成 pointer 事件在真 Chromium 里跑得通，所以这一段能真的走到底 ——
+              * 桌面端专属的东西，只能由桌面端自己回答。
+              *
+              * 走「,」快捷键打开设置，不是去点某个按钮：跟用户按一下是同一件事，
+              * 也顺带把快捷键那条路一起验了。
+              */
+             const WPDRAG = ${JSON.stringify(process.env.JIKAI_SMOKE_WPDRAG || '')};
+             let wpdrag = null;
+             if (WPDRAG) {
+               const nap = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+               const attr = function (el, a) { const v = el && el.getAttribute(a); return v == null || v === '' ? null : Number(v); };
+               window.dispatchEvent(new KeyboardEvent('keydown', { key: ',', bubbles: true }));
+               await nap(600);
+               const frame = document.querySelector('[data-wp-frame]');
+               if (!frame) {
+                 wpdrag = { frame: 0 };
+               } else {
+                 const r = frame.getBoundingClientRect();
+                 const img = (frame.getAttribute('data-wp-img') || '').split('x').map(Number);
+                 const before = { x: attr(frame, 'data-wp-x'), y: attr(frame, 'data-wp-y') };
+                 const off = frame.classList.contains('is-off');
+                 /*
+                  * 照着原图比例算出两个方向各还剩多少余量 —— 只有有余量的那个方向拖得动。
+                  * 余量太小（这张图在框里几乎铺满）就**不拖**：宁可让脚本报「选不出可拖的轴」，
+                  * 也不要拖出一个被取整误差淹没的数字，然后让人去改本来正确的换算。
+                  */
+                 let over = { x: 0, y: 0 };
+                 if (img.length === 2 && img[0] > 0 && img[1] > 0) {
+                   const sc = Math.max(r.width / img[0], r.height / img[1]);
+                   over = {
+                     x: Math.max(0, Math.round((img[0] * sc - r.width) * 10) / 10),
+                     y: Math.max(0, Math.round((img[1] * sc - r.height) * 10) / 10),
+                   };
+                 }
+                 const room = Math.max(over.x, over.y);
+                 const dragAxis = room < 10 ? 'none' : (over.y > over.x ? 'y' : 'x');
+                 // 拖「余量的四分之一」：期望位置正好走 25 个百分点。
+                 // 不留最小像素数 —— 留了的话小余量下会拖过头，断言就变成假红。
+                 const dist = dragAxis === 'none' ? 0 : Math.round(room * 25) / 100;
+                 const vx = dragAxis === 'x' ? dist : 0;
+                 const vy = dragAxis === 'y' ? dist : 0;
+                 const at = function (dx, dy) {
+                   return {
+                     bubbles: true, cancelable: true, composed: true,
+                     pointerId: 1, pointerType: 'mouse', isPrimary: true,
+                     button: 0, buttons: 1,
+                     clientX: r.left + r.width / 2 + dx,
+                     clientY: r.top + r.height / 2 + dy,
+                   };
+                 };
+                 if (dragAxis !== 'none') {
+                   frame.dispatchEvent(new PointerEvent('pointerdown', at(0, 0)));
+                   await nap(80);
+                   window.dispatchEvent(new PointerEvent('pointermove', at(vx, vy)));
+                   await nap(80);
+                   window.dispatchEvent(new PointerEvent('pointerup', at(vx, vy)));
+                   await nap(1400); // 防抖 400ms 落盘，留足余量
+                 }
+                 wpdrag = {
+                   frame: 1,
+                   off: off,
+                   box: Math.round(r.width) + 'x' + Math.round(r.height),
+                   axis: dragAxis,
+                   room: room,
+                   dist: dist,
+                   overflow: over,
+                   before: before,
+                   after: { x: attr(frame, 'data-wp-x'), y: attr(frame, 'data-wp-y') },
+                   hint: (document.querySelector('[data-wp-hint]') || {}).textContent || null,
+                 };
+                 // 收拾干净：后面几组场景不该在设置抽屉底下跑
+                 const closer = document.querySelector('.settings .window__btn');
+                 if (closer) closer.click();
+                 await nap(250);
+               }
+             }
+
+             /*
+              * ---------- 性能测量：JIKAI_PERF=1 时才跑 ----------
+              *
+              * 「卡」是个感觉，没法直接断言，但可以量：主线程一忙，requestAnimationFrame
+              * 的间隔就会被撑开。所以这里在几种典型操作期间采帧间隔，再看长任务(>50ms)的
+              * 条数与总时长。两处细节是必须的：
+              *
+              *   ① **必须先量、再改**。凭「哪里看着慢」去优化，改完也不知道有没有用。
+              *   ② **要做 A/B**：跑完一遍之后把所有 backdrop-filter 关掉，同一组场景再跑
+              *      一遍。毛玻璃（尤其是好几层叠在一起）值不值这些帧，只有这组对照答得了，
+              *      读代码读不出来。
+              *
+              * 注意这整段是塞进 executeJavaScript 的字符串：里面**不能出现反引号**，
+              * 模板串会被外层提前截断，而报错长得像「语法错误」，看不出是嵌套问题。
+              */
+             const PERF = ${JSON.stringify(process.env.JIKAI_PERF || '')};
+             let perf = null;
+             if (PERF) {
+               const scenarios = {};
+               const longTasks = [];
+               let po = null;
+               try {
+                 po = new PerformanceObserver(function (l) {
+                   const es = l.getEntries();
+                   for (let i = 0; i < es.length; i += 1) longTasks.push(es[i].duration);
+                 });
+                 po.observe({ entryTypes: ['longtask'] });
+               } catch (e) { po = null; }
+
+               const stat = function (arr) {
+                 if (!arr.length) return { frames: 0, p50: 0, p95: 0, max: 0 };
+                 const s = arr.slice().sort(function (a, b) { return a - b; });
+                 const at = function (p) { return Number(s[Math.min(s.length - 1, Math.floor(s.length * p))].toFixed(2)); };
+                 return { frames: s.length, p50: at(0.5), p95: at(0.95), max: Number(s[s.length - 1].toFixed(2)) };
+               };
+
+               const measure = async function (name, fn) {
+                 longTasks.length = 0;
+                 const gaps = [];
+                 let alive = true;
+                 let last = performance.now();
+                 const step = function () {
+                   const t = performance.now();
+                   gaps.push(t - last);
+                   last = t;
+                   if (alive) requestAnimationFrame(step);
+                 };
+                 requestAnimationFrame(step);
+                 const t0 = performance.now();
+                 await fn();
+                 await new Promise(function (r) { setTimeout(r, 160); });
+                 alive = false;
+                 const wall = Math.round(performance.now() - t0);
+                 const long = longTasks.slice();
+                 const sum = long.reduce(function (a, b) { return a + b; }, 0);
+                 scenarios[name] = Object.assign(stat(gaps), {
+                   wall: wall,
+                   longTasks: long.length,
+                   longSum: Number(sum.toFixed(1)),
+                   longMax: long.length ? Number(Math.max.apply(null, long).toFixed(1)) : 0,
+                 });
+               };
+
+               const pbox = document.querySelector('[data-search-input]');
+               const pset = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+               const WORDS = ['鬼', '鬼灭', '鬼灭之', '鬼灭之刃', '进', '进击', '进击的', '进击的巨',
+                 '刀', '刀剑', '刀剑神', '刀剑神域', '间', '间谍', '间谍过', '赛', '赛马', '赛马娘'];
+               const typeOnce = async function () {
+                 if (!pbox) return;
+                 for (let i = 0; i < WORDS.length; i += 1) {
+                   pset.call(pbox, WORDS[i]);
+                   pbox.dispatchEvent(new Event('input', { bubbles: true }));
+                   await new Promise(function (r) { requestAnimationFrame(r); });
+                 }
+                 pset.call(pbox, '');
+                 pbox.dispatchEvent(new Event('input', { bubbles: true }));
+               };
+
+               const pgrid = document.querySelector('.cardgrid');
+               const pscroll = pgrid ? (pgrid.closest('.window__body') || pgrid.parentElement) : null;
+               const scrollOnce = async function () {
+                 if (!pscroll) return;
+                 for (let i = 0; i < 26; i += 1) {
+                   pscroll.scrollTop = i * 46;
+                   await new Promise(function (r) { requestAnimationFrame(r); });
+                 }
+                 pscroll.scrollTop = 0;
+                 await new Promise(function (r) { requestAnimationFrame(r); });
+               };
+
+               await measure('idle', function () { return new Promise(function (r) { setTimeout(r, 1200); }); });
+               await measure('scroll', scrollOnce);
+               await measure('typing', typeOnce);
+
+               /* 详情抽屉：点一次标题把抽屉打开，滚它的内容区，再关掉 */
+               const drawerOnce = async function () {
+                 const t = document.querySelector('.card__title');
+                 if (t) t.click();
+                 await new Promise(function (r) { setTimeout(r, 450); });
+                 const body = document.querySelector('.drawer__body');
+                 if (body) {
+                   for (let i = 0; i < 22; i += 1) {
+                     body.scrollTop = i * 44;
+                     await new Promise(function (r) { requestAnimationFrame(r); });
+                   }
+                 }
+                 // ⚠️ 必须关掉再走：留着抽屉的话，后面那几组「滚动 / 输入」
+                 // 全都是在遮罩底下跑的，量出来的根本不是同一件事。
+                 const close = document.querySelector('.drawer__close');
+                 if (close) close.click();
+                 await new Promise(function (r) { setTimeout(r, 300); });
+               };
+
+               await measure('idle', function () { return new Promise(function (r) { setTimeout(r, 1200); }); });
+               await measure('scroll', scrollOnce);
+               await measure('typing', typeOnce);
+               await measure('drawer', drawerOnce);
+
+               /*
+                 A/B 组。全关那条回答「毛玻璃一共值多少帧」，
+                 另外两条回答「是哪一层的锅」—— 只关窗口卡片、只关侧栏顶栏。
+                 不分开量的话，修的时候只能整片砍掉，观感白白牺牲。
+                 （注意这段注释里不能出现反引号：外层就是反引号模板串，
+                   多一个反引号会把字符串劈成两半，拼出 字符串*字符串 这种合法但错的
+                   表达式，结果是 SMOKE_OK NaN —— 连语法检查都发现不了。）
+               */
+               const frostWas = document.documentElement.dataset.frost;
+               const VARIANTS = [
+                 { suffix: '_frostOn', attr: 'on', css: '' },
+                 { suffix: '_noBlur', attr: null, css: '*{backdrop-filter:none !important;}' },
+               ];
+               for (let vi = 0; vi < VARIANTS.length; vi += 1) {
+                 const v = VARIANTS[vi];
+                 const tag = document.createElement('style');
+                 tag.textContent = v.css;
+                 if (v.css) document.head.appendChild(tag);
+                 if (v.attr) document.documentElement.dataset.frost = v.attr;
+                 await new Promise(function (r) { setTimeout(r, 220); });
+                 await measure('scroll' + v.suffix, scrollOnce);
+                 await measure('typing' + v.suffix, typeOnce);
+                 await measure('drawer' + v.suffix, drawerOnce);
+                 if (tag.parentNode) tag.remove();
+                 document.documentElement.dataset.frost = frostWas;
+                 await new Promise(function (r) { setTimeout(r, 220); });
+               }
+
+               if (po) po.disconnect();
+               perf = Object.assign({
+                 nodes: document.querySelectorAll('*').length,
+                 covers: document.querySelectorAll('.cover').length,
+                 cards: document.querySelectorAll('.card').length,
+                 // 毛玻璃到底开没开 —— 这是「卡顿修好了没有」的**结构性**判据：
+                 // 不可见的那几层该关掉，而不是靠帧数去倒推（帧数随机器变，属性不随）。
+                 frost: document.documentElement.dataset.frost || '(没设)',
+               }, scenarios);
+             }
+
              return JSON.stringify({
              view: (globalThis.location?.hash || '').replace(/^#\\//, '').split('?')[0],
              rows: document.querySelectorAll('.tier-row__label').length,
@@ -540,12 +804,25 @@ function createWindow() {
              qsearchReady: document.querySelector('[data-qsearch-panel]')?.getAttribute('data-qsearch-ready') ?? null,
              qsearchItems: document.querySelectorAll('[data-qsearch-item]').length,
              qsearchNames: [...document.querySelectorAll('[data-qsearch-item] .qsearch__name')].map((e) => e.textContent),
+             wpdrag: wpdrag,
+             perf: perf,
            });
           })()`,
         ).catch((e) => `{"error":${JSON.stringify(String(e?.message ?? e))}}`);
         const img = await win.webContents.capturePage();
         fs.writeFileSync(SMOKE_PNG, img.toPNG());
-        console.log(`SMOKE_OK ${probe}`);
+        /*
+         * ⚠️ 这一层判断不是多余的：探针字符串本身有问题时（比如注释里混进反引号，
+         * 把模板串劈成两半），`executeJavaScript` 会**成功返回一个数字**（字符串相乘
+         * 得到 NaN），于是日志是 `SMOKE_OK NaN`，看着像探针坏了却指不到原因。
+         * 而 `node --check` 也拦不住 —— 劈出来的
+         * `字符串 * 字符串` 是合法 JS。只有在这里卡一道「必须是字符串」才说得清。
+         */
+        if (typeof probe !== 'string') {
+          console.log(`SMOKE_FAIL 探针没有返回字符串（拿到 ${typeof probe}：${String(probe)}）—— 检查探针源码里有没有多余的反引号`);
+        } else {
+          console.log(`SMOKE_OK ${probe}`);
+        }
       } catch (err) {
         console.log(`SMOKE_FAIL ${err?.message ?? String(err)}`);
       } finally {
@@ -1151,11 +1428,25 @@ async function runIpcSmoke() {
 
 // ---------- 启动 ----------
 
-if (!app.requestSingleInstanceLock()) {
+if (!hasSingleInstanceLock) {
   if (CRASH_TEST && process.env.JIKAI_CRASH_MARKER) {
     try {
       fs.appendFileSync(process.env.JIKAI_CRASH_MARKER, 'second-instance-quit\n', 'utf8');
     } catch { /* 测试钩子 */ }
+  }
+  /*
+   * 自检时必须**说清为什么一个字都没打印就走了**。
+   * 不说的话，脚本只会报「桌面壳没有打出 SMOKE_OK」，把人往「窗口起不来」
+   * 「渲染进程被杀了」那个方向带 —— 而真相是「你有一份还开着的程序」，
+   * 只要关掉再来一次就好。本机实测被这条误导过一轮。
+   */
+  if (SMOKE_PNG) {
+    console.log('SMOKE_FAIL 已有实例在运行（单实例锁被占）：自检前先把开着的程序关掉');
+  } else if (IPC_SMOKE) {
+    // 报成一条 FAIL 而不是「0 条结果」——0 条会被脚本算成「全都过了」，
+    // 那是最坏的一种假绿：什么都没验，报表却是绿的。
+    console.log('FAIL 单实例锁被占：已有实例在运行，冒烟前先把它关掉');
+    console.log('IPC_SMOKE_END {"total":1,"failed":1}');
   }
   app.quit();
 } else {
