@@ -1314,3 +1314,36 @@ test('TierList / 日记 / 历程里的字号跟着 --fs 走', async () => {
     `这几处不该有写死的字号（改成 calc(原来的px * var(--fs, 1))）：\n${hard.map((m) => m[0].trim()).join('\n')}`,
   );
 });
+
+// ===================== 长图编辑器：画布预览缩放 =====================
+// 这一组守的是「整幅看得见」—— 画布在不在、块数对不对都验不出它还得横着拖。
+
+test('长图画布：默认就是「适应」，倍率写在包层上', async () => {
+  const html = await renderReport();
+  assert.ok(html.includes('data-report-fit="1.00"'), '没量到尺寸之前按原尺寸画，别拿 0 去乘把画布塌掉');
+  assert.ok(html.includes('data-report-zoom-pct="100"'), '界面上要写出现在是百分之多少');
+  const fitBtn = html.match(/<button[^>]*data-report-zoom-fit="1"[^>]*>/);
+  assert.ok(fitBtn, '没找到「适应」按钮');
+  assert.ok(fitBtn[0].includes('is-on'), `默认档是「适应」，它得画成选中的样子：${fitBtn[0]}`);
+  for (const k of ['data-report-zoom-out', 'data-report-zoom-in', 'data-report-zoom-full']) {
+    assert.ok(html.includes(k), `缩放控件少了 ${k} —— 只能「适应」一种档的话，想看细节就没路了`);
+  }
+});
+
+test('长图画布：给定倍率时按它缩，且不再是「适应」', async () => {
+  const html = await renderReport({ zoom: 0.5 });
+  assert.ok(html.includes('data-report-fit="0.50"'), '包层上要写明现在的倍率，桌面端自检读这个');
+  assert.ok(html.includes('data-report-zoom-pct="50"'));
+  assert.ok(html.includes('scale(0.5)'), '缩放要真的落到样式上');
+  const fitBtn = /<button[^>]*data-report-zoom-fit="1"[^>]*>/;
+  assert.equal(fitBtn.test(html) && /is-on/.test(html.match(fitBtn)[0]), false, '手动定了倍率，「适应」就不该还是选中的');
+});
+
+test('长图画布：缩放绝不能落在画布自己身上 —— 导出抓的是它的 outerHTML', async () => {
+  const html = await renderReport({ zoom: 0.5 });
+  const tag = html.match(/<div class="report__canvas"[^>]*>/);
+  assert.ok(tag, '没找到画布元素');
+  const style = /style="([^"]*)"/.exec(tag[0])?.[1] ?? '';
+  assert.equal(/transform|scale\(/.test(style), false, `画布自己带上了 transform（style="${style}"）—— 导出会把缩放一起带出去，那比看不全严重得多`);
+  assert.ok(/width:\s*1220px/.test(style), `画布的逻辑宽度该照旧写在它自己身上（style="${style}"）`);
+});

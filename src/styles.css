@@ -1864,11 +1864,49 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
 }
 .report__stage-head .report__ghost { margin-left: auto; }
 
+/*
+ * ⚠️ 纵向滚动条**常驻**（`scroll` 而不是 `auto`）。
+ * 用 auto 的话它出不出现取决于内容高度，而内容高度又取决于缩放倍率，
+ * 倍率又是拿「减去滚动条之后的可视宽度」算出来的 —— 三者互相决定，
+ * 结果是画布在「刚好塞得进」和「差 4px 溢出」之间来回抖：
+ * 缩 → 变矮 → 滚动条消失 → 可视宽度变大 → 放大一格 → 又变高 → 滚动条回来。
+ * 常驻之后可视宽度是个常量，这个环就断了。
+ */
 .report__scroll {
-  overflow: auto; padding: 12px;
+  overflow-x: auto; overflow-y: scroll; padding: 12px;
   border: 1px solid var(--line); border-radius: var(--r);
   background: var(--bg-2);
   max-height: 70vh;
+}
+
+/*
+ * 预览缩放的两层包裹。
+ *
+ * 为什么要两层：`transform` **不改变布局**，光缩不撑的话，滚动区还是按原尺寸算高度 ——
+ * 画布会盖到底下的导出栏上，而滚动条只到「原来那么长」，底下那截永远滚不到。
+ * 所以外层按缩放后的尺寸占位、内层只负责缩。
+ *
+ * ⚠️ 缩放**绝不能落在 `.report__canvas` 自己身上**：导出抓的是它的 outerHTML，
+ * 带上一个 scale 的话，导出图就跟着缩了 —— 那才是真的「预览不等于产物」。
+ */
+.report__fit { margin: 0 auto; }
+.report__fit-inner { transform-origin: top left; }
+.report__fit .report__canvas { margin: 0; }
+
+/* 缩放控件：跟「清空重来」挤在同一行，靠后者的 margin-left:auto 推到两端 */
+.report__zoom { display: flex; align-items: center; gap: 4px; }
+.report__zbtn {
+  min-width: 26px; padding: 3px 6px; font-size: 11px; cursor: pointer;
+  border-radius: var(--r-sm); border: 1px solid var(--line-2);
+  background: var(--panel); color: var(--text-2);
+}
+.report__zbtn:hover { border-color: var(--accent); color: var(--accent); }
+.report__zbtn.is-on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft, var(--panel)); }
+/* 百分比会跳位（100% → 95%），宽度定住免得整行跟着抖 */
+.report__zoom-val {
+  min-width: 40px; text-align: center;
+  font-size: 11px; color: var(--text-3);
+  font-variant-numeric: tabular-nums;
 }
 .report__canvas {
   position: relative; margin: 0 auto; padding: 56px;

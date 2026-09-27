@@ -6,7 +6,10 @@ import {
   BLOCK_TYPES,
   WALL_DEFAULT_COUNT,
   WALL_MAX,
+  ZOOM,
   autoWallSubjects,
+  clampZoom,
+  fitZoom,
   isBlankBlock,
   reportStats,
 } from '../core/report.js';
@@ -38,6 +41,16 @@ import {
 /** 拖拽启动阈值：没超过就不算拖，否则「点一下选中」会被拖拽吃掉 */
 const DRAG_THRESHOLD = 5;
 
+/**
+ * 同构的 layout effect。
+ *
+ * 画布高度要量出来才能把缩放后的占位撑对，而这件事必须在浏览器画出来**之前**
+ * 做完，否则每次换季度都会先闪一帧「没缩放的巨幅」。但 `useLayoutEffect`
+ * 在服务端渲染时会警告 —— SSR 断言就是这个项目的主要测试手段，不能让它被警告淹没。
+ * 所以在模块加载时就按有没有 `window` 选一个，而不是在组件里条件调用 hook。
+ */
+const useIsoLayoutEffect = typeof globalThis.window !== 'undefined' ? React.useLayoutEffect : React.useEffect;
+
 export default function ReportView({
   report,
   seasonKey = '',
@@ -51,6 +64,8 @@ export default function ReportView({
   onKeyword: onKeywordProp,
   selectedId: selectedProp,
   onSelectedId: onSelectedIdProp,
+  zoom: zoomProp,
+  onZoom: onZoomProp,
   onAddBlock,
   onRemoveBlock,
   onPatchBlock,
@@ -68,9 +83,23 @@ export default function ReportView({
   const selectedId = selectedProp !== undefined ? selectedProp : selectedState;
   const setSelectedId = onSelectedIdProp ?? setSelectedState;
 
+  /**
+   * 预览倍率。`'fit'` 是「整幅缩到看得见」，数字是用户自己定的档。
+   *
+   * 做成受控优先（`zoomProp` / `onZoomProp`）跟 `keyword` 同理：
+   * 「现在缩到了多少」是能被断言的，藏在组件内部 state 里就验不了。
+   */
+  const [zoomState, setZoomState] = useState('fit');
+  const zoomMode = zoomProp !== undefined ? zoomProp : zoomState;
+  const setZoomMode = onZoomProp ?? setZoomState;
+
   const canvasRef = useRef(null);
+  const scrollRef = useRef(null);
   const dragRef = useRef(null);
   const [drag, setDrag] = useState(null); // { id, from, to }
+
+  /** 量出来的「适应」倍率与画布真实高度。没量到之前按 1 画，不缩 */
+  const [fit, setFit] = useState({ scale: 1, h: 0 });
 
   const blocks = report?.blocks ?? [];
   const stats = useMemo(() => reportStats(report), [report]);
@@ -96,6 +125,43 @@ export default function ReportView({
   }, [pool, keyword, blocks]);
 
   const wallTarget = selected?.type === 'wall' ? selected : null;
+
+  /**
+   * 量「适应」倍率。
+   *
+   * `offsetWidth/offsetHeight` 是**布局**尺寸，正好不受 `transform` 影响 ——
+   * 所以把画布缩放之后也不会自己把自己量小，不会来回抖。
+   * 两个尺寸都靠 ResizeObserver 跟着：窗口拉宽、加块减块都会让它们变。
+   *
+   * ⚠️ 可用宽度要扣掉滚动区的左右内边距，不然算出来的倍率会让画布**刚好**溢出
+   * 一点点 —— 横向滚动条会回来，而用户要的就是它别回来。
+   */
+  useIsoLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const canvas = canvasRef.current;
+    if (!scroll || !canvas) return undefined;
+
+    const measure = () => {
+      const cs = globalThis.getComputedStyle?.(scroll);
+      const pad = cs ? (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) : 0;
+      const avail = (scroll.clientWidth || 0) - pad;
+      const next = { scale: fitZoom(avail, canvas.offsetWidth), h: canvas.offsetHeight || 0 };
+      setFit((prev) => (
+        Math.abs(prev.scale - next.scale) < 0.001 && Math.abs(prev.h - next.h) < 1 ? prev : next
+      ));
+    };
+
+    measure();
+    const RO = globalThis.ResizeObserver;
+    if (!RO) return undefined;
+    const ro = new RO(measure);
+    ro.observe(scroll);
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [report?.width, blocks.length]);
+
+  const scale = zoomMode === 'fit' ? fit.scale : clampZoom(zoomMode);
+  const canvasW = report?.width ?? 0;
 
   /**
    * 拖拽排序（纵向）。
@@ -192,6 +258,51 @@ export default function ReportView({
             {stats.blocks} 块 · 涉及 {stats.works} 部作品
           </span>
           <span className="report__dim">{seasonLabel || seasonKey} · 宽 {report?.width ?? 0}px</span>
+
+          {/* 缩放控件：默认「适应」，也就是整幅缩到横向不用滚。
+              想看细节再点 1:1 —— 那才是原始尺寸，放大超过它没有意义。 */}
+          <div className="report__zoom">
+            <button
+              type="button"
+              className="report__zbtn"
+              data-report-zoom-out="1"
+              title="缩小一点"
+              onClick={() => setZoomMode(clampZoom(scale - ZOOM.step))}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className={`report__zbtn${zoomMode === 'fit' ? ' is-on' : ''}`}
+              data-report-zoom-fit="1"
+              title="整幅缩到看得见"
+              onClick={() => setZoomMode('fit')}
+            >
+              适应
+            </button>
+            <span className="report__zoom-val" data-report-zoom-pct={Math.round(scale * 100)}>
+              {Math.round(scale * 100)}%
+            </span>
+            <button
+              type="button"
+              className="report__zbtn"
+              data-report-zoom-in="1"
+              title="放大一点"
+              onClick={() => setZoomMode(clampZoom(scale + ZOOM.step))}
+            >
+              ＋
+            </button>
+            <button
+              type="button"
+              className="report__zbtn"
+              data-report-zoom-full="1"
+              title="原始尺寸"
+              onClick={() => setZoomMode(1)}
+            >
+              1:1
+            </button>
+          </div>
+
           {blocks.length ? (
             <button type="button" className="report__ghost" data-report-reset="1" onClick={() => onReset?.()}>
               清空重来
@@ -200,48 +311,66 @@ export default function ReportView({
         </div>
 
         {/* 画布本身：1220px 是**逻辑宽度**，外面用 CSS 缩放去适配窗口。
-            ⚠️ 缩放只能用 transform，不能用 zoom 改宽度 —— 排版一改，预览就不等于产物了。 */}
-        <div className="report__scroll">
+            ⚠️ 缩放只能用 transform，不能用 zoom 改宽度 —— 排版一改，预览就不等于产物了。
+            ⚠️ 而且 transform 只能落在**画布外面这层**：导出抓的是 `.report__canvas`
+            的 outerHTML，缩放要是写在它身上，导出图就会跟着缩 —— 那才是真的走样。 */}
+        <div className="report__scroll" ref={scrollRef}>
+          {/* 外层撑缩放后的占位（transform 不改变布局，不撑的话画布会盖住下面的导出栏） */}
           <div
-            className="report__canvas"
-            data-report-canvas="1"
-            data-report-canvas-width={report?.width ?? 0}
-            style={{ width: `${report?.width ?? 1220}px` }}
-            ref={canvasRef}
+            className="report__fit"
+            data-report-fit={scale.toFixed(2)}
+            style={fit.h ? { width: `${canvasW * scale}px`, height: `${fit.h * scale}px` } : undefined}
           >
-            {blocks.map((b, i) => (
-              <ReportBlock
-                key={b.id}
-                block={b}
-                selected={b.id === selectedId}
-                lookup={lookup}
-                dragging={drag?.id === b.id}
-                dropBefore={Boolean(drag && drag.id !== b.id && drag.to === i)}
-                onSelect={setSelectedId}
-                onRemove={onRemoveBlock}
-                onDragStart={onGripDown}
-              />
-            ))}
+            {/* 内层只负责缩。宽度保持逻辑宽度，高度让内容撑 */}
+            <div
+              className="report__fit-inner"
+              style={{
+                width: `${canvasW || 1220}px`,
+                ...(scale === 1 ? {} : { transform: `scale(${scale})`, transformOrigin: 'top left' }),
+              }}
+            >
+              <div
+                className="report__canvas"
+                data-report-canvas="1"
+                data-report-canvas-width={report?.width ?? 0}
+                style={{ width: `${report?.width ?? 1220}px` }}
+                ref={canvasRef}
+              >
+              {blocks.map((b, i) => (
+                <ReportBlock
+                  key={b.id}
+                  block={b}
+                  selected={b.id === selectedId}
+                  lookup={lookup}
+                  dragging={drag?.id === b.id}
+                  dropBefore={Boolean(drag && drag.id !== b.id && drag.to === i)}
+                  onSelect={setSelectedId}
+                  onRemove={onRemoveBlock}
+                  onDragStart={onGripDown}
+                />
+              ))}
 
-            {blocks.length === 0 ? (
-              <div className="report__empty" data-report-empty="1">
-                <p className="report__empty-title">还是一张空画布</p>
-                <p className="report__dim">从下面挑一块开始 —— 一般是先放个标题，再放封面墙</p>
-                <div className="report__add-row">
-                  {BLOCK_TYPES.map((t) => (
-                    <button
-                      type="button"
-                      key={t}
-                      className="report__add"
-                      data-report-add={t}
-                      onClick={() => onAddBlock?.(t)}
-                    >
-                      ＋ {BLOCK_LABELS[t]}
-                    </button>
-                  ))}
+              {blocks.length === 0 ? (
+                <div className="report__empty" data-report-empty="1">
+                  <p className="report__empty-title">还是一张空画布</p>
+                  <p className="report__dim">从下面挑一块开始 —— 一般是先放个标题，再放封面墙</p>
+                  <div className="report__add-row">
+                    {BLOCK_TYPES.map((t) => (
+                      <button
+                        type="button"
+                        key={t}
+                        className="report__add"
+                        data-report-add={t}
+                        onClick={() => onAddBlock?.(t)}
+                      >
+                        ＋ {BLOCK_LABELS[t]}
+                      </button>
+                    ))}
+                  </div>
                 </div>
+              ) : null}
               </div>
-            ) : null}
+            </div>
           </div>
         </div>
 

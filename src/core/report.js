@@ -65,6 +65,17 @@ export const TITLE_MAX = 60;
 export const SUBTITLE_MAX = 80;
 export const BODY_MAX = 1200;
 
+/**
+ * 编辑器里画布的预览倍率。
+ *
+ * ⚠️ 这一档**只作用于预览**：画布的逻辑宽度依然是 `REPORT_WIDTH` 那一套，
+ * 缩放是把「画好的那一整张」缩着看，不是把排版改小 —— 否则预览就不等于产物了。
+ * 所以实现上只能 `transform: scale()`，不许去改画布自己的 width / 字号。
+ *
+ * 上限取 1：放大超过原尺寸没有意义（想看清细节看导出图），还白白多一层缩放采样。
+ */
+export const ZOOM = { min: 0.25, max: 1, step: 0.05, def: 1 };
+
 /** 封面墙 */
 export const WALL_COLUMNS = 6;
 export const WALL_COLUMNS_MIN = 2;
@@ -113,6 +124,52 @@ function idList(v, max) {
     if (out.length >= max) break;
   }
   return out;
+}
+
+// ===================== 预览缩放 =====================
+
+/**
+ * 夹一个预览倍率。
+ *
+ * `null` / 空串 / 非数字一律回默认 —— 这跟 `clampFontScale` 是同一个坑：
+ * `Number(null) === 0`，不提前挡住的话「没设」会被当成「缩到最小」。
+ * 取整到 `step` 的整数倍，好让界面上那个百分比是整的五格一跳（25%、30%…），
+ * 而不是 0.37 这种滑到哪儿算哪儿的数。
+ */
+export function clampZoom(v) {
+  if (v === null || v === undefined || v === '') return ZOOM.def;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return ZOOM.def;
+  const snapped = Math.round(n / ZOOM.step) * ZOOM.step;
+  // 取整之后可能顶出上限（0.99 → 1.00 没问题，但 1.02 → 1.00 之后还得再夹一次）
+  return Math.min(ZOOM.max, Math.max(ZOOM.min, Number(snapped.toFixed(4))));
+}
+
+/**
+ * 按可用宽度算「整幅看得见」的倍率。
+ *
+ * `avail` 是滚动区的可视宽度（已经扣掉内边距），`canvasW` 是画布的逻辑宽度。
+ * 两者任何一个量不到（0 / 非数字）就返回 1 —— 宁可照原尺寸画，
+ * 也不要用 0 或 NaN 去乘，那种时候画布会整个塌掉、还看不出是缩放干的。
+ *
+ * 上限 1：**小窗口才需要缩小，大窗口不放大**。放大只会让滚动条又回来。
+ */
+export function fitZoom(avail, canvasW) {
+  const a = Number(avail);
+  const w = Number(canvasW);
+  if (!Number.isFinite(a) || !Number.isFinite(w) || a <= 0 || w <= 0) return ZOOM.def;
+  const raw = Math.min(ZOOM.max, a / w);
+  /*
+   * ⚠️ 这里是**向下**取整，不是四舍五入。
+   * 向上哪怕只多一点点，缩完也比可用宽度宽那么几 px，横向滚动条就又回来了 ——
+   * 而用户要的恰恰是它别回来。「稍微留点白」比「多一条滚动条」好得多。
+   *
+   * 粒度取 0.01 而不是 `ZOOM.step`（0.05）：那一格在 1220px 的画布上是 61px，
+   * 白白空掉一大条。手动档要整格是因为界面上得显示「55%」这种整齐的数，
+   * 自动档没这个需要 —— 它是算出来的，用户看的是「是不是全看见了」。
+   */
+  const floored = Math.floor(raw * 100) / 100;
+  return Math.min(ZOOM.max, Math.max(ZOOM.min, floored));
 }
 
 // ===================== 块 =====================

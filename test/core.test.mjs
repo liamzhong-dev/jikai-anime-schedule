@@ -17,6 +17,7 @@ import {
   CARD_MIN, FONT_SCALE, clampCardMin, clampFontScale, fitRect,
   COVER_SCALE, clampCoverScale, coverScaleFromCardMin,
 } from '../src/core/layout.js';
+import { ZOOM, clampZoom, fitZoom } from '../src/core/report.js';
 import { bangumiIdOf, mapItem, availableSeasons, currentSeason } from '../src/data/bangumiData.js';
 import { buildMockArchive, buildMockSeason, buildMockUserState } from './fixtures/fictional-data.js';
 
@@ -645,4 +646,41 @@ test('封面倍率：直接给倍率时把 0 和负数挡在门外', () => {
   }
   assert.equal(clampCoverScale(1.5), 1.5);
   assert.equal(clampCoverScale(99), COVER_SCALE.max);
+});
+
+test('长图预览倍率：上限是 1，放大没有意义', () => {
+  assert.equal(ZOOM.max, 1, '放大超过原尺寸只会让滚动条回来 —— 想看细节看导出图');
+  assert.equal(clampZoom(1.4), 1);
+  assert.equal(clampZoom(0.1), ZOOM.min);
+  // 「没设」不等于「缩到最小」：Number(null) === 0 那个坑
+  for (const empty of [null, undefined, '', 'abc', NaN]) {
+    assert.equal(clampZoom(empty), ZOOM.def, `clampZoom(${JSON.stringify(empty)}) 应当是默认值`);
+  }
+  // 取整不能顶出上限：0.98 → 1.00 可以，1.03 → 1.00 之后还得在范围内
+  for (const v of [0.26, 0.37, 0.51, 0.74, 0.98, 1.03, 5]) {
+    const got = clampZoom(v);
+    assert.ok(got >= ZOOM.min && got <= ZOOM.max, `clampZoom(${v}) = ${got} 越界了`);
+    assert.equal(Math.abs(got / ZOOM.step - Math.round(got / ZOOM.step)) < 1e-9, true, `clampZoom(${v}) = ${got} 没对齐到 ${ZOOM.step} 的整格`);
+  }
+});
+
+test('长图预览倍率：按可用宽度算「整幅看得见」', () => {
+  assert.equal(fitZoom(610, 1220), 0.5, '可用宽度是画布一半，就该缩到一半');
+  // 量不到尺寸时按 1 画：宁可不缩，也不要拿 0 / NaN 去乘把画布整个塌掉
+  for (const [avail, w] of [[0, 1220], [600, 0], [NaN, 1220], [600, NaN], [-10, 1220]]) {
+    assert.equal(fitZoom(avail, w), ZOOM.def, `fitZoom(${avail}, ${w}) 量不到尺寸，应当按原尺寸画`);
+  }
+  // 窗口比画布宽时不放大
+  assert.equal(fitZoom(3000, 1220), 1);
+  // 缩完之后必须真的塞得进可用宽度 —— 这才是「不用拖横向滚动条」的判据。
+  // ⚠️ 取整只能向下：向上多一格，滚动条就又回来了（前提：窗口还没窄到低于最小倍率）
+  for (const [avail, w] of [[610, 1220], [400, 1220], [900, 1220], [1200, 1220], [337, 1220]]) {
+    const s = fitZoom(avail, w);
+    if (avail / w < ZOOM.min) continue;
+    assert.ok(w * s <= avail + 0.5, `fitZoom(${avail}, ${w}) = ${s}，缩完还有 ${w * s}px，塞不进 ${avail}px`);
+  }
+  assert.equal(fitZoom(200, 1220), 0.25, '窗口窄到低于最小倍率时夹在下限 —— 那就只能横着拖了，但至少还看得清');
+  // 自动档不留 5% 的整格空当：那在 1220px 的画布上是 61px，白空一大条
+  assert.equal(fitZoom(728, 1220), 0.59, '自动档精确到百分之一，不按手动档的整格取整');
+  assert.ok(fitZoom(728, 1220) > fitZoom(610, 1220), '可用宽度更宽就该缩得更少');
 });

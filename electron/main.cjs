@@ -1304,6 +1304,45 @@ function createWindow() {
              reportWallTiles: document.querySelectorAll('[data-report-wall-tile]').length,
              reportPool: Number(document.querySelector('[data-report-pool-rows]')?.getAttribute('data-report-pool-rows') ?? -1),
              reportAddButtons: document.querySelectorAll('[data-report-add]').length,
+             // 画布缩放：倍率 / 界面上写的百分比 / 横向还剩多少溢出。
+             // 前两个是「缩没缩」，第三个才是用户真正在抱怨的那件事 ——
+             // 「得拖滑块才看得全」就是 scrollWidth 比 clientWidth 大的那部分。
+             reportZoom: document.querySelector('[data-report-fit]')?.getAttribute('data-report-fit') ?? null,
+             reportZoomPct: Number(document.querySelector('[data-report-zoom-pct]')?.getAttribute('data-report-zoom-pct') ?? -1),
+             reportOverflowX: (() => {
+               const s = document.querySelector('.report__scroll');
+               return s ? s.scrollWidth - s.clientWidth : -1;
+             })(),
+             reportGeom: (() => {
+               const s = document.querySelector('.report__scroll');
+               const f = document.querySelector('[data-report-fit]');
+               const c = document.querySelector('[data-report-canvas]');
+               if (!s) return null;
+               const cs = getComputedStyle(s);
+               return {
+                 clientW: s.clientWidth,
+                 scrollW: s.scrollWidth,
+                 pad: (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0),
+                 fitW: f ? Math.round(f.getBoundingClientRect().width) : null,
+                 canvasW: c ? c.offsetWidth : null,
+               };
+             })(),
+             reportGeom: (() => {
+               const s = document.querySelector('.report__scroll');
+               const f = document.querySelector('[data-report-fit]');
+               const c = document.querySelector('[data-report-canvas]');
+               if (!s) return null;
+               const cs = getComputedStyle(s);
+               return {
+                 clientW: s.clientWidth,
+                 scrollW: s.scrollWidth,
+                 pad: (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0),
+                 fitW: f ? Math.round(f.getBoundingClientRect().width) : null,
+                 canvasW: c ? c.offsetWidth : null,
+               };
+             })(),
+             // 缩放绝不能落在画布自己身上 —— 导出抓的是它的 outerHTML
+             reportCanvasTransform: (document.querySelector('[data-report-canvas]')?.style?.transform ?? '') || 'none',
              // 追番历程：总数 / 有时间戳的 / 没时间戳的 / 事件条数。
              // 「时间轴是空的」和「时间戳一条都没记上」在截图里长得一模一样 ——
              // 只有把 untimed 单独数出来，才分得清是「还没到那天」还是「记漏了」。

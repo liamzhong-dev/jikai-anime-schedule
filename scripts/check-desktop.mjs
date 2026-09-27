@@ -583,6 +583,29 @@ if (view === 'tier') {
   }
 }
 
+// ---- 季度报告：画布要缩到横向不用拖 ----
+// 这一组守的是「看不全」：光断言画布在、块数对，都验不出它是不是还得横着拖。
+if (view === 'report') {
+  check(Number(report.reportCanvas) === 1, `画布应有 1 张，实际 ${report.reportCanvas}`);
+  check(
+    Number(report.reportOverflowX) <= 1,
+    `画布横向还得拖滚动条（溢出 ${report.reportOverflowX}px）—— 用户抱怨的就是这个：整幅缩不进可视宽度`,
+  );
+  const pct = Number(report.reportZoomPct);
+  check(pct > 0 && pct <= 100, `界面上的缩放百分比不对（${pct}%）`);
+  const zoom = Number(report.reportZoom);
+  check(zoom > 0 && zoom <= 1, `预览倍率越界了（${zoom}）—— 上限是 1，放大没有意义，还会让滚动条回来`);
+  check(
+    Number(report.reportCanvasWidth) > 0,
+    `画布的逻辑宽度丢了（${report.reportCanvasWidth}）—— 缩放只能改预览，不能改画布自己`,
+  );
+  // 反向：缩放一旦落到画布自己身上，导出图就会跟着缩 —— 那比「看不全」严重得多
+  check(
+    String(report.reportCanvasTransform) === 'none',
+    `画布自己身上有 transform（${report.reportCanvasTransform}）—— 导出抓的是它的 outerHTML，会把缩放一起带出去`,
+  );
+}
+
 // ---- 补番日记：磁盘上的日记要能一路走到界面上 ----
 if (view === 'diary') {
   check(Number(report.diaryNav) === 1, `侧栏没有补番日记的导航项（diaryNav=${report.diaryNav}）`);
@@ -941,6 +964,9 @@ if (view === 'report') {
     + ` · ${report.reportBlocks} 块（其中封面墙 ${report.reportWallTiles} 张）· 素材 ${report.reportPool} 部`,
   );
   console.log(`  封面：缓存 ${report.coverCache} · 直连 ${report.coverRemote}（必须为 0）· 色块 ${report.coverNone}`);
+  // 打出来是因为「缩没缩」在截图里看不出来 —— 一张缩过的长图和一张原尺寸的，
+  // 缩略图级别看上去都是「一块有内容的画布」。只有数字能证明它真的缩了。
+  console.log(`  画布缩放：${report.reportZoomPct}%（倍率 ${report.reportZoom}）· 横向溢出 ${report.reportOverflowX}px（应为 0）`);
 }
 if (view === 'history') {
   console.log(
