@@ -258,12 +258,16 @@ test('diagnose 逐条报出可用性，一条挂不影响另一条', async () =>
       api: { customBase: `http://127.0.0.1:${port}`, base: DEAD, timeoutMs: 2500 },
       fetchJson: nodeFetchJson,
     });
-    assert.equal(r.ok, true);
+    // ⚠️ 这条在整套 `node --test` 里偶发红过（单独跑怎么都不红）。
+    // 别再让它红成一句「false !== true」——失败时把每条候选的结果原样带出来，
+    // 否则就只能靠反复重跑猜是哪个环节。
+    const detail = () => JSON.stringify(r.rows.map((x) => ({ base: x.base, ok: x.ok, ms: x.ms, err: x.error })));
+    assert.equal(r.ok, true, `一个候选都不通：${detail()}`);
     // 候选端点 = 自填反代 + base + 兜底的官方地址（去重后），
     // 数量不该被写死，但顺序必须是我们期望的优先级
-    assert.ok(r.rows.length >= 2);
+    assert.ok(r.rows.length >= 2, `候选只有 ${r.rows.length} 条：${detail()}`);
     assert.equal(r.rows[0].base, `http://127.0.0.1:${port}`);
-    assert.equal(r.rows[0].ok, true);
+    assert.equal(r.rows[0].ok, true, `自填反代这条没通：${detail()}`);
     assert.match(r.rows[0].sample, /虚构测试动画/);
     assert.equal(r.rows[1].ok, false);
     assert.match(r.rows[1].error, /ECONNREFUSED|fetch failed/i);

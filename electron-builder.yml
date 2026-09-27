@@ -1,0 +1,64 @@
+# 打包配置（electron-builder）。
+#
+# 单独一个文件而不是塞进 package.json：这里每一行都有理由要写，
+# 而 package.json 里全是 JSON —— 不能写注释的地方，半年后没人记得
+# 「为什么 files 里要手写 scripts/lib/png.cjs」。
+#
+# 用法：npm run dist:win
+
+appId: cn.jikai.desktop
+productName: 次回
+copyright: Copyright © 2026 liamzhong-dev
+
+directories:
+  output: release
+  buildResources: build
+
+# ⚠️ 这份清单是**运行时真正需要的东西**，少一项就是「装完之后某个功能空着」：
+#   · electron/            主进程（含托盘、封面缓存、角标、报告导出）
+#   · dist/                vite 产物（界面本体）
+#   · build/icons/         图标：窗口、托盘、通知都用它。
+#                          托盘图标是在**主进程里按相对路径**读的
+#                          （`__dirname/../build/icons/tray.png`），所以它必须
+#                          在 asar 里保持同样的相对位置，不能只放进 extraResources。
+#   · scripts/lib/png.cjs  托盘角标的 PNG 编码器 —— 唯一一个被主进程 require 的
+#                          构建期脚本。漏了它的症状是：托盘角标一画就抛，
+#                          而 try/catch 把它咽掉了，界面上只是「没有角标」。
+files:
+  - electron/**/*
+  - dist/**/*
+  - build/icons/**/*
+  - scripts/lib/png.cjs
+  - package.json
+
+# 随包的封面素材图包。放 extraResources 而不是 files：它有两千多个小文件，
+# 塞进 asar 只会让每次读图都多一层解包；放在 resources 里就是普通目录，
+# 复制进缓存时是直接 copyFile。
+extraResources:
+  - from: build/covers
+    to: covers
+
+win:
+  icon: build/icons/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # 中文产物名在某些解压工具里会乱码，所以安装包文件名用 ASCII，
+  # 装完之后的显示名（productName）才用中文。
+  artifactName: jikai-${version}-setup.${ext}
+
+nsis:
+  # 不用一键安装：这个程序的数据落在 userData 里，用户有权知道它装到哪了
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 次回
+  # 卸载时**不删**用户数据：追番记录、日记都在那儿。
+  # 想清干净的人自己删 AppData 就行；反过来（默认删掉）是找不回来的。
+  deleteAppDataOnUninstall: false
+
+# 打包时不跑签名（本机没有证书），也不联网查更新
+publish: null

@@ -35,6 +35,34 @@ const SELF = fileURLToPath(import.meta.url);
 
 /** 目录段名命中就跳过（按段比，不按前缀） */
 const SKIP_SEG = new Set(['node_modules', '.git', 'dist', 'dist-electron', '.vite', 'local-data', '.tmp', 'coverage']);
+
+/**
+ * ⚠️ 还要跳过 `.gitignore` 里那些**不会被提交**的目录。
+ *
+ * 为什么必须自动派生：「哪些目录不进仓库」和「扫描器跳过哪些目录」曾经是两份
+ * 各写各的清单，结果 electron-builder 生成的 `release/builder-debug.yml`
+ * （里面内联了本机的 node_modules 绝对路径）被当成真实泄漏报了出来 ——
+ * 那个文件根本不会进仓库，但报告上先多出一片红。
+ * 这种事多来几次，报告就没人看了。现在 `.gitignore` 加一行目录，扫描器自动跟上。
+ *
+ * 只认「纯目录名」和「以 * 结尾的目录名」（例如 dist-old- 开头那种带时间戳的目录）：
+ * 文件名规则（如 *.log）靠 SKIP_EXT 和扩展名判，不在这里管。
+ */
+function ignoredDirPatterns() {
+  const file = path.join(ROOT, '.gitignore');
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, 'utf8')
+    .split(/\r?\n/)
+    .map((l) => l.trim().replace(/\/+$/, ''))
+    .filter((l) => l && !l.startsWith('#') && !l.startsWith('!'))
+    .filter((l) => !l.includes('/') && !/\.\w+$/.test(l))
+    .map((l) => (l.endsWith('*') ? { prefix: l.slice(0, -1) } : { exact: l }));
+}
+const IGNORED_DIRS = ignoredDirPatterns();
+const isIgnoredDir = (name) =>
+  IGNORED_DIRS.some((p) => (p.exact ? p.exact === name : name.startsWith(p.prefix)));
+
 const SKIP_EXT = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp',
   '.zip', '.gz', '.7z', '.pdf',
@@ -45,9 +73,24 @@ const SKIP_EXT = new Set([
 /** 通用规则：任何项目都该为 0 */
 const GENERIC = [
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/, '邮箱'],
-  [/[A-Za-z]:\\Users\\[^\\\s"']+/, '本机路径（Windows）'],
-  // ⚠️ 必须排除盘符前缀：`C:/Users/work/…` 里也含 `/Users/`，
+  /**
+   * ⚠️ 分隔符和转义写法都要认，别只认「单反斜杠」那一种。
+   *
+   * 原来这里写的是 `[A-Za-z]:\\Users\\`（只认单个 `\`）——
+   * 于是 JSON / JS 源码里的双反斜杠写法（反斜杠被转义成两个）
+   * 和正斜杠写法（又被下面 macOS 那条的 lookbehind 排掉）
+   * **两种都扫不到**。实测：把诱饵写成转义形式，扫描照样打勾。
+   * 而这正是「扫过了」但根本没扫的典型 —— 比不扫更坏。
+   *
+   * ⚠️ 这一段的例子一律写成占位符（如 `<用户名>`），不许写真实用户名：
+   * 扫描器按设计**跳过自己**，所以写在这里的真实路径它一辈子也不会报，
+   * 而文件本身是公开的 —— 等于亲手把敏感词发表了（本文件开头的 SELF 注释
+   * 说的就是这个坑，我自己写这段注释时先踩了一次）。
+   */
+  [/[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}[^\\/\s"']+/, '本机路径（Windows）'],
+  // ⚠️ 必须排除盘符前缀：`C:/Users/<用户名>/…` 里也含 `/Users/`，
   // 不加这个 lookbehind，Windows 路径会被同时报成 macOS 路径（自己骗自己）。
+  // 例子一律写占位符 —— 这个文件是公开的，而扫描器跳过自己（见 walk 里的 isSelf）。
   [/(?<![A-Za-z]:)\/Users\/[a-z0-9._-]+\//i, '本机路径（macOS）'],
   [/\/(?:home|Users)\/[a-z0-9._-]+\/(?:WorkBuddy|workbuddy)/, '本机工作区路径'],
   [/\bCo-Authored-By:/i, 'AI 署名（Co-Authored-By）'],
@@ -81,7 +124,7 @@ function walk(dir) {
     const full = path.join(dir, name);
     const rel = path.relative(ROOT, full).split(path.sep).join('/');
     const segs = rel.split('/');
-    if (segs.some((s) => SKIP_SEG.has(s))) continue;
+    if (segs.some((s) => SKIP_SEG.has(s) || isIgnoredDir(s))) continue;
 
     let st;
     try {
@@ -94,8 +137,17 @@ function walk(dir) {
       continue;
     }
     if (SKIP_EXT.has(path.extname(name).toLowerCase())) continue;
-    // 扫描器自己：模式里就写着那几个署名词，不跳会自匹配（见 SELF 的说明）
-    if (path.resolve(full) === path.resolve(SELF)) continue;
+    /**
+     * 扫描器自己：GENERIC 里的模式（`Claude` / `WorkBuddy` 这些）就写在它自己的
+     * 第几十行，照常扫会自匹配出三条永久噪声（见 SELF 的说明）。
+     *
+     * ⚠️ 但**不能整份跳过** —— 那会让这个文件变成盲区，而它恰恰是公开的。
+     * 实际踩过一次：在它的注释里写了带真实用户名的路径当例子，扫描一声不吭
+     * （它跳过自己），反倒是随手 grep 才发现的。
+     * 所以：跳过通用规则，**本地词表照扫**（真实姓名那类词不可能出现在模式定义里，
+     * 不会自匹配）。
+     */
+    const isSelf = path.resolve(full) === path.resolve(SELF);
     // vite 每次跑 build / preview 都会在根目录留下一个「把 node_modules 里的真实
     // 绝对路径内联进去」的临时配置文件（已被 .gitignore 排除）。不跳的话，
     // 每次扫描都会报一片本机路径 —— 全是自己的噪声，久了就没人看这个报告了。
@@ -118,7 +170,7 @@ function walk(dir) {
         byLabel.set(label, (byLabel.get(label) ?? 0) + 1);
         console.log(`${label} | ${rel}:${i + 1} | ${line.trim().slice(0, 120)}`);
       };
-      for (const [re, label] of GENERIC) {
+      for (const [re, label] of isSelf ? [] : GENERIC) {
         if (re.test(line)) report(label);
       }
       if (LOCAL_RE && LOCAL_RE.test(line)) report('本地词表命中');

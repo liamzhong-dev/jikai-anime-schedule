@@ -13,6 +13,7 @@
 
 const path = require('node:path');
 const { Tray, Menu, nativeImage, app } = require('electron');
+const { badgeIcon } = require('./traybadge.cjs');
 
 const DEFAULT_STATE = {
   view: 'season',
@@ -111,6 +112,26 @@ function createTray(hooks = {}) {
   tray.on('click', () => hooks.onToggleWindow?.());
   tray.on('double-click', () => hooks.onToggleWindow?.());
 
+  /**
+   * 图标上的数字角标：今天几部更新。
+   *
+   * 菜单里那行字得先右键才看得见，而角标是**扫一眼就知道有没有事儿**的那层。
+   * 画的时候做了两处省事：数字没变就不重画（每次 setState 都重编码一张 PNG 没必要）；
+   * 画失败也不抛 —— 角标画不出来最多是「没有角标」，不该把整个托盘弄挂。
+   */
+  let badgeCount = null;
+  function setBadge(count) {
+    const n = Number(count) > 0 ? Math.floor(Number(count)) : 0;
+    if (n === badgeCount) return;
+    badgeCount = n;
+    try {
+      tray.setImage(badgeIcon(n));
+    } catch {
+      /* 画不出来就算了，托盘图标本身还在 */
+    }
+  }
+
+  setBadge(state.todayCount);
   refresh();
 
   return {
@@ -118,7 +139,12 @@ function createTray(hooks = {}) {
     /** 渲染层推来的最新摘要，用来重建菜单 */
     setState(patch) {
       state = { ...state, ...(patch ?? {}) };
+      setBadge(state.todayCount);
       refresh();
+    },
+    /** 给自检用：现在角标上写的是几 */
+    getBadge() {
+      return badgeCount;
     },
     getState() {
       return { ...state };

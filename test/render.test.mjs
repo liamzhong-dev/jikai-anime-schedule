@@ -1347,3 +1347,18 @@ test('长图画布：缩放绝不能落在画布自己身上 —— 导出抓的
   assert.equal(/transform|scale\(/.test(style), false, `画布自己带上了 transform（style="${style}"）—— 导出会把缩放一起带出去，那比看不全严重得多`);
   assert.ok(/width:\s*1220px/.test(style), `画布的逻辑宽度该照旧写在它自己身上（style="${style}"）`);
 });
+
+test('备份区里有「导出文件包」这个入口，并且忙的时候会换字', async () => {
+  const idle = await renderSettingsTabs({ defaultTab: 'data', transfer: {} });
+  assert.ok(idle.includes('data-export-bundle="1"'), '设置里找不到导出文件包的按钮');
+  assert.ok(idle.includes('导出文件包'), `按钮文字对不上：${(idle.match(/导出[^<]*/g) ?? []).join(' / ')}`);
+
+  const busy = await renderSettingsTabs({ defaultTab: 'data', transfer: { busy: 'bundle' } });
+  assert.ok(busy.includes('正在打包'), '打包中要换掉按钮上的字，否则用户会以为没点上');
+  assert.ok(busy.includes('disabled'), '打包中不能让他再点一次');
+
+  // 反向：这一块不该因为有了新按钮就把「从备份导入」挤掉 ——
+  // 两条路是配套的，少一个用户就不知道导出来的东西怎么用回去
+  assert.ok(idle.includes('从备份导入'), '导入入口被挤掉了');
+  assert.ok(idle.includes('导出备份'), '导出备份入口被挤掉了');
+});

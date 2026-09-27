@@ -53,6 +53,57 @@ export function transferFileName(nowMs = Date.now()) {
   return `jikai-backup-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.json`;
 }
 
+/**
+ * 「导出文件包」那个目录叫什么。
+ *
+ * 带时间戳是必须的：一次导出是「这一轮要交出去的东西」，
+ * 而用户过两周再导一次时，最怕的就是第二次把第一次的内容盖掉。
+ * 用本地时间（不是 UTC）—— 用户看到的时间要和他自己表上的对得上。
+ */
+export function bundleFolderName(nowMs = Date.now()) {
+  const d = new Date(nowMs);
+  const p = (n) => String(n).padStart(2, '0');
+  return `次回-导出-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+/**
+ * 文件包里的「说明.txt」。
+ *
+ * 写这个不是客套：那个目录会离开这台机器（发给别人、拷到另一台设备），
+ * 而「数据备份.json 要拿程序里的『从备份导入』打开」这件事，
+ * 除了这个文件没有任何地方会告诉接收的人。
+ *
+ * @param {{counts?:object, seasonName?:string, hasReport?:boolean, generatedAt?:number, appVersion?:string, note?:string}} opts
+ */
+export function bundleReadme({
+  counts, seasonName = '', hasReport = false, generatedAt = Date.now(), appVersion = '', note = '',
+} = {}) {
+  const d = new Date(generatedAt);
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  const lines = [
+    '次回 jikai · 导出文件包',
+    '',
+    `生成时间：${stamp}`,
+    appVersion ? `程序版本：v${appVersion}` : null,
+    `里面有：${describeCounts(counts)}`,
+    '',
+    '【怎么用】',
+    '· 数据备份.json —— 里面是你全部的记录：追番、补番、日记、档位表、报告、外观设置。',
+    '  在另一台设备上打开次回 → 设置 → 数据源 → 从备份导入…，选这个文件就行。',
+    '  导入是整份替换，程序会先把那台设备现在的记录另存一份再覆盖。',
+    '· 封面图片不在这份备份里 —— 那是几十 MB 的缓存，换台机器重新下一次就好。',
+    hasReport
+      ? `· 季度报告（${seasonName}）是一张长图，可以直接发出去。`
+      : '· 这次没有报告长图：要带上它，先切到「季度报告」那一页，再导一次。',
+    '',
+    note ? `【这次要说的】\n${note}` : null,
+    '',
+    '—— 就这些。',
+  ].filter((x) => x !== null);
+  return `${lines.join('\n')}\n`;
+}
+
 /** 只挑出要带走的那几项，顺手深拷一份（不深拷的话调用方后面改了状态，备份也跟着变） */
 function pickExported(state) {
   const src = state && typeof state === 'object' ? state : {};

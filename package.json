@@ -1,8 +1,8 @@
 {
   "name": "jikai",
   "private": true,
-  "version": "1.0.0",
-  "description": "ACG 追番桌面台历：本季番剧、播出时间表、更新倒计时、补番 deadline 卡片",
+  "version": "2.0.0",
+  "description": "次回 jikai：ACG 追番桌面台历 —— 本季番剧、播出时间表、更新倒计时、补番 deadline、追番日记、季度报告",
   "type": "module",
   "main": "electron/main.cjs",
   "license": "MIT",
@@ -14,9 +14,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "desktop": "electron .",
-    "assets": "node scripts/make-icons.cjs && node scripts/make-wallpaper.cjs",
+    "assets": "node scripts/make-icons.cjs && node scripts/make-wallpaper.cjs && node scripts/make-ico.cjs",
     "shoot": "vite build && node scripts/screenshot.cjs",
     "builtin": "node scripts/build-builtin.mjs",
+    "covers": "node scripts/fetch-covers.mjs",
+    "dist:win": "npm run assets && npm run build && electron-builder --win --x64 --config electron-builder.yml",
     "check:tier": "node scripts/tier-render-check.mjs --drag",
     "check:tier-export": "node scripts/tier-export-check.mjs",
     "live": "node scripts/live-check.mjs",
@@ -37,9 +39,10 @@
     "check:boot": "node scripts/check-boot.mjs",
     "check:ipc": "node scripts/check-ipc.mjs",
     "check:selfheal": "node scripts/check-selfheal.mjs",
+    "check:coverseed": "node scripts/check-coverseed.mjs",
     "check:perf": "node scripts/perf-check.mjs",
     "scan": "node scripts/scan-privacy.mjs",
-    "check:all": "npm test && npm run build && npm run check:tier && npm run check:tier-export && npm run check:desktop && npm run check:desktop:diary && npm run check:desktop:save && npm run check:desktop:report && npm run check:desktop:history && npm run check:desktop:search && npm run check:desktop:cardopen && npm run check:maxsync && npm run check:desktop:retryhw && npm run check:desktop:wp && npm run check:killapp && npm run check:ipc && npm run check:boot && npm run check:selfheal && npm run check:perf && npm run scan"
+    "check:all": "npm test && npm run check:coverseed && npm run build && npm run check:tier && npm run check:tier-export && npm run check:desktop && npm run check:desktop:diary && npm run check:desktop:save && npm run check:desktop:report && npm run check:desktop:history && npm run check:desktop:search && npm run check:desktop:cardopen && npm run check:maxsync && npm run check:desktop:retryhw && npm run check:desktop:wp && npm run check:killapp && npm run check:ipc && npm run check:boot && npm run check:selfheal && npm run check:perf && npm run scan"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -48,6 +51,7 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.0",
+    "electron-builder": "^26.15.3",
     "puppeteer-core": "^25.11.0",
     "vite": "^5.4.11"
   }

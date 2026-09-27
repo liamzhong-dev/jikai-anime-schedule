@@ -709,7 +709,26 @@ export default function SettingsPanel({
                   >
                     {transfer.busy === 'import' ? '正在读取…' : '从备份导入…'}
                   </button>
+                  {/*
+                    导出文件包和上面「导出备份」是同一件事的两种形状，不是两个功能。
+                    放在这里而不是另起一块：用户想的是「把记录弄出来」，
+                    看到两个分开放的入口反而要停下来想「我该点哪个」。
+                  */}
+                  <button
+                    type="button"
+                    className="btn"
+                    data-export-bundle="1"
+                    onClick={() => transfer.onBundle?.()}
+                    disabled={Boolean(transfer.busy)}
+                  >
+                    {transfer.busy === 'bundle' ? '正在打包…' : '导出文件包…'}
+                  </button>
                 </div>
+                <p className="snote">
+                  <strong>导出文件包</strong>会把这次要交出去的东西收进<strong>一个目录</strong>：
+                  数据备份、当季报告长图、还有一份写着「怎么用」的说明。
+                  要发给别人或者搬到另一台机器时，整个目录拖走就行，不用自己记哪几个文件是这次的。
+                </p>
                 <p className="snote">
                   导出的是一份几十 KB 的 JSON，里面是追番、进度、补番、日记、档位表、报告和设置。
                   封面缓存和壁纸不跟着走 —— 那两个换台机器重新下一次就有了，塞进去只会让备份大到传不动。

@@ -1,5 +1,13 @@
 node_modules/
 dist/
+# 打包产物（npm run dist:win 的输出）。几百 MB，不可能进仓库。
+# `release-out*/` 是「release/ 被系统锁住、挪也挪不动时换个目录重打」用的备选输出，
+# 同一个东西。`dist-old-*` 是 vite 构建留下的旧产物备份（重打前先把 dist 改名腾位置，
+# 因为沙盒对「一轮里删了多少文件」有上限，删不动）。
+release/
+release-out*/
+release-stale*/
+dist-old-*/
 *.log
 .DS_Store
 Thumbs.db

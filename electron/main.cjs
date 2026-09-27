@@ -16,6 +16,7 @@ const path = require('node:path');
 const netBridge = require('./net.cjs');
 const { createTray } = require('./tray.cjs');
 const { CoverCache } = require('./covers.cjs');
+const { seedCovers } = require('./coverSeed.cjs');
 /**
  * ⚠️ 这一行是被 IPC 冒烟逼出来的：`update:check` 一直在用 `updater.checkUpdate`，
  * 但这个文件**从来没被 require 过** —— 一点「检查更新」就抛 `ReferenceError`。
@@ -150,6 +151,19 @@ const wallpaperFile = () => path.join(app.getPath('userData'), 'wallpaper.json')
  * 这里不该再犯一次。
  */
 const nameIndexFile = () => path.join(app.getPath('userData'), 'nameIndex.json');
+
+/**
+ * 随包封面图包放在哪。
+ *
+ * 打包之后 electron-builder 把它放到 `resources/covers`（见 package.json 的
+ * extraResources）；跑源码时就是仓库里的 `build/covers`。
+ * 两个位置都要认 —— 只认源码那个路径的话，装完之后这个功能静默失效，
+ * 表现是「作者机器上有图，用户机器上没有」。
+ */
+function seedCoverDir() {
+  if (app.isPackaged) return path.join(process.resourcesPath, 'covers');
+  return path.join(APP_ROOT, 'build', 'covers');
+}
 
 let mainWindow = null;
 let tray = null;
@@ -1981,6 +1995,115 @@ async function runIpcSmoke() {
       record('tray:state(托盘未建也不能抛)', r === true, `返回值=${r}`);
     });
 
+    await step('bundle:export(报告 + 备份收进一个目录)', async () => {
+      const bundleDir = process.env.JIKAI_BUNDLE_DIR;
+      if (!bundleDir) {
+        record('bundle:export', false, '自检没给 JIKAI_BUNDLE_DIR，这条没法验');
+        return;
+      }
+
+      // 类名必须是 `.report__canvas` —— 打印窗口就是靠它找画布的
+      // （第一版自己起了个 `.rb`，主进程报「打印窗口里没找到画布」，
+      //  那句提示里点名了选择器，照着改就行）
+      const html = '<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;font:14px sans-serif}.report__canvas{padding:20px;background:linear-gradient(#8b7cf6,#56d4c4)}</style></head><body><div class="report__canvas" data-report-canvas="1" style="width:1220px"><p>导出文件包 · 自检占位画布</p><p>这一块只是为了让隐藏窗口量到一个非零高度。</p></div></body></html>';
+      const payload = {
+        folder: '次回-导出-自检',
+        files: [
+          { name: '数据备份.json', text: JSON.stringify({ app: 'jikai', format: 1, state: {} }, null, 2) },
+          { name: '说明.txt', text: '这是自检生成的说明。' },
+        ],
+        images: [{ name: '季度报告.pdf', kind: 'pdf', html, width: 1220 }],
+      };
+
+      const r1 = await call('bundle:export', payload);
+      const dir1 = String(r1?.dir ?? '');
+      const names = dir1 && fs.existsSync(dir1) ? fs.readdirSync(dir1).sort() : [];
+      const pdf = path.join(dir1, '季度报告.pdf');
+      const head = fs.existsSync(pdf) ? fs.readFileSync(pdf).subarray(0, 5).toString('latin1') : '';
+      record(
+        'bundle:export(报告 + 备份 + 说明收进一个目录)',
+        r1?.ok === true && names.length === 3 && head === '%PDF-',
+        `ok=${r1?.ok} err=${r1?.error ?? '-'} 目录=${path.basename(dir1)} 文件=${names.join('/')} PDF头=${JSON.stringify(head)}`,
+      );
+
+      /*
+       * 同一分钟再导一次 —— 两次不能落进同一个目录。
+       * 这是这个功能唯一会**毁掉用户东西**的地方：第二次把第一次的内容盖掉，
+       * 而用户手里什么都没有了（他刚把上一个目录发出去）。
+       */
+      const r2 = await call('bundle:export', payload);
+      const dir2 = String(r2?.dir ?? '');
+      record(
+        'bundle:export(紧接着再导一次不会盖掉上一次)',
+        r2?.ok === true && dir2 !== dir1 && fs.existsSync(pdf),
+        `第一次=${path.basename(dir1)} 第二次=${path.basename(dir2)} 第一次的还在=${fs.existsSync(pdf)}`,
+      );
+
+      // 反例：名字里带路径跳转必须被挡住，否则能写到用户选的目录外面去
+      const outside = path.join(path.dirname(bundleDir), 'escaped.txt');
+      const r3 = await call('bundle:export', {
+        folder: '..',
+        files: [{ name: '../../escaped.txt', text: 'x' }],
+      });
+      const dir3 = String(r3?.dir ?? '');
+      record(
+        'bundle:export(名字里的路径跳转被挡住)',
+        r3?.ok === true
+          && !fs.existsSync(outside)
+          && fs.existsSync(path.join(dir3, 'escaped.txt'))
+          && path.dirname(dir3) === path.resolve(bundleDir),
+        `落在 ${path.basename(dir3)}/escaped.txt · 上一级有没有=${fs.existsSync(outside)}`,
+      );
+      /*
+       * 单独一条：`folder` 写 `..` 时必须退回默认名，不能把目录建到别处。
+       * 上一条只验「文件落在哪」，这条验「目录本身没跑出去」——
+       * 上一版靠 `-2` 后缀的巧合躲过去了，看着是绿的实际没防住。
+       */
+      record(
+        'bundle:export(目录名写 .. 时退回默认名)',
+        !path.basename(dir3).startsWith('..'),
+        `实际目录名=${path.basename(dir3)}`,
+      );
+
+      // 反例：什么都没给的时候要说清，而不是建一个空目录
+      const r4 = await call('bundle:export', { folder: '空包', files: [], images: [] });
+      record(
+        'bundle:export(没有内容时如实报错，不建空目录)',
+        r4?.ok === false && Boolean(r4.error) && !fs.existsSync(path.join(bundleDir, '空包')),
+        `error=${r4?.error}`,
+      );
+    });
+
+    await step('tray:badge(角标能编码成图)', async () => {
+      /*
+       * 像素对不对由 test/traybadge.test.mjs 守着（纯函数，不需要 Electron）。
+       * 这里验的是**另一个环节**：那些像素能不能真的变成一张 Electron 认的图。
+       * 分得开的理由是它们会各自单独坏 —— PNG 编码写错、nativeImage 不认 buffer，
+       * 表现都是「托盘上什么都没有」，但修的地方完全不同。
+       */
+      const { badgeIcon } = require('./traybadge.cjs');
+      const withBadge = badgeIcon(5);
+      const without = badgeIcon(0);
+      const s1 = withBadge.getSize();
+      const s2 = without.getSize();
+      const a = withBadge.toPNG();
+      const b = without.toPNG();
+      /*
+       * 两条判据合成一条，是因为它们挂在同一个前提上：
+       * 「有更新的那张」必须和「没更新的那张」不一样 —— 只验非空的话，
+       * 角标压根没画上去时两张图都非空、都 32×32，照样是绿的。
+       */
+      const ok = !withBadge.isEmpty()
+        && s1.width === 32 && s1.height === 32
+        && !without.isEmpty()
+        && (a.length !== b.length || !a.equals(b));
+      record(
+        'tray:badge(角标能编码成图，且和没有角标的不一样)',
+        ok,
+        `带角标 ${s1.width}x${s1.height} ${a.length}B · 无角标 ${s2.width}x${s2.height} ${b.length}B`,
+      );
+    });
+
     await step('autolaunch:set(写回原值)', async () => {
       const cur = await call('autolaunch:get');
       // 写同一个值：语义上是空操作，但**整条写注册表路径都真跑了一遍**
@@ -2140,7 +2263,46 @@ if (!hasSingleInstanceLock) {
       fetchBinary: (opts) => netBridge.fetchBinary(opts),
     });
 
+    /*
+     * 随包图包种进缓存 —— 装完第一次打开就「不联网也有图」。
+     *
+     * 两处取舍：
+     *   1. 不 await。它只影响「图出现得快不快」，跟窗口能不能出来没关系；
+     *      挡在启动路径上等于白送用户一段白屏。挂了也不抛 ——
+       *      种不进去最多退回「先去下」的老样子。
+     *   2. **一次性档案跳过**（`JIKAI_USERDATA` 指来指去那种，自检和冒烟都是）。
+     *      那边每次启动复制 2.4MB 纯属浪费；更要紧的是自检要的起点是
+     *      「干净的缓存」——种一批进去，等于把「没有种子时会怎样」给盖住了。
+     *      `JIKAI_SEED_TEST=1` 是这个跳过规则的唯一例外：**打包之后的程序**
+     *      自检时必须带 `JIKAI_USERDATA`（不能碰用户真实档案），
+     *      可又只有它能证明「图包在 asar 外面、真的被种进了缓存」——
+     *      而这件事在源码目录里跑是证明不了的（那边的路径根本不是打包后的布局）。
+     */
+    if (!process.env.JIKAI_USERDATA || process.env.JIKAI_SEED_TEST === '1') {
+      seedCovers({ from: seedCoverDir(), to: coverCache.root })
+        .then((r) => {
+          if (!r.missing && (r.copied || r.failed)) {
+            trace(`seed-covers:+${r.copied} skip=${r.skipped} fail=${r.failed}`);
+          }
+        })
+        .catch(() => { /* 种不进去就算了 */ });
+    }
+
     handle('cover:get', (_e, payload = {}) => coverCache.get(payload));
+    /**
+     * 手动种一次随包封面。
+     *
+     * 启时会自动种一遍，但用户可能在设置里清过缓存（清完就只剩联网这一条路）。
+     * 同一个 in-flight 复用一份 promise：连点两下不该变成两批并发复制。
+     */
+    let seeding = null;
+    handle('cover:seed', () => {
+      if (!seeding) {
+        seeding = seedCovers({ from: seedCoverDir(), to: coverCache.root })
+          .finally(() => { seeding = null; });
+      }
+      return seeding;
+    });
     handle('cover:stats', () => coverCache.stats());
     handle('cover:clear', (_e, payload = {}) => coverCache.clear(payload || {}));
     handle('cover:warm', async (_e, payload = {}) => {
@@ -2245,6 +2407,108 @@ if (!hasSingleInstanceLock) {
           scale: out.scale ?? null,
           degraded: Boolean(out.degraded),
           slices: out.slices ?? null,
+        };
+      } catch (err) {
+        return { ok: false, error: err?.message ?? String(err) };
+      }
+    });
+
+    /**
+     * 导出文件包：把这一轮要交出去的东西归拢到**一个目录**里。
+     *
+     * 为什么值得单独做一个入口：报告、备份、说明原本散在三个按钮上，
+     * 导完是三个文件躺在下载目录里，名字还是各写各的 —— 要发给别人或者搬到
+     * 另一台机器时，得自己记「哪几个是这次的」。归到一个带时间戳的目录里，
+     * 「这次的产出」就是一个可以整个拖走的东西。
+     *
+     * 只负责「落盘」，不负责「拼内容」：报告 HTML 由渲染层给（那边才知道画布长什么样），
+     * 备份 JSON 也是渲染层拼好的。主进程做的是选目录、建目录、写文件、开文件夹。
+     */
+    handle('bundle:export', async (_e, payload = {}) => {
+      const files = Array.isArray(payload.files) ? payload.files : [];
+      const images = Array.isArray(payload.images) ? payload.images : [];
+      if (!files.length && !images.length) return { ok: false, error: '没有可导出的内容' };
+
+      /*
+       * 名字一律过 basename + 去非法字符。
+       * 这两步都不能省：`../../x` 会写到你选的目录外面去，
+       * 而 `a:b.txt` 在 Windows 上直接抛 —— 报的是一句跟用户操作毫无关系的系统错。
+       */
+      const safeName = (s, fallback) => {
+        const base = path.basename(String(s ?? '')).replace(/[\\/:*?"<>|]/g, '_').trim();
+        /*
+         * ⚠️ `.` 和 `..` 不是文件名，是**目录跳转**。
+         * 只过滤非法字符是挡不住它们的 —— `basename('..')` 就是 `'..'` 本身，
+         * 放过去之后 `path.join(用户选的目录, '..')` 就是用户的**上一个**目录，
+         * 于是「导出到这个文件夹」变成了「导出到别处」，而且看起来一切正常。
+         */
+        if (!base || base === '.' || base === '..') return fallback;
+        return base;
+      };
+
+      const folder = safeName(payload.folder, `次回-导出-${Date.now()}`);
+
+      // 自检用的一次性出口：有它就不用弹「选文件夹」那个框
+      const forced = process.env.JIKAI_BUNDLE_DIR;
+      let parent = forced ? path.resolve(forced) : '';
+      if (!parent) {
+        const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow ?? undefined, {
+          title: '选一个文件夹，这次的导出放进去',
+          buttonLabel: '导出到这里',
+          properties: ['openDirectory', 'createDirectory'],
+        });
+        if (canceled || !filePaths?.length) return { ok: false, error: '已取消' };
+        parent = filePaths[0];
+      }
+
+      try {
+        /*
+         * 同一分钟导两次时不能把第一次的盖掉 —— 那样用户会以为「导出没反应」。
+         * 顺带这也让「导出的东西」永远不会被后一次悄悄改写。
+         */
+        let dir = path.join(parent, folder);
+        for (let i = 2; fs.existsSync(dir) && i < 100; i += 1) {
+          dir = path.join(parent, `${folder}-${i}`);
+        }
+        fs.mkdirSync(dir, { recursive: true });
+
+        const written = [];
+        for (const f of files) {
+          const name = safeName(f?.name, 'file.txt');
+          const target = path.join(dir, name);
+          const text = String(f?.text ?? '');
+          fs.writeFileSync(target, text, 'utf8');
+          written.push({ name, bytes: Buffer.byteLength(text, 'utf8') });
+        }
+
+        for (const im of images) {
+          const kind = im?.kind === 'png' ? 'png' : 'pdf';
+          const html = String(im?.html ?? '');
+          const w = Number(im?.width) || 1220;
+          if (html.length < 200) return { ok: false, error: '报告内容为空，文件包没做成', dir };
+          const name = safeName(im?.name, `report.${kind}`);
+
+          hiddenExportWindows += 1;
+          let out;
+          try {
+            out = kind === 'pdf'
+              ? await reportExport.renderPdf({ html: withReportStyles(html), width: w })
+              : await reportExport.renderPng({ html: withReportStyles(html), width: w });
+          } finally {
+            hiddenExportWindows -= 1;
+          }
+          fs.writeFileSync(path.join(dir, name), out.buffer);
+          written.push({ name, bytes: out.buffer.length, width: out.width, height: out.height });
+        }
+
+        // 打开那个文件夹 —— 用户刚选完目录，下一步就是去看东西
+        try { await shell.openPath(dir); } catch { /* 打不开也不影响导出成功 */ }
+
+        return {
+          ok: true,
+          dir,
+          files: written,
+          bytes: written.reduce((n, f) => n + (f.bytes ?? 0), 0),
         };
       } catch (err) {
         return { ok: false, error: err?.message ?? String(err) };

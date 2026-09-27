@@ -77,11 +77,21 @@ export function makeSession({ proxy, host, port = 443, timeoutMs = 20000 }) {
       const req = https.request({ host, port, path, method: 'GET', headers, agent: a, timeout: t }, (res) => {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve({
-          status: res.statusCode,
-          headers: res.headers,
-          text: Buffer.concat(chunks).toString('utf8'),
-        }));
+        res.on('end', () => {
+          const buffer = Buffer.concat(chunks);
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            text: buffer.toString('utf8'),
+            /*
+             * ⚠️ `buffer` 才是原始字节。取图片（或任何二进制）必须用它 ——
+             * 拿 `text` 再 `Buffer.from(text,'latin1')` 转回来是**有损**的：
+             * text 已经按 utf8 解过一次码，多字节序列会变成码点 > 255 的字符，
+             * 转 latin1 时只留低 8 位，字节就错了。
+             */
+            buffer,
+          });
+        });
         res.on('error', (e) => { drop(); reject(e); });
       });
       req.once('timeout', () => { req.destroy(); drop(); reject(new Error(`请求超时（${t}ms）`)); });

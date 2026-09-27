@@ -12,7 +12,8 @@ import assert from 'node:assert/strict';
 
 import {
   EXPORTED_KEYS, SKIPPED_KEYS, TRANSFER_APP, TRANSFER_FORMAT,
-  buildTransfer, describeCounts, parseTransfer, transferCounts, transferFileName,
+  buildTransfer, bundleFolderName, bundleReadme, describeCounts,
+  parseTransfer, transferCounts, transferFileName,
 } from '../src/core/transfer.js';
 import { exportableState, importState } from '../src/core/store.js';
 import {
@@ -270,4 +271,45 @@ test('导出 → 导入 → 再导出：内容一致（这条守住整条链的�
   const again = buildTransfer(exportableState());
   assert.deepEqual(again.state, payload.state, '来回一趟内容不该变');
   assert.deepEqual(again.counts, payload.counts);
+});
+
+test('导出文件包的目录名：带时间戳、两次导出不会撞在一起', () => {
+  // 本地时间，就取 2026-09-27 13:05
+  const t = new Date(2026, 8, 27, 13, 5).getTime();
+  const name = bundleFolderName(t);
+  assert.match(name, /^次回-导出-20260927-1305$/, `实际是 ${name}`);
+
+  // 相隔一分钟必须给出两个不同的名字 —— 这是「上一次导出的东西不会被盖掉」的**前置条件**
+  const later = bundleFolderName(t + 60_000);
+  assert.notEqual(name, later, '一分钟后导出还是同一个目录名 → 第二次会把第一次盖掉');
+  assert.match(later, /-1306$/);
+});
+
+test('导出文件包的目录名不带路径分隔符', () => {
+  // 名字会被当目录名用，混进 / 或 \ 就会在别处建目录
+  assert.equal(/[/\\]/.test(bundleFolderName(Date.now())), false);
+});
+
+test('说明.txt：收件人看不懂的地方都要写清楚', () => {
+  const counts = { following: 3, catchup: 1, diary: 5, tierlists: 1, reports: 2 };
+  const text = bundleReadme({
+    counts,
+    seasonName: '2026 年 7 月',
+    hasReport: true,
+    generatedAt: new Date(2026, 8, 27, 13, 5).getTime(),
+    appVersion: '2.0.0',
+  });
+
+  assert.ok(text.includes('2026-09-27 13:05'), '要有生成时间，用户才知道这份是新的还是旧的');
+  assert.ok(text.includes('v2.0.0'), '要写版本号 —— 出问题时这是第一个要问的信息');
+  assert.ok(text.includes('追番 3'), '条数要写进去');
+  assert.ok(text.includes('从备份导入'), '必须写清那个 json 该从哪里导入 —— 这是收件人唯一会卡住的地方');
+  assert.ok(text.includes('封面'), '要说清封面不在包里，否则用户会以为备份不完整');
+  assert.ok(text.includes('季度报告'), '有报告时要提它');
+});
+
+test('说明.txt：没带报告时要说清为什么、怎么才能有', () => {
+  const text = bundleReadme({ counts: {}, hasReport: false });
+  assert.ok(text.includes('没有报告长图'), '少一个文件必须说明，静悄悄少掉用户会以为导出坏了');
+  assert.ok(text.includes('季度报告'), '要告诉用户「切到那一页再导一次」');
 });

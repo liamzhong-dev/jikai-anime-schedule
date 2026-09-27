@@ -60,7 +60,12 @@ test('normalizeNote 折叠空白并截断', () => {
 test('makeEntry 全空时返回 null —— 空记录只会让「记了几次」虚高', () => {
   assert.equal(makeEntry({}), null);
   assert.equal(makeEntry({ rating: null, note: '  ' }), null);
-  assert.deepEqual(makeEntry({ rating: 8 }), { at: makeEntry({ rating: 8 }).at, rating: 8, note: '' });
+  // ⚠️ 这里以前写的是「再调一次 makeEntry 拿它的 at 当期望值」——
+  // 两次调用各自取 Date.now()，跨过毫秒边界就红（实测约 1/6 概率）。
+  // 现在只调一次，然后断言「形状就是这三个字段」。
+  const one = makeEntry({ rating: 8 });
+  assert.deepEqual({ ...one, at: null }, { at: null, rating: 8, note: '' }, '只有评分，短评要给空串');
+  assert.ok(Number.isFinite(one.at) && one.at > 0, `没给 at 时应当用当前时间，实际 ${one.at}`);
   assert.equal(makeEntry({ note: '只有短评' }).rating, null);
 });
 

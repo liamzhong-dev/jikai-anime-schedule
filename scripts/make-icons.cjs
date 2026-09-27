@@ -62,7 +62,12 @@ function renderIcon(size, { radiusRatio = 0.235, insetRatio = 0.055 } = {}) {
     }
   }
 
-  return encodePng(size, size, downsample(acc, size, SS));
+  // 返回像素而不是 PNG：托盘角标要在这上面继续画东西（见下面的 tray-base.cjs）
+  return downsample(acc, size, SS);
+}
+
+function renderIconPng(size, opts) {
+  return encodePng(size, size, renderIcon(size, opts));
 }
 
 const ROOT = path.join(__dirname, '..');
@@ -70,18 +75,63 @@ const OUT = path.join(ROOT, 'build', 'icons');
 
 function main() {
   fs.mkdirSync(OUT, { recursive: true });
+  /*
+   * 应用的图标尺寸要凑够一套：打包成 .exe 用的 .ico 里每个尺寸都得有 ——
+   * 只放一张 256 的话，Windows 在小尺寸（任务栏、开始菜单）上自己缩，
+   * 缩出来的月牙会糊成一团。托盘那两个是另一套画法，不参与 .ico。
+   */
   const targets = [
     ['icon.png', 256, {}],
     ['icon-128.png', 128, {}],
     ['icon-64.png', 64, {}],
+    ['icon-48.png', 48, {}],
+    ['icon-32.png', 32, {}],
+    ['icon-16.png', 16, {}],
     ['tray.png', 32, { radiusRatio: 0.26, insetRatio: 0.04 }],
     ['tray-16.png', 16, { radiusRatio: 0.28, insetRatio: 0.02 }],
   ];
   const rows = [];
+  let trayPixels = null;
   for (const [name, size, opts] of targets) {
-    const png = renderIcon(size, opts);
+    const pixels = renderIcon(size, opts);
+    const png = encodePng(size, size, pixels);
     fs.writeFileSync(path.join(OUT, name), png);
     rows.push(`${name}  ${size}x${size}  ${png.length} B`);
+    if (name === 'tray.png') trayPixels = { size, pixels };
+  }
+
+  /*
+   * 托盘角标要在这张底图上画数字，而主进程里没有 canvas：
+   * 装不了 sharp / canvas（本机没有 MSVC），自己缩图也不行。
+   * 所以这里顺手把 32×32 托盘图的**原始 RGBA 像素**落成一份 CJS 模块 ——
+   * 主进程 require 它就能直接改像素，再编码回 PNG。
+   *
+   * 为什么不走 nativeImage.toBitmap()：那个 buffer 的通道顺序是平台相关的
+   * （Windows 上是 BGRA），画个红角标在别的平台上就会变成蓝的。
+   * 自己存像素，顺序由自己定，不会有这种「换个系统颜色就反了」的毛病。
+   */
+  if (trayPixels) {
+    const text = [
+      "'use strict';",
+      '',
+      '/* 自动生成（node scripts/make-icons.cjs）—— 别手改。 */',
+      '',
+      `/** 托盘底图的原始像素：${trayPixels.size}×${trayPixels.size}，RGBA 顺序，每像素 4 字节。 */`,
+      `const WIDTH = ${trayPixels.size};`,
+      `const HEIGHT = ${trayPixels.size};`,
+      `const BASE64 = '${Buffer.from(trayPixels.pixels).toString('base64')}';`,
+      '',
+      'module.exports = {',
+      '  WIDTH,',
+      '  HEIGHT,',
+      '  rgba() {',
+      '    return Uint8ClampedArray.from(Buffer.from(BASE64, \'base64\'));',
+      '  },',
+      '};',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(ROOT, 'electron', 'tray-base.cjs'), text);
+    rows.push(`electron/tray-base.cjs  ${trayPixels.size * trayPixels.size * 4} B（角标底图）`);
   }
 
   // 同时给渲染层一份 favicon，省得浏览器标签页上是个空白图标

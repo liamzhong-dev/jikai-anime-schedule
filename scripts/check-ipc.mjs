@@ -35,6 +35,29 @@ const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
 env.JIKAI_IPC_SMOKE = '1';
 
+/**
+ * 导出文件包要「选一个文件夹」，自检里没法点那个框 —— 给一个一次性出口。
+ *
+ * ⚠️ 这个目录必须每一轮都是新的。用固定路径的话，上一轮留下的
+ * `次回-导出-…-2` 会让这一轮第一次导出就落到 `-3` 上，
+ * 而断言里写的是「第一次应该是原名」—— 于是自检变成「跑第二遍才红」。
+ *
+ * 保证「每轮都是新的」有两重：
+ * ① 名字里带时间戳 —— 即便上一轮那份没被清掉，这轮也不会踩到它；
+ * ② 清旧目录那一步包 try/catch —— 沙盒对「一轮里删了多少文件」有上限，
+ *    越线之后任何删除都会被拒。**环境拒绝删除不该让被测功能背锅**：
+ *    清不掉只是多占几 MB，断言照样跑在新目录上。
+ */
+const bundleDir = path.join(root, 'test', '.tmp', `ipc-bundle-${Date.now().toString(36)}`);
+try {
+  // 早期版本用的是固定名 `ipc-bundle`，顺手清一下；清不掉也无所谓（这轮名字不一样）
+  fs.rmSync(path.join(root, 'test', '.tmp', 'ipc-bundle'), { recursive: true, force: true });
+} catch {
+  console.log('! 上一轮的 ipc-bundle 没清掉（环境拒绝删除）—— 本轮用的是新目录，不影响结论');
+}
+fs.mkdirSync(bundleDir, { recursive: true });
+env.JIKAI_BUNDLE_DIR = bundleDir;
+
 const res = await new Promise((resolve, reject) => {
   const child = spawn(electron, ['.'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';

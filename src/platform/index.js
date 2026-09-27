@@ -251,6 +251,11 @@ const webAdapter = {
     return unsupported('季度报告长图导出', '浏览器环境不支持，导出长图请用桌面版');
   },
 
+  /** 浏览器里没有「文件夹」这个概念，落不了这种包 */
+  async exportBundle() {
+    return unsupported('导出文件包', '浏览器环境不支持，请用桌面版');
+  },
+
   // ---- 名称索引 ----
   async readNameIndex() {
     return readJson(NAME_INDEX_KEY);
@@ -381,6 +386,19 @@ const electronAdapter = {
   async reportExport({ kind = 'pdf', html = '', width = 1220, name = 'jikai-report' } = {}) {
     const r = await window.jikai?.reportExport?.({ kind, html, width, name });
     if (!r) return unsupported('长图导出', '主进程没有提供导出通道（preload 没更新？）');
+    return r;
+  },
+
+  /**
+   * 导出文件包。
+   *
+   * @param {{folder?:string, files?:Array<{name:string,text:string}>,
+   *          images?:Array<{name:string,kind:'pdf'|'png',html:string,width:number}>}} payload
+   * @returns {{ok:boolean, dir?:string, files?:Array, bytes?:number, error?:string}}
+   */
+  async exportBundle(payload = {}) {
+    const r = await window.jikai?.exportBundle?.(payload);
+    if (!r) return unsupported('导出文件包', '主进程没有提供导出通道（preload 没更新？）');
     return r;
   },
 

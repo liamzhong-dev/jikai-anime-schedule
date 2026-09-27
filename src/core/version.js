@@ -6,7 +6,7 @@
  * 所以这里放一份常量，发版时和 package.json 一起改。
  * 主进程（CJS）仍然直接读 package.json，不受影响。
  */
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '2.0.0';
 
 /**
  * 项目主页。只用来拼请求 Bangumi API 时带的 User-Agent，

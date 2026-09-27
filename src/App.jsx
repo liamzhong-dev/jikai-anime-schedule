@@ -31,7 +31,7 @@ import {
   exportableState, importState,
 } from './core/store.js';
 import { compareToBangumi } from './core/diary.js';
-import { buildTransfer, describeCounts, parseTransfer, transferCounts, transferFileName } from './core/transfer.js';
+import { buildTransfer, bundleFolderName, bundleReadme, describeCounts, parseTransfer, transferCounts, transferFileName } from './core/transfer.js';
 import { autoRankByScore } from './core/tierlist.js';
 import { collectImages, exportTierlistPng } from './core/tierExport.js';
 import {
@@ -1297,6 +1297,85 @@ export default function App() {
     }
   }, [report, seasonKey, pushToast]);
 
+  /**
+   * 导出文件包：报告 + 备份 + 说明，收进**一个目录**。
+   *
+   * 和上面那个「导出备份」的区别只是形状不同，不是功能不同 ——
+   * 一个是「一个 json 文件」，一个是「一个可以整个拖走的文件夹」。
+   * 要发给别人、或者搬到另一台机器时，后者不用自己记「哪几个文件是这次的」。
+   *
+   * 报告那一块只有在**报告页正开着**的时候才拿得到：导出的是画布本身，
+   * 而画布是当前 DOM 里的东西。拿不到就不带，并且在说明里写清楚为什么 ——
+   * 静悄悄少一个文件，用户会以为导出坏了。
+   */
+  const handleExportBundle = useCallback(async () => {
+    setTransferBusy('bundle');
+    setTransferNote('');
+    try {
+      const snapshotState = exportableState();
+      const payload = buildTransfer(snapshotState, { appVersion: appInfo?.version ?? '' });
+      const counts = payload.counts;
+
+      const canvas = canvasHtmlOf(document);
+      const images = [];
+      let reportSkipped = '';
+      if (canvas && report) {
+        const { css } = collectStyles();
+        const width = report.width ?? 1220;
+        images.push({
+          name: `季度报告-${seasonKey}.pdf`,
+          kind: 'pdf',
+          width,
+          html: buildReportHtml({
+            canvasHtml: canvas,
+            css,
+            width,
+            title: `${seasonLabel(seasonKey)} 季度报告`,
+          }),
+        });
+      } else {
+        reportSkipped = '这份文件包里没有报告长图（导出的时候没在报告页）。想要它，切到「季度报告」那一页再导一次。';
+      }
+
+      const folder = bundleFolderName();
+      const readme = bundleReadme({
+        counts,
+        seasonName: seasonLabel(seasonKey),
+        hasReport: images.length > 0,
+        appVersion: appInfo?.version ?? '',
+        note: reportSkipped,
+      });
+
+      const res = await platform.exportBundle({
+        folder,
+        files: [
+          { name: '数据备份.json', text: JSON.stringify(payload, null, 2) },
+          { name: '说明.txt', text: readme },
+        ],
+        images,
+      });
+
+      if (!res?.ok) {
+        const msg = res?.error ?? '主进程没给出结果';
+        if (msg.includes('取消')) { setTransferNote('已取消导出'); return; }
+        setTransferNote(`导出文件包失败：${msg}`);
+        pushToast('导出失败', msg);
+        return;
+      }
+
+      const line = `已导出到 ${res.dir}\n${describeCounts(counts)} · ${(res.files ?? []).map((f) => f.name).join(' / ')}`;
+      setTransferNote(line);
+      pushToast('文件包已导出', `${describeCounts(counts)} · ${(res.files ?? []).length} 个文件`);
+    } catch (err) {
+      const msg = err?.message ?? String(err);
+      if (msg.includes('取消')) { setTransferNote('已取消导出'); return; }
+      setTransferNote(`导出文件包失败：${msg}`);
+      pushToast('导出失败', msg);
+    } finally {
+      setTransferBusy('');
+    }
+  }, [appInfo?.version, report, seasonKey, pushToast]);
+
   const overdueCount = activeCatchup.filter(
     (r) => deadlineStatus(r.item.deadline, now).level === 'overdue',
   ).length;
@@ -1793,6 +1872,7 @@ export default function App() {
           note: transferNote,
           pending: transferPending,
           onExport: handleExportBackup,
+          onBundle: handleExportBundle,
           onImport: handlePickBackup,
           onConfirmImport: handleConfirmImport,
           onCancelImport: () => { setTransferPending(null); setTransferNote('已取消导入，本机记录一条没动'); },
