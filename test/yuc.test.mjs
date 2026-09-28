@@ -29,10 +29,14 @@ import {
   slimYuc,
   splitTitle,
   titleSimilarity,
+  nextAirMs,
+  parseYucTime,
   yucItemId,
   yucPageKey,
   yucPageUrl,
+  yucSeasonKeys,
 } from '../src/data/yuc.js';
+import { toJST } from '../src/core/time.js';
 
 const FIXTURE = new URL('./fixtures/yuc-schedule.sample.html', import.meta.url);
 const html = fs.readFileSync(FIXTURE, 'utf8');
@@ -424,4 +428,68 @@ test('matchLibrary：一条库条目不会被两条番堂记录抢走', () => {
 test('matchLibrary：脏输入不抛', () => {
   assert.equal(matchLibrary(null, null).size, 0);
   assert.equal(matchLibrary([{ id: 'y1', titleZh: '顶点武装' }], [null, 0, {}]).size, 0);
+});
+
+/* ---------- 换季 ---------- */
+
+test('yucSeasonKeys：新的在前、含当季、数量对得上', () => {
+  // 2026-10-10（日本时间）在 2026 秋
+  const nowMs = Date.parse('2026-10-10T12:00:00Z');
+  const keys = yucSeasonKeys(nowMs, { back: 4 });
+  assert.deepEqual(keys, ['2026q4', '2026q3', '2026q2', '2026q1']);
+});
+
+test('yucSeasonKeys：跨年要退回去年冬季（2026q1 往前是 2025q4）', () => {
+  const keys = yucSeasonKeys(Date.parse('2026-02-10T12:00:00Z'), { back: 3 });
+  assert.deepEqual(keys, ['2026q1', '2025q4', '2025q3']);
+});
+
+test('yucSeasonKeys：每一季都得能换成番堂的页面键', () => {
+  for (const k of yucSeasonKeys(Date.parse('2026-10-10T12:00:00Z'), { back: 8 })) {
+    assert.ok(yucPageKey(k), `${k} 换不出页面键 —— 那一季点进去会是空的`);
+  }
+});
+
+/* ---------- 下一次什么时候播 ---------- */
+
+test('parseYucTime：认「21:00」，也认日本那边的「25:30」', () => {
+  assert.deepEqual(parseYucTime('21:00'), { hour: 21, minute: 0 });
+  // ⚠️ 25 不许取模：它表示的是「次日凌晨 1:30」，取了模就丢了这个信息
+  assert.deepEqual(parseYucTime('25:30'), { hour: 25, minute: 30 });
+  assert.deepEqual(parseYucTime('21:00~'), { hour: 21, minute: 0 });
+  assert.equal(parseYucTime('深夜'), null);
+  assert.equal(parseYucTime(''), null);
+});
+
+test('nextAirMs：按日本时间落在同一个星期几的同一个时刻', () => {
+  // 2026-10-10T12:00Z = 日本时间周六 21:00
+  const nowMs = Date.parse('2026-10-10T12:00:00Z');
+  const ms = nextAirMs({ groupKey: 'sat', time: '21:00', start: { month: 10, day: 3 } }, nowMs);
+  const jst = toJST(ms);
+  assert.equal(jst.weekday, 6, '得是周六');
+  assert.equal(jst.hour, 21);
+  assert.ok(ms >= nowMs, '算出来的时刻不能在过去');
+});
+
+test('nextAirMs：今天这一次已经播过了就顺延一周（反向断言）', () => {
+  // 日本时间周六 21:30，而它 21:00 播 —— 该指下一周，不是一个过去的时间
+  const nowMs = Date.parse('2026-10-10T12:30:00Z');
+  const ms = nextAirMs({ groupKey: 'sat', time: '21:00', start: { month: 10, day: 3 } }, nowMs);
+  assert.ok(ms > nowMs, '返回值必须还在将来');
+  assert.equal(Math.round((ms - nowMs) / 86400000), 7, '应当是整整一周之后');
+});
+
+test('nextAirMs：首播日之前不算 —— 排在开播那一天或之后', () => {
+  const nowMs = Date.parse('2026-10-01T00:00:00Z'); // 开播前
+  const ms = nextAirMs({ groupKey: 'sat', time: '21:00', start: { month: 12, day: 5 } }, nowMs);
+  const jst = toJST(ms);
+  assert.ok(jst.month === 12 && jst.day >= 5, `落到了 ${jst.month}/${jst.day}，不该早于 12/5`);
+});
+
+test('nextAirMs：算不出来的要老实给 null（网络放送 / 没写时刻）', () => {
+  const nowMs = Date.parse('2026-10-10T12:00:00Z');
+  assert.equal(nextAirMs({ groupKey: 'net', time: '21:00' }, nowMs), null, '网络放送没有固定星期');
+  assert.equal(nextAirMs({ groupKey: 'mon', time: '' }, nowMs), null);
+  assert.equal(nextAirMs({ groupKey: 'mon', time: '深夜' }, nowMs), null);
+  assert.equal(nextAirMs(null, nowMs), null);
 });

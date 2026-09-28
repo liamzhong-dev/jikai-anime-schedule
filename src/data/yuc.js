@@ -21,6 +21,8 @@
  * 猜出来的结果是「看着有内容、其实字段是错的」，比空着难查得多。
  */
 
+import { JST_OFFSET_MS, toJST, seasonOf, parseSeason } from '../core/time.js';
+
 /** 八组的稳定 key —— 用的是星期序号，不是中文字，免得以后改文案就把缓存全作废 */
 const WEEKDAY_KEY = { 一: 'mon', 二: 'tue', 三: 'wed', 四: 'thu', 五: 'fri', 六: 'sat', 日: 'sun' };
 
@@ -713,4 +715,104 @@ export function matchLibrary(items, candidates) {
     }
   }
   return out;
+}
+
+/* ---------- 换一季 ---------- */
+
+/**
+ * 界面上能选的季度，新的在前。
+ *
+ * 只给最近这几季（含当季）：番堂那边过季的页面虽然还在，
+ * 但排播表本来就是「这一季要看什么」，往前翻太多没有意义，
+ * 而列表太长会让「换季」这件事本身变得不好找。
+ *
+ * @param {number} nowMs
+ * @param {{back?:number}} opts back = 一共给几季（含当季）
+ * @returns {string[]} 形如 ['2026q4', '2026q3', ...]
+ */
+export function yucSeasonKeys(nowMs = Date.now(), { back = 8 } = {}) {
+  const s = parseSeason(seasonOf(nowMs));
+  if (!s) return [];
+  const idx = s.year * 4 + (s.q - 1);
+  const lo = idx - Math.max(0, Number(back) - 1);
+  const out = [];
+  for (let i = idx; i >= lo; i -= 1) out.push(`${Math.floor(i / 4)}q${(i % 4) + 1}`);
+  return out;
+}
+
+/* ---------- 下一次什么时候播 ---------- */
+
+/** 分组 key → JS 的星期序号（0=周日，和 `Date.getDay()` 对齐） */
+const WEEKDAY_INDEX = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+
+const MS_PER_DAY = 86400000;
+
+/**
+ * "21:00" / "25:30" / "深夜" → {hour, minute}。认不出来给 null。
+ *
+ * ⚠️ 小时可以大于 24：日本那边的「25:30」就是次日凌晨 1:30，
+ * 这里**保留原值**交给下面的日期运算去进位，不要在这里取模 ——
+ * 取了模就丢了「它其实属于第二天」这个信息。
+ */
+export function parseYucTime(text) {
+  const m = /(\d{1,2})\s*[:：]\s*(\d{2})/.exec(String(text ?? ''));
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  if (hour < 0 || hour > 47 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+}
+
+/** 日本时间 Y-M-D H:M 对应的 UTC 毫秒（hour 允许 ≥24，交给 Date.UTC 进位） */
+function jstMs(year, month, day, hour, minute) {
+  return Date.UTC(year, month - 1, day, hour, minute) - JST_OFFSET_MS;
+}
+
+/**
+ * 这一条下一次播出的时刻（UTC 毫秒）。给「提醒我」用。
+ *
+ * 口径有三条，都是踩过的坑：
+ *   1. **按日本时间算**。番堂列的是日本电视台的档期，「周六 25:30」
+ *      在我们这里是周六深夜 24:30（北京时间），用错时区就会早/晚一小时。
+ *   2. **过了今天这一次就顺延一周**。今天是周六、22 点，而它 21 点播过了 ——
+ *      提醒应该指下一周，而不是一个已经过去的时间。
+ *   3. **首播日之前不算**。`start` 给了开播那天（10/5），前面几周它还没开始播。
+ *
+ * ⚠️ 番剧会完结、会停播一周，这些番堂的排播表里没有；所以这个值只用来
+ * 「提醒一次」，不做「已经播了几集」的推算 —— 那件事仍然由库里的 `begin`/`broadcast` 负责。
+ *
+ * @param {{groupKey?:string, time?:string, start?:{month:number,day:number}|null}} item
+ * @param {number} nowMs
+ * @returns {number|null} 算不出来（网络放送、时刻没写、认不出周几）就给 null
+ */
+export function nextAirMs(item, nowMs = Date.now()) {
+  if (!item) return null;
+  const idx = WEEKDAY_INDEX[item.groupKey];
+  if (idx == null) return null; // 网络放送那一组没有固定星期
+  const t = parseYucTime(item.time);
+  if (!t) return null;
+
+  const cur = toJST(nowMs);
+  if (!cur) return null;
+
+  // 今天（日本时间）往后找到第一个该星期几
+  const delta = (idx - cur.weekday + 7) % 7;
+  let ms = jstMs(cur.year, cur.month, cur.day + delta, t.hour, t.minute);
+
+  // 首播日之前不算：把起点推到开播那天之后第一次该星期几
+  const st = item.start;
+  if (st && Number.isFinite(st.month) && Number.isFinite(st.day)) {
+    let firstMs = jstMs(cur.year, st.month, st.day, t.hour, t.minute);
+    // 「10/5」这种只给月日不给年份：跨年那一季（10 月番在 1 月看）要往回找一年
+    if (firstMs > nowMs + 200 * MS_PER_DAY) firstMs = jstMs(cur.year - 1, st.month, st.day, t.hour, t.minute);
+    while (ms < firstMs) ms += 7 * MS_PER_DAY;
+  }
+
+  // 今天这一次已经播过了 → 下一周
+  const guard = 400 * MS_PER_DAY;
+  const deadline = nowMs + guard;
+  while (ms < nowMs && ms < deadline) ms += 7 * MS_PER_DAY;
+  if (ms < nowMs) return null;
+
+  return ms;
 }

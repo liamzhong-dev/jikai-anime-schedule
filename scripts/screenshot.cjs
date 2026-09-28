@@ -50,6 +50,42 @@ async function detectProxyArg() {
 /** 壁纸一组通用参数；各张图按需要覆盖其中几项 */
 const WALL = { opacity: 0.72, blur: 5, brightness: 0.92, scale: 1.06, position: 'center', dim: 0.3 };
 
+/**
+ * 演示用的主题。
+ *
+ * 默认那套「夜航」是给夜里等更新用的深底，拿去当演示图偏暗、偏闷，
+ * 缩略图级别更是只剩一团黑 —— 所以功能图统一走这套浅色（Stripe 清爽紫）。
+ * 四张**主题演示图**（15～18）不在此列：它们要展示的正是各自那套配色，
+ * 各自带 `seed.theme`，会盖掉这里的默认值。
+ */
+const DEMO_THEME = 'stripe';
+
+/** 番堂那份缓存在浏览器壳里也是 localStorage，键和 platform 里那份一致 */
+const YUC_KEY = 'jikai/yuc/v1';
+
+let yucSeedCache = null;
+
+/**
+ * 番堂那一页的种子数据。
+ *
+ * 为什么要喂：浏览器壳里 `fetchText` 一定撞 CORS（yuc.wiki 不发跨域头），
+ * 不喂的话这一页截下来就是一句「拉不到排播表」——那不是演示，是故障现场。
+ * 喂的是**真实页面片段解析出来的**（跟桌面自检同一份样本），不是手搓的对象。
+ */
+async function yucSeed(seasonKey) {
+  if (!yucSeedCache) {
+    const yucUrl = pathToFileURL(path.join(ROOT, 'src', 'data', 'yuc.js')).href;
+    const srcUrl = pathToFileURL(path.join(ROOT, 'src', 'data', 'yucSource.js')).href;
+    const { parseYucPage, slimYuc } = await import(yucUrl);
+    const { YUC_CACHE_SCHEMA } = await import(srcUrl);
+    const html = fs.readFileSync(path.join(ROOT, 'test', 'fixtures', 'yuc-schedule.sample.html'), 'utf8');
+    const slim = slimYuc(parseYucPage(html));
+    if (!slim) throw new Error('番堂样本解析不出来，这一页没法截图');
+    yucSeedCache = { slim, schema: YUC_CACHE_SCHEMA };
+  }
+  return { [seasonKey]: { ...yucSeedCache.slim, schema: yucSeedCache.schema, savedAt: Date.now() } };
+}
+
 const SHOTS = [
   { name: '01-season', hash: 'season' },
   { name: '02-schedule', hash: 'schedule' },
@@ -111,6 +147,23 @@ const SHOTS = [
     then: ['makePreset', 'clickRename'],
     expectRenameInput: true,
   },
+
+  /*
+   * 上面那批是「界面元素」的取样，这里是**每个视图各来一张** ——
+   * 补番日记、追番历程、Tier List、季度报告、番堂排播，五个都补齐，
+   * 不然 README 里列了九个视图、图上只有六个。
+   */
+  { name: '21-diary', hash: 'diary' },
+  { name: '22-history', hash: 'history' },
+  { name: '23-tier', hash: 'tier' },
+  { name: '24-report', hash: 'report' },
+  /*
+   * 番堂那一页：季度钉在 2026q4（样本就是 202610 那一页），
+   * 并把解析结果喂进它自己的缓存 —— 浏览器壳取不到对方站点，见 yucSeed。
+   */
+  { name: '25-yuc', hash: 'yuc', season: '2026q4', yuc: true },
+  // 选中一条之后的资料卡：提醒、日记入口都在这张上
+  { name: '26-yuc-detail', hash: 'yuc', season: '2026q4', yuc: true, action: 'openYucDetail' },
 ];
 
 const VIEW = { w: 1440, h: 900 };
@@ -211,6 +264,17 @@ const ACTIONS = {
     entry.click();
     return 'ok';
   },
+  /**
+   * 番堂那一页：点第一条排播，好让右边的资料卡有内容。
+   * 挑的是**资料齐全**（介绍区对上了）的那一条 —— 随手点第一条的话，
+   * 资料卡可能只有时刻和封面，截出来像解析坏了。
+   */
+  openYucDetail: () => {
+    const hot = [...document.querySelectorAll('[data-yuc-select]')];
+    if (!hot.length) return '番堂这一页一条排播都没有（缓存没喂进去？）';
+    hot[0].click();
+    return 'ok';
+  },
   pickTab: (label) => {
     const btn = [...document.querySelectorAll('.tabs__btn')].find((b) => b.textContent.trim() === label);
     if (!btn) return `设置面板里没有「${label}」页签`;
@@ -279,6 +343,9 @@ const PROBE = () => {
     progressVisible: Boolean(bar && !bar.classList.contains('progressbar--hidden')),
     windows: document.querySelectorAll('.window').length,
     cards: document.querySelectorAll('.card').length,
+    // 番堂那一页的条目数。「八组标题排得整整齐齐、底下一条都没有」和
+    // 「缓存没喂进去」在截图上长得一模一样，只有数出来才能分开。
+    yucItems: document.querySelectorAll('[data-yuc-item]').length,
     // 封面是不是真的解码出来了。用自然宽度判断 —— complete 对加载失败的图也是 true，
     // 只有 naturalWidth > 0 才能说明像素到位了。
     coversLoaded: [...document.querySelectorAll('.card__cover img')].filter((i) => i.naturalWidth > 0).length,
@@ -401,19 +468,24 @@ function scaleOf(transform) {
 
       // 清空本地存储再播种：不留上一张图的主题 / 壁纸。
       // settings 由各张图单独覆盖，追番与补番走同一份样例数据。
-      await page.evaluateOnNewDocument((stateKey, wpKey, seed, wp, base) => {
+      const q = shot.season ?? SEASON;
+      const yucPayload = shot.yuc ? await yucSeed(q) : null;
+
+      await page.evaluateOnNewDocument((stateKey, wpKey, yucKey, seed, wp, base, yuc) => {
         try {
           localStorage.removeItem(stateKey);
           localStorage.removeItem(wpKey);
+          localStorage.removeItem(yucKey);
           localStorage.setItem(
             stateKey,
             JSON.stringify({ ...base, settings: { ...(base.settings ?? {}), ...seed } }),
           );
           if (wp) localStorage.setItem(wpKey, JSON.stringify(wp));
+          if (yuc) localStorage.setItem(yucKey, JSON.stringify(yuc));
         } catch (e) { /* 播种失败就用默认值，探针会看出来 */ }
-      }, STATE_KEY, WALLPAPER_KEY, shot.seed ?? {}, shot.wallpaperAsset ? wpAsset : null, baseState);
+      }, STATE_KEY, WALLPAPER_KEY, YUC_KEY, { theme: DEMO_THEME, ...(shot.seed ?? {}) }, shot.wallpaperAsset ? wpAsset : null, baseState, yucPayload);
 
-      await page.goto(`http://127.0.0.1:${port}/#/${shot.hash}?q=${SEASON}`, { waitUntil: 'load' });
+      await page.goto(`http://127.0.0.1:${port}/#/${shot.hash}?q=${q}`, { waitUntil: 'load' });
       await page.waitForSelector('.window', { timeout: 15000 });
       // 等卡片网格铺开、封面下载完、主题变量写入
       await sleep(900);
@@ -455,7 +527,11 @@ function scaleOf(transform) {
       if (probe.overflowX > 2) problems.push(`画布横向溢出 ${probe.overflowX}px`);
       if (shot.wallpaperAsset && !probe.wpVisible) problems.push('壁纸图层没生效');
       if (!shot.wallpaperAsset && probe.wpVisible) problems.push('不该有壁纸却出现了壁纸（状态串了）');
-      if (probe.theme !== (shot.seed?.theme ?? 'night')) problems.push(`主题不对：期望 ${shot.seed?.theme ?? 'night'}，实际 ${probe.theme}`);
+      // ⚠️ 默认值是 DEMO_THEME，不是默认的「夜航」—— 演示图统一走浅色那套
+      const wantTheme = shot.seed?.theme ?? DEMO_THEME;
+      if (probe.theme !== wantTheme) problems.push(`主题不对：期望 ${wantTheme}，实际 ${probe.theme}`);
+      // 番堂那一页必须有条目：喂不进去的话截下来是一句「拉不到排播表」
+      if (shot.yuc && !(probe.yucItems > 0)) problems.push(`番堂那一条排播都没有（yucItems=${probe.yucItems}）`);
       if (shot.seed?.panelAlpha != null && Math.abs(Number(probe.panelAlpha) - shot.seed.panelAlpha) > 0.001) {
         problems.push(`卡片不透明度不对：期望 ${shot.seed.panelAlpha}，实际 ${probe.panelAlpha}`);
       }

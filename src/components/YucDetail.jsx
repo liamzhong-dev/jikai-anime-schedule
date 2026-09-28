@@ -1,5 +1,7 @@
 import React from 'react';
 import Cover from './Cover.jsx';
+import { dateTimeCST } from '../core/time.js';
+import { nextAirMs } from '../data/yuc.js';
 
 /**
  * 番堂条目的详细资料。
@@ -15,7 +17,15 @@ import Cover from './Cover.jsx';
  * 都在那边）。这是这一页和「本季番剧」唯一的交汇点，也是它值得单独存在的理由：
  * 时刻表来自番堂、条目资料来自 Bangumi，两边各有各的用处。
  */
-export default function YucDetail({ item, lib, onOpenLibrary }) {
+export default function YucDetail({
+  item,
+  lib,
+  now = Date.now(),
+  remindOn = false,
+  onToggleRemind,
+  diarySlot = null,
+  onOpenLibrary,
+}) {
   if (!item) {
     return (
       <div className="empty" data-yuc-detail="">
@@ -27,6 +37,9 @@ export default function YucDetail({ item, lib, onOpenLibrary }) {
   const staff = item.staff ?? [];
   const tags = item.tags ?? [];
   const links = item.links ?? [];
+  const nextMs = nextAirMs(item, now);
+  // 提醒只对上了库的条目有意义：库里那条才有「追没追」这回事，也才是 tick 会去查的那个 id
+  const canRemind = Boolean(lib) && nextMs != null;
 
   return (
     <div className="yuc-detail" data-yuc-detail={item.id}>
@@ -69,6 +82,36 @@ export default function YucDetail({ item, lib, onOpenLibrary }) {
           <button type="button" className="btn" data-yuc-open-lib={lib.id} onClick={() => onOpenLibrary?.(lib)}>
             看评分与日记
           </button>
+        </div>
+      ) : null}
+
+      {/*
+        提醒。时刻由番堂的「周几 + 几点」现算（见 data/yuc.js 的 nextAirMs），
+        显示成**北京时间** —— 用户是在这边熬夜等更新的，给他日本时间没意义。
+        ⚠️ 番剧会完结、会停播一周，番堂的表里没有这些，所以这里说的是「下一次」
+        而不是「第几集」，按下去也只是提醒一次。
+      */}
+      {canRemind ? (
+        <div className="yuc-detail__remind" data-yuc-remind={remindOn ? 'on' : 'off'}>
+          <span className="yuc-detail__next">
+            下一次 {dateTimeCST(nextMs)}
+            <em>（北京时间）</em>
+          </span>
+          <button
+            type="button"
+            className="btn"
+            data-yuc-remind-btn={lib.id}
+            onClick={() => onToggleRemind?.(item, lib)}
+          >
+            {remindOn ? '关掉提醒' : '提醒我这一集'}
+          </button>
+        </div>
+      ) : null}
+
+      {diarySlot ? (
+        <div className="yuc-detail__diary" data-yuc-diary="1">
+          <h4 className="yuc-detail__sec">补番日记</h4>
+          {diarySlot}
         </div>
       ) : null}
 

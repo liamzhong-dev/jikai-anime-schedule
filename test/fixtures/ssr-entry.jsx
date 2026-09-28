@@ -301,6 +301,12 @@ export async function renderYuc(props = {}) {
     onSelect: () => {},
     matched: new Map(),
     onReload: () => {},
+    /*
+     * 默认按**桌面壳**渲 —— 番堂的主力运行环境就是桌面壳，而 SSR 里 `platform`
+     * 一律判成 web（`window.jikai` 不存在），不钉死的话这一页的断言只能测到
+     * 「浏览器那一档」。要测浏览器壳，显式传 `allowRemote: true`。
+     */
+    allowRemote: false,
   };
   return renderToStaticMarkup(<YucView {...base} {...props} />);
 }

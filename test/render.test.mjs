@@ -1055,11 +1055,12 @@ test('番堂视图：八组排播、每一条都有可点热区，封面一律�
   assert.equal(countOf(html, 'data-yuc-select='), items.length, '每一条都要有可点热区，缺一条就是点不开');
 
   /*
-   * 封面必须走缓存，**一条直连都不许有**。
+   * 封面必须走缓存，**一条直连都不许有**（`renderYuc` 默认钉在桌面壳那一档）。
    * 番堂的图挂在 B 站图床（i0.hdslb.com）上，`allowRemote` 一开桌面壳里就是
    * 「浏览器先下一遍、主进程再下一遍」；断网则直接一片色块。
    */
-  assert.equal(countOf(html, 'data-cover="remote"'), 0, '番堂的封面不该出现直连远端');
+  assert.equal(countOf(html, 'data-cover="remote"'), 0, '桌面壳里番堂的封面不该出现直连远端');
+  assert.ok(html.includes('data-yuc-remote="0"'), '番堂页要把「这一档是走缓存」摆出来，自检据此认壳');
   assert.equal(
     countOf(html, 'class="cover yuc-item__cover"'),
     items.length,
@@ -1072,6 +1073,38 @@ test('番堂视图：八组排播、每一条都有可点热区，封面一律�
     // 而它其实好好地在那儿
     assert.ok(html.includes(escapeHtml(g.label)), `分组标题「${g.label}」没渲染出来`);
   }
+});
+
+/*
+ * 「桌面不许直连」和「浏览器必须直连」是**同一条规矩的两半**，必须成对测。
+ * 只测前一半时它是绿的，但浏览器那头根本没有本地缓存这回事 ——
+ * 关掉直连等于「一片色块、永远不会有图」，那不是降级，是坏了。
+ */
+test('番堂视图：浏览器壳反过来要允许直连，否则永远一片色块', async () => {
+  const items = yucItems();
+  const withCover = items.filter((it) => typeof it.cover === 'string' && it.cover);
+
+  const web = await renderYuc({ allowRemote: true });
+  assert.ok(web.includes('data-yuc-remote="1"'), '浏览器那一档要显式标出来');
+  /*
+   * 反向在前：样本里一条封面地址都没有时，下面那条 `=== 0` 照样成立，
+   * 断言就空转了 —— 先证明「确实有图要画」。
+   */
+  assert.ok(withCover.length > 0, `样本里一条封面地址都没有（共 ${items.length} 条），这条断言会空转`);
+  assert.equal(
+    countOf(web, 'data-cover="remote"'),
+    withCover.length,
+    '浏览器壳没有本地缓存，不许直连就等于这一页永远没图',
+  );
+
+  // 同一份数据、只翻开关：桌面那一档必须一条直连都没有
+  const desk = await renderYuc({ allowRemote: false });
+  assert.equal(countOf(desk, 'data-cover="remote"'), 0, '桌面壳翻回这一档时，直连要全部收掉');
+  assert.equal(
+    countOf(desk, 'data-cover="none"'),
+    items.length,
+    '桌面壳缓存没到位前，每一格都该是色块位（不是破图、也不是空）',
+  );
 });
 
 test('番堂视图：拿不到数据时给的是原因和出口，不是一张空白卡', async () => {
@@ -1120,6 +1153,60 @@ test('番堂的作品资料：对上了自己的库时给一条回 Bangumi 的�
   // 反向：没对上时不该瞎标
   const noLib = await renderYucDetail({ item, lib: null });
   assert.equal(noLib.includes('data-yuc-own'), false, '对不上就是没有，不许借一条别的顶上');
+});
+
+test('番堂视图：能换季，而且是真 <select> 不是自己画的按钮', async () => {
+  const html = await renderYuc({
+    seasons: ['2026q4', '2026q3', '2026q2'],
+    seasonKey: '2026q3',
+  });
+  assert.ok(html.includes('data-yuc-season="2026q3"'), '当前季度要报出来');
+  assert.ok(html.includes('<select'), '换季要用真 select —— 键盘能翻、读屏器认得');
+  // 三个选项都得画出来，少一个就是那一季点不进去
+  assert.equal(countOf(html, '<option'), 3);
+
+  // 反向：一个可选项都没有时也不能崩，得把当前季显示出来
+  const flat = await renderYuc({ seasons: [], seasonKey: '2026q4', seasonLabel: '2026 秋' });
+  assert.ok(flat.includes('data-yuc-season="2026q4"'), '没有列表时要退回当前这一季，不能空着');
+});
+
+test('番堂的资料卡：对上了库才给「提醒我」，并且把下一次播的时刻说出来', async () => {
+  // 挑一条有星期几又有时刻的 —— 网络放送那组没有固定星期，那条不该出提醒
+  const item = yucItems().find((it) => /^(mon|tue|wed|thu|fri|sat|sun)$/.test(it.groupKey ?? '') && /\d{1,2}:\d{2}/.test(it.time ?? ''));
+  assert.ok(item, '前提：样本里得有一条带星期几和时刻的排播记录');
+
+  const on = await renderYucDetail({ item, lib: { id: 12345, titleZh: item.titleZh }, now: Date.parse('2026-10-10T12:00:00Z') });
+  assert.ok(on.includes('data-yuc-remind="off"'), '没开提醒时状态位要写 off');
+  assert.ok(on.includes('data-yuc-remind-btn="12345"'), '按钮要挂在库里那条上 —— 提醒查的是那个 id');
+  assert.ok(on.includes('下一次'), '要把下一次播的时刻说出来，光有个按钮等于让用户猜');
+
+  // 反向：没对上库就不该有提醒（提醒查的是库里的 id，对不上就没有可查的对象）
+  const noLib = await renderYucDetail({ item, lib: null, now: Date.parse('2026-10-10T12:00:00Z') });
+  assert.equal(noLib.includes('data-yuc-remind'), false, '没对上库就没有可提醒的对象');
+
+  // 反向：算不出时刻的（网络放送 / 没写时刻）也不该画一个空按钮
+  const net = await renderYucDetail({
+    item: { ...item, groupKey: 'net', time: '' },
+    lib: { id: 12345, titleZh: item.titleZh },
+    now: Date.parse('2026-10-10T12:00:00Z'),
+  });
+  assert.equal(net.includes('data-yuc-remind'), false, '算不出时刻就别给按钮');
+});
+
+test('番堂的资料卡：日记那一块接进来时要标出来', async () => {
+  const item = yucItems().find((it) => (it.staff ?? []).length);
+  const withSlot = await renderYucDetail({
+    item,
+    lib: { id: 12345, titleZh: item.titleZh },
+    // 直接传字符串：这一条要验的是「槽位接上了、内容画出来了」，
+    // 不是日记控件本身（那个由它自己的用例守着）
+    diarySlot: 'PROBE-DIARY',
+  });
+  assert.ok(withSlot.includes('data-yuc-diary="1"'), '有日记槽位时要标出来');
+  assert.ok(withSlot.includes('PROBE-DIARY'), '传进来的内容要真的画出来');
+
+  const without = await renderYucDetail({ item, lib: { id: 12345, titleZh: item.titleZh } });
+  assert.equal(without.includes('data-yuc-diary'), false, '没有槽位就别画一个空标题');
 });
 
 test('番堂那一页接在大界面上：导航、卡片、深链都在', async () => {

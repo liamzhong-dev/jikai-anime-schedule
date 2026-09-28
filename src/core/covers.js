@@ -73,6 +73,52 @@ export function coverVariant(url, variant) {
 }
 
 /**
+ * 服务端缩略图：B 站图床（番堂的封面挂在 `i0.hdslb.com`）支持在地址后面
+ * 直接挂 `@<宽>w_<高>h_1c.webp`，由 CDN 现成生成，不需要本地缩图 ——
+ * 这一点很关键，本机没有 MSVC，装不了 sharp / canvas，自己缩这条路走不通。
+ *
+ * 为什么必须有它（实测数字，2026-09-29 量的同一张图）：
+ *
+ * | 地址 | 体积 |
+ * | --- | --- |
+ * | 原图 | 289 888 B |
+ * | `@150w_212h_1c.webp` | 10 116 B |
+ * | `@150w_212h_1c.jpg` | 14 741 B |
+ *
+ * 番堂一页 24 张封面，用原图是 7 MB —— 预热要几十秒，而界面上**没有任何进度提示**，
+ * 用户看到的就完全是「点了没反应 / 封面没渲染出来」。换成缩略图是 250 KB，几秒完事。
+ * 那次报障的根因就是「图太大 + 没有提示」，不是取不到图。
+ *
+ * ⚠️ 后缀里的尺寸和 Bangumi `c` 变体（150×212）对齐，两个数据源在图块上一样大。
+ */
+export const THUMB_HOSTS = ['hdslb.com'];
+export const THUMB_W = 150;
+export const THUMB_H = 212;
+export const THUMB_SUFFIX = `@${THUMB_W}w_${THUMB_H}h_1c.webp`;
+
+/**
+ * 给封面地址挂上上面的缩略图后缀。
+ *
+ * 认不出 host / 不是一个正经 URL / 已经带 `@` 处理后缀的，一律原样返回 ——
+ * 宁可用原图，也不要叠出一个指向空处的链接（叠两次后缀 CDN 会直接 404）。
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+export function coverThumb(url) {
+  const raw = String(url ?? '').trim();
+  if (!raw || raw.includes('@')) return raw;
+  let host = '';
+  try {
+    host = new URL(raw).hostname.toLowerCase();
+  } catch {
+    return raw; // 不是合法 URL，改它没有任何意义
+  }
+  if (!THUMB_HOSTS.some((h) => host === h || host.endsWith(`.${h}`))) return raw;
+  return `${raw}${THUMB_SUFFIX}`;
+}
+
+/**
  * 从封面 URL 反推变体；认不出来给 null。
  * 用来判断「缓存里存的是哪一档」，将来要升级画质时不用重猜。
  */
@@ -140,7 +186,8 @@ export function coverCrop({ srcW, srcH, dstW, dstH }) {
 export function coverEntries(list, variant) {
   const out = [];
   for (const a of Array.isArray(list) ? list : []) {
-    const url = coverVariant(a?.cover, variant).url;
+    // 先按 Bangumi 的规则换变体，再按图床的规则压体积；两步互不认识，但都不改非自家的地址
+    const url = coverThumb(coverVariant(a?.cover, variant).url);
     if (url) out.push({ key: String(a?.id), url });
   }
   return out;

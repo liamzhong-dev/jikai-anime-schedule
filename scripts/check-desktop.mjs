@@ -73,6 +73,12 @@ const click = Number(arg('click', '0'));
 const wp = process.argv.includes('--wp');
 const cardopen = process.argv.includes('--cardopen');
 const retryhw = process.argv.includes('--retryhw');
+/*
+ * `--yuc-covers`：番堂那一页**额外**断言「封面真的全部进了缓存」。
+ * 它是唯一一条依赖网络的自检，所以自带这个开关、不进 check:all（理由同 live:yuc）：
+ * 断网、对方图床抖一下都会红，而红的不是我们的代码。
+ */
+const yucCovers = process.argv.includes('--yuc-covers');
 
 if (wp && !profile) {
   console.error('✗ --wp 必须同时给 --profile：不给的话这次自检会去拖**用户真实存档**里的壁纸位置');
@@ -801,6 +807,19 @@ if (view === 'yuc') {
       `「已收入」应当有 ${expected.own} 条，实际 ${y.own} —— 和库里对表那一步没接上`,
     );
     check(Number(y.summary) === 1, '收录统计那一行没渲染出来');
+    /*
+     * 换季那个下拉：值必须就是这次跑的季度，而且得真有几项可选。
+     * 少了这一条的话，「下拉框显示了当前季」和「下拉框根本没接数据」长得一模一样 ——
+     * 而后者点下去是没反应的，用户只会以为这一季就是全部。
+     */
+    check(
+      y.season === (season || '2026q4'),
+      `换季下拉的当前值是 ${y.season}，这次跑的是 ${season || '2026q4'} —— 下拉没接在实际数据上`,
+    );
+    check(
+      Number(y.seasonOptions) > 1,
+      `换季下拉只有 ${y.seasonOptions} 个选项 —— 那就换不了季`,
+    );
     check(Number(y.detail) === 1, '作品资料卡没渲染出来');
     // 这次读的是缓存、网一次没发，不该被标成「没更新上」—— stale 的语义串了
     check(Number(y.stale) === 0, 'stale（这次没更新上）不该出现在读缓存的那一次');
@@ -823,6 +842,27 @@ if (view === 'yuc') {
     Number(report.coverRemote) === 0,
     `番堂的封面在直连远端（coverRemote=${report.coverRemote}）—— allowRemote 没关掉`,
   );
+
+  /*
+   * 只有 `--yuc-covers` 才卡这一条：它是「封面真的取到了」的唯一判据。
+   *
+   * 2026-09-29 那次报障「封面一个都没渲染出来」，真相是**图能取到但太慢** ——
+   * 每张 290 KB、一季 7 MB，预热几十秒，而界面上没有任何提示，
+   * 于是「还在下」和「压根没接上」在截图上长得一模一样。
+   * 换成 10 KB 的缩略图之后几秒就齐了，这条守卫就是用来钉住这个结果的。
+   */
+  if (yucCovers) {
+    const total = Number(y?.items ?? 0);
+    check(total > 0, '前提是这一页得有条目，否则下面那条会以 0 === 0 通过');
+    check(
+      Number(report.coverCache) === total,
+      `番堂的封面应当全部进缓存（缓存 ${report.coverCache} / 条目 ${total}）—— 没进的那些会一直是色块`,
+    );
+    check(
+      Number(report.coverNone) === 0,
+      `还有 ${report.coverNone} 张封面是色块（缓存 ${report.coverCache} / 条目 ${total}）`,
+    );
+  }
 }
 
 // ---- 季度报告：磁盘上的块能不能一路走到画布上 ----
@@ -1093,6 +1133,16 @@ if (view === 'tier' && !profile) {
 }
 if (view === 'season') {
   console.log(`  封面：缓存 ${report.coverCache} · 直连 ${report.coverRemote}（必须为 0）· 色块 ${report.coverNone}`);
+}
+if (view === 'yuc') {
+  /*
+   * 番堂这几样**在截图里看不出来**：「图还没下完」和「封面压根没接上」都是一片色块，
+   * 而「正在缓存」那条提示到底有没有摆出来，也只有数得出来。
+   */
+  console.log(
+    `  封面：缓存 ${report.coverCache} · 直连 ${report.coverRemote}（必须为 0）· 色块 ${report.coverNone}`
+      + ` · 进度提示 ${report.yucCoverProg ?? '无'}`,
+  );
 }
 if (view === 'diary') {
   console.log(`  日记：导航 ${report.diaryNav} · 视图 ${report.diaryView} · 比对行 ${report.diaryRows}`);

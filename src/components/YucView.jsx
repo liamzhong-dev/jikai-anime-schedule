@@ -3,6 +3,9 @@ import Cover from './Cover.jsx';
 import { CoverProvider } from './CoverContext.jsx';
 import { useCovers } from '../core/useCovers.js';
 import { coverEntries } from '../core/covers.js';
+// 别名：组件本身有个同名 prop（当前季度的显示名），直接 import 会撞车
+import { seasonLabel as seasonLabelOf } from '../core/time.js';
+import { platform } from '../platform/index.js';
 
 /**
  * 长门番堂（yuc.wiki）的季度排播表。
@@ -20,8 +23,11 @@ import { coverEntries } from '../core/covers.js';
  * 而且浏览器先下一遍、主进程再下一遍。缓存键用条目自己的 id（`y` + 标题哈希），
  * 不会和 Bangumi 的数字 id 撞。
  *
- * `allowRemote={false}`：桌面壳里不许直连 —— 这一条和本季番剧那批是同一个理由。
- * 代价是「第一次打开、还没缓存」时是一片色块，但那比「看着有图、断网就没了」好。
+ * `allowRemote`：桌面壳里关掉，浏览器壳里打开 —— 判据和本季番剧那批是同一条
+ * （`platform.kind === 'web'`）。浏览器那头根本没有本地缓存这回事，
+ * 关掉就等于「一片色块、永远不会有图」，而那不是降级，是坏了。
+ * 桌面这头关掉的理由不变：直连会让浏览器先下一遍、主进程再下一遍，
+ * 断网则一片色块 —— 走缓存是唯一「离线也有图」的路。
  *
  * ## 状态
  *
@@ -38,17 +44,36 @@ export default function YucView({
   stale,
   seasonKey,
   seasonLabel,
+  seasons,
+  onSeason,
   selectedId,
   onSelect,
   matched,
   onReload,
+  allowRemote,
 }) {
   const groups = data?.groups ?? [];
   const items = useMemo(() => groups.flatMap((g) => g.items ?? []), [groups]);
 
+  /*
+   * 封面能不能直连远端，由壳决定 —— 但**允许被 props 顶掉**。
+   *
+   * 为什么留这个口子：这条规矩是两个壳相反的（桌面关、浏览器开），而 SSR 环境里
+   * `platform` 一律判成 web（`window.jikai` 不存在）。不留口子的话，单测只能测到
+   * 「浏览器那一档」，桌面那档（也是真正的主力壳）**永远测不到** ——
+   * 而「断言只能测到一半」比没有断言更危险，它会让人以为两边都守住了。
+   */
+  const remoteOk = allowRemote ?? (platform.kind === 'web');
+
   // 封面的入参是 `[{key, url}]`，键是条目 id（不是地址）—— 变体地址是取图层的内部事
   const entries = useMemo(() => coverEntries(items.map((it) => ({ id: it.id, cover: it.cover })), 'c'), [items]);
-  const { images, error: coverError } = useCovers({
+  /*
+   * ⚠️ `progress` 必须接出来用。2026-09-29 那次报障「封面一个都没渲染出来」，
+   * 真实情况是：图能取到，但每张 290 KB、24 张要几十秒，而界面上一点提示都没有 ——
+   * 用户看到的和「根本没接封面」完全一样。现在图压到了 10 KB/张（见 covers.js 的
+   * `coverThumb`），再把进度摆出来，两种失败就不会再被混为一谈。
+   */
+  const { images, progress: coverProgress, error: coverError } = useCovers({
     group: `yuc-${seasonKey}`,
     entries,
     enabled: entries.length > 0,
@@ -57,8 +82,8 @@ export default function YucView({
   const busy = status === 'loading';
 
   return (
-    <CoverProvider images={images} allowRemote={false}>
-      <div className="yuc" data-yuc-view="1">
+    <CoverProvider images={images} allowRemote={remoteOk}>
+      <div className="yuc" data-yuc-view="1" data-yuc-remote={remoteOk ? '1' : '0'}>
         <div className="toolbar">
           <span className="toolbar__note" data-yuc-summary={data?.stats?.items ?? -1}>
             {data
@@ -75,6 +100,25 @@ export default function YucView({
               ))}
             </span>
           ) : null}
+          {/*
+            换季。用真的 <select> 而不是自己画的按钮组：键盘能翻、屏幕阅读器认得，
+            而且「当前是哪一季」由浏览器自己维护，不用我们操心高亮。
+            只有一个可选项时也照样画出来 —— 那是「这一页有季度概念」的唯一提示，
+            藏起来用户就不知道还能换。
+          */}
+          <select
+            className="yuc-season"
+            data-yuc-season={seasonKey}
+            value={seasonKey ?? ''}
+            onChange={(e) => onSeason?.(e.target.value || null)}
+            aria-label="选一个季度"
+          >
+            {(seasons ?? []).length
+              ? seasons.map((k) => (
+                  <option key={k} value={k}>{seasonLabelOf(k)}</option>
+                ))
+              : <option value={seasonKey ?? ''}>{seasonLabel || '这一季'}</option>}
+          </select>
           <div className="toolbar__spacer" />
           <button
             type="button"
@@ -91,6 +135,15 @@ export default function YucView({
         {stale && data ? (
           <p className="yuc-note" data-yuc-stale="1">
             这次没更新上（{error || '网络不通'}），下面看到的是<strong>上次拉到的</strong>排播表。
+          </p>
+        ) : null}
+
+        {coverProgress ? (
+          <p
+            className="yuc-note"
+            data-yuc-coverprog={`${coverProgress.done}/${coverProgress.total}`}
+          >
+            封面正在缓存 {coverProgress.done}/{coverProgress.total} —— 第一次打开这一季会慢一点，之后就走本地缓存了
           </p>
         ) : null}
 

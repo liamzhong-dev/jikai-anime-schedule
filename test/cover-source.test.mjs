@@ -12,7 +12,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DISPLAY_VARIANT, coverCoverage, coverEntries } from '../src/core/covers.js';
+import {
+  DISPLAY_VARIANT,
+  THUMB_SUFFIX,
+  coverCoverage,
+  coverEntries,
+  coverThumb,
+} from '../src/core/covers.js';
 import { SAMPLE_ITEMS } from './fixtures/sample-state.js';
 
 const ANIME = SAMPLE_ITEMS[0];
@@ -61,4 +67,49 @@ test('coverCoverage：拿变体地址当键不算命中（反向断言，就是 
 test('coverCoverage：脏输入不崩', () => {
   assert.deepEqual(coverCoverage(null, null), { total: 0, cached: 0, missing: 0, ratio: 1, missingKeys: [] });
   assert.equal(coverCoverage([null, {}], {}).missing, 2, '没有 key 的条目也要算进「没拿到」');
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * 缩略图后缀：番堂的封面挂在 B 站图床上，原图一季 7 MB，
+ * 预热几十秒而界面毫无提示 —— 2026-09-29 那次「封面一个都没渲染出来」就是这么来的。
+ * 这几条守的是「压没压」「压错了没有」。
+ * ---------------------------------------------------------------------------
+ */
+
+const HDSLB = 'https://i0.hdslb.com/bfs/new_dyn/6ec885213a549761b589d00ee2bbd70d512995925.jpg';
+
+test('coverThumb：B 站图床的地址要挂上缩略图后缀', () => {
+  const out = coverThumb(HDSLB);
+  assert.equal(out, `${HDSLB}${THUMB_SUFFIX}`);
+  assert.ok(out.endsWith('.webp'), '后缀里带的是 webp —— 实测它比同尺寸的 jpg 还小三成');
+});
+
+test('coverThumb：子域名也算（i0 / i1 / i2 都是同一套图床）', () => {
+  assert.ok(coverThumb('https://i2.hdslb.com/bfs/x.jpg').endsWith(THUMB_SUFFIX));
+  assert.ok(coverThumb('https://hdslb.com/bfs/x.jpg').endsWith(THUMB_SUFFIX));
+});
+
+test('coverThumb：不是这个图床的一个字都不许动（反向断言）', () => {
+  // Bangumi 那套是变体路径，往后面叠后缀等于造出一个 404
+  assert.equal(coverThumb('https://lain.bgm.tv/pic/cover/c/8a/9e/1.jpg'), 'https://lain.bgm.tv/pic/cover/c/8a/9e/1.jpg');
+  assert.equal(coverThumb('https://example.com/a.jpg'), 'https://example.com/a.jpg');
+});
+
+test('coverThumb：已经带 @ 处理后缀的不要叠第二遍', () => {
+  const once = coverThumb(HDSLB);
+  assert.equal(coverThumb(once), once, '叠两次后缀 CDN 会直接 404');
+});
+
+test('coverThumb：脏输入原样返回，不抛', () => {
+  assert.equal(coverThumb(''), '');
+  assert.equal(coverThumb(null), '');
+  assert.equal(coverThumb('不是链接'), '不是链接');
+});
+
+test('coverEntries：番堂那一路拿到的地址已经是压过的', () => {
+  const es = coverEntries([{ id: 'y123', cover: HDSLB }], DISPLAY_VARIANT);
+  assert.equal(es.length, 1);
+  assert.equal(es[0].url, `${HDSLB}${THUMB_SUFFIX}`);
+  assert.equal(es[0].key, 'y123', '键仍然是条目 id —— 换了地址也不许换键');
 });

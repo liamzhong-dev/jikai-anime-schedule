@@ -26,7 +26,7 @@ import { splitHits, stubFromHit } from './core/search.js';
 import {
   addCatchup, archiveSubjects, exportLayoutPresets, flush, listGroups, load as loadStore, markEpisode,
   patchCatchup, patchFollowing, patchSettingSection, patchSettings, readSeasonCacheRaw,
-  removeCatchup, toggleFollow, unfollow, writeSeasonCache,
+  isFollowing, removeCatchup, toggleFollow, unfollow, writeSeasonCache,
   ensureTierlist, patchTierlist, resetTierlist,
   addDiaryEntry, removeDiaryEntry, readDiary, myRatingOf, readLatestRated, readDiaryOf,
   ensureReport, setReportBlocks, resetReport,
@@ -34,7 +34,7 @@ import {
 } from './core/store.js';
 import { compareToBangumi } from './core/diary.js';
 import { useYuc } from './core/useYuc.js';
-import { matchLibrary } from './data/yuc.js';
+import { matchLibrary, nextAirMs, yucSeasonKeys } from './data/yuc.js';
 import { buildTransfer, bundleFolderName, bundleReadme, describeCounts, parseTransfer, transferCounts, transferFileName } from './core/transfer.js';
 import { autoRankByScore } from './core/tierlist.js';
 import { collectImages, exportTierlistPng } from './core/tierExport.js';
@@ -344,9 +344,16 @@ export default function App() {
       for (const a of season) {
         const f = following[a.id];
         if (!f || f.notify === false) continue;
+        /*
+         * 番堂给的「周几 + 几点」比库里推算出来的准：库里是「首播 + 周期」推的，
+         * 遇到停播一周、档期微调就会漂。所以有 airHint 的时候优先用番堂那个时刻，
+         * 没有的话一切照旧 —— 这条分支不该影响任何没开过提醒的番。
+         */
+        const hintMs = f.airHint ? nextAirMs(f.airHint, nowMs) : null;
         const ws = watchState(a, f.watchedEps ?? 0, nowMs);
-        if (ws.next.ms == null || ws.finished) continue;
-        const delta = ws.next.ms - nowMs;
+        const nextMs = hintMs ?? ws.next.ms;
+        if (nextMs == null || (hintMs == null && ws.finished)) continue;
+        const delta = nextMs - nowMs;
         const key = `${a.id}#${ws.next.episode}`;
         if (delta <= lead + 60000 && delta >= -60000 && !notified.current.has(key)) {
           notified.current.add(key);
@@ -684,13 +691,40 @@ export default function App() {
    * 自带 `savedAt`），落盘由取数层直接写 `yucSeasons.json`。所以这里没有
    * patch/持久化的动作，只有「读」和「重新拉」。
    */
-  const yuc = useYuc(view === 'yuc' ? seasonKey : null);
+  /*
+   * 番堂那一页能自己挑季度：默认跟着顶栏那一季，挑过之后就固定住。
+   * ⚠️ 可选项只给最近这几季 —— 排播表本来就是「这季要看什么」，
+   * 往回翻太多没意义，而列表太长会让「换季」本身变得不好找。
+   */
+  const [yucSeasonPick, setYucSeasonPick] = useState(null);
+  const yucSeasonKey = yucSeasonPick ?? seasonKey;
+  const yucSeasons = useMemo(() => yucSeasonKeys(Date.now(), { back: 8 }), [seasonKey]);
+  const yuc = useYuc(view === 'yuc' ? yucSeasonKey : null);
   const [yucSel, setYucSel] = useState(null);
 
   // 番堂的条目 ↔ 我们库里的条目。两边各用各的长处：排播来自番堂、
   // 评分/话数/日记来自 Bangumi，交汇点就是这一张表。
   const yucItems = useMemo(() => (yuc.data?.groups ?? []).flatMap((g) => g.items ?? []), [yuc.data]);
   const yucMatched = useMemo(() => matchLibrary(yucItems, season), [yucItems, season]);
+
+  /*
+   * 「提醒我这一集」：把番堂的「周几 + 几点」存进关注记录，提醒就照它算。
+   *
+   * 存的是**规则**不是算好的时刻 —— 存时刻的话下周它还会指着上一周那个点提醒一次，
+   * 然后就再也不响了。时刻在每次检查时现算（见上面 tick 里那一段）。
+   */
+  const handleYucRemind = useCallback((item, lib) => {
+    if (!lib?.id) return;
+    if (nextAirMs(item) == null) return;
+    const hint = { weekday: item.groupKey, time: item.time, start: item.start ?? null };
+    if (st.following?.[lib.id]?.airHint) {
+      patchFollowing(lib.id, { airHint: null, notify: false });
+      return;
+    }
+    if (isFollowing(lib.id)) patchFollowing(lib.id, { notify: true, airHint: hint });
+    else toggleFollow(lib.id, { notify: true, airHint: hint });
+  }, [st.following]);
+
 
   const handleAutoRank = useCallback(() => {
     const { items, ranked, unranked } = autoRankByScore(tierlist.items, season, tierlist.rows);
@@ -1155,6 +1189,35 @@ export default function App() {
     removeDiaryEntry(id, at);
   }, []);
 
+  /*
+   * 番堂那页的日记输入：能对上库的条目，直接在排播表旁边打分写短评。
+   *
+   * ⚠️ 必须放在 handleSaveDiary / handleRemoveDiary **之后**：它们是用 const 声明的，
+   * 而 useMemo 的工厂函数是**当场就跑**的，写在前面会在渲染时踩到暂时性死区
+   * （报的错是「Cannot access before initialization」，看不出是顺序问题）。
+   *
+   * 写在哪都要走 store 那同一套（评分 1-10 整数、一部可以有多条记录），
+   * 所以这里只做「把输入接过去」，不另起一套。
+   */
+  const yucDiary = useMemo(() => {
+    const lib = yucSel ? (yucMatched.get(yucSel.id) ?? null) : null;
+    if (!lib) return null;
+    return (
+      <DiaryRatingInput
+        id={lib.id}
+        rating={myRatingOf(lib.id)}
+        note={readLatestRated(lib.id)?.note ?? ''}
+        bgmScore={lib.score ?? null}
+        count={readDiaryOf(lib.id).length}
+        lastEntryAt={readLatestRated(lib.id)?.at ?? null}
+        compact
+        onSave={(payload) => handleSaveDiary(lib.id, payload)}
+        onRemove={(at) => handleRemoveDiary(lib.id, at)}
+        onOpenDiary={() => goView('diary')}
+      />
+    );
+  }, [yucSel, yucMatched, handleSaveDiary, handleRemoveDiary, goView]);
+
   // ---------- 季度报告长图 ----------
   //
   // 存法跟 Tier List 一样：按季度各存一份在 `state.json` 的 `reports` 里，
@@ -1588,8 +1651,10 @@ export default function App() {
                   status={yuc.status}
                   error={yuc.error}
                   stale={yuc.stale}
-                  seasonKey={seasonKey}
-                  seasonLabel={seasonLabel(seasonKey)}
+                  seasonKey={yucSeasonKey}
+                  seasonLabel={seasonLabel(yucSeasonKey)}
+                  seasons={yucSeasons}
+                  onSeason={setYucSeasonPick}
                   selectedId={yucSel?.id ?? null}
                   onSelect={setYucSel}
                   matched={yucMatched}
@@ -1607,6 +1672,10 @@ export default function App() {
                 <YucDetail
                   item={yucSel}
                   lib={yucSel ? (yucMatched.get(yucSel.id) ?? null) : null}
+                  now={now}
+                  remindOn={Boolean(yucSel && st.following?.[(yucMatched.get(yucSel.id) ?? {}).id]?.airHint)}
+                  onToggleRemind={handleYucRemind}
+                  diarySlot={yucDiary}
                   onOpenLibrary={setDrawer}
                 />
               </WindowCard>

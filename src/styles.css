@@ -904,6 +904,28 @@ html:not([data-frost='on']) .modal {
   line-height: 1.5;
 }
 
+.yuc-season {
+  max-width: 132px;
+  padding: 4px 6px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--panel-2, transparent);
+  color: var(--text);
+  font-size: calc(11.5px * var(--fs, 1));
+  font-family: inherit;
+}
+
+.yuc-season {
+  max-width: 132px;
+  padding: 4px 6px;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--panel-2, transparent);
+  color: var(--text);
+  font-size: calc(11.5px * var(--fs, 1));
+  font-family: inherit;
+}
+
 .yuc-foot {
   margin: 10px 2px 0;
   color: var(--text-3);
@@ -943,6 +965,50 @@ html:not([data-frost='on']) .modal {
   line-height: 1.6;
 }
 .yuc-detail__own strong { margin-left: 3px; }
+
+/* 「下一次什么时候播 + 提醒我」：这一块只对上了库的条目才出现 */
+.yuc-detail__remind {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--r);
+  border: 1px dashed var(--line);
+  font-size: calc(11.5px * var(--fs, 1));
+  line-height: 1.6;
+}
+.yuc-detail__next { flex: 1 1 auto; color: var(--text-2); }
+.yuc-detail__next em { font-style: normal; color: var(--text-3, var(--text-2)); opacity: 0.75; }
+.yuc-detail__remind[data-yuc-remind="on"] {
+  border-style: solid;
+  border-color: rgba(var(--accent-2-rgb), 0.5);
+  background: var(--accent-2-soft);
+}
+.yuc-detail__diary { margin-top: 4px; }
+
+/* 「下一次什么时候播 + 提醒我」：这一块只对上了库的条目才出现 */
+.yuc-detail__remind {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--r);
+  border: 1px dashed var(--line);
+  font-size: calc(11.5px * var(--fs, 1));
+  line-height: 1.6;
+}
+.yuc-detail__next { flex: 1 1 auto; color: var(--text-2); }
+.yuc-detail__next em { font-style: normal; color: var(--text-3, var(--text-2)); opacity: 0.75; }
+.yuc-detail__remind[data-yuc-remind="on"] {
+  border-style: solid;
+  border-color: rgba(var(--accent-2-rgb), 0.5);
+  background: var(--accent-2-soft);
+}
+.yuc-detail__diary { margin-top: 4px; }
 .yuc-detail__sec {
   margin: 16px 0 7px;
   font-size: calc(11.5px * var(--fs, 1));

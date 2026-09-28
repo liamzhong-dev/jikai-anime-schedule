@@ -23,6 +23,7 @@
 import { httpGet, detectProxy, describeProxy } from './lib/proxyfetch.mjs';
 import { parseYucPage, yucPageUrl } from '../src/data/yuc.js';
 import { seasonOf } from '../src/core/time.js';
+import { coverThumb } from '../src/core/covers.js';
 
 const arg = (name, fallback) => (process.argv.find((a) => a.startsWith(`--${name}=`)) ?? '').split('=')[1] || fallback;
 
@@ -113,10 +114,12 @@ if (!withCover) {
   process.exit(1);
 }
 const host = new URL(withCover.cover).hostname;
+let rawBytes = 0;
 try {
   const img = await httpGet(withCover.cover, { proxy, timeoutMs: 15000 });
   const ok = img.status === 200 && (img.headers['content-type'] ?? '').startsWith('image/');
-  console.log(`  封面样本：${host} · HTTP ${img.status} · ${img.headers['content-type']} · ${(img.bytes / 1024).toFixed(0)} KB`);
+  rawBytes = img.bytes ?? 0;
+  console.log(`  封面样本：${host} · HTTP ${img.status} · ${img.headers['content-type']} · ${(rawBytes / 1024).toFixed(0)} KB`);
   if (!ok) {
     console.error('✗ 封面地址取回来不是图片 —— 缓存那一层会把这种东西当图存下来');
     process.exit(1);
@@ -125,6 +128,34 @@ try {
   console.error(`✗ 封面取不到（${host}）：${err?.message ?? err}`);
   console.error('  → 图床被墙 / 需要代理时，界面会退回色块（这是设计好的降级），但导出长图会缺图');
   process.exit(1);
+}
+
+/*
+ * 缩略图那一档也要真取一次。
+ *
+ * 为什么值得单独验：2026-09-29 那次「封面一个都没渲染出来」，根因不是取不到图，
+ * 而是**原图太大**（一季 7 MB，预热几十秒），界面上又没有提示，看起来就跟没接上一样。
+ * 缩略图后缀是 CDN 的行为，不是我们能保证的东西 —— 哪天它不再认这个后缀，
+ * 界面会**静默退回原图**（不报错，只是又变慢），只有这里能发现。
+ */
+const thumbUrl = coverThumb(withCover.cover);
+if (thumbUrl !== withCover.cover) {
+  try {
+    const th = await httpGet(thumbUrl, { proxy, timeoutMs: 15000 });
+    const okTh = th.status === 200 && (th.headers['content-type'] ?? '').startsWith('image/');
+    console.log(`  缩略图：HTTP ${th.status} · ${th.headers['content-type']} · ${((th.bytes ?? 0) / 1024).toFixed(0)} KB`);
+    if (!okTh) {
+      console.error(`✗ 带上缩略图后缀之后取不到图了（${th.status}）—— 界面会静默退回大图，又变成「半天不出图」`);
+      process.exit(1);
+    }
+    if (rawBytes > 0 && (th.bytes ?? 0) >= rawBytes) {
+      console.error(`✗ 缩略图没比原图小（${th.bytes} ≥ ${rawBytes}）—— 白压了`);
+      process.exit(1);
+    }
+  } catch (err) {
+    console.error(`✗ 缩略图取不到：${err?.message ?? err}`);
+    process.exit(1);
+  }
 }
 
 /*

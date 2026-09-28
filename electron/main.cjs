@@ -1418,6 +1418,23 @@ function createWindow() {
                   */
                  covers: root.querySelectorAll('.cover').length,
                  coverRemote: root.querySelectorAll('.cover[data-cover="remote"]').length,
+                 /*
+                  * 「正在缓存 n/m」那行提示在不在。截图上看不出来：一片色块既可能是
+                  * 还没下完，也可能是封面压根没接上 —— 只有这行字能把两者分开。
+                  */
+                 /*
+                  * 换季那个下拉：当前值 + 有几项。截图上看不出来（一个下拉和一行
+                  * 静态文字长得很像），只有把值和项数拿出来才知道它接没接在数据上。
+                  */
+                 season: (function () {
+                   const el = document.querySelector('[data-yuc-season]');
+                   return el ? el.getAttribute('data-yuc-season') : null;
+                 })(),
+                 seasonOptions: root.querySelectorAll('.yuc-season option').length,
+                 coverProg: (function () {
+                   const el = document.querySelector('[data-yuc-coverprog]');
+                   return el ? el.getAttribute('data-yuc-coverprog') : null;
+                 })(),
                };
              })(),
              /*

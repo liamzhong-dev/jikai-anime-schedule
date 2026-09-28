@@ -33,6 +33,7 @@
     "check:desktop:history": "node scripts/check-desktop.mjs --view=history --profile=test/.tmp/profile-history --season=2026q3",
     "check:desktop:search": "node scripts/check-desktop.mjs --view=search --profile=test/.tmp/profile-search --season=2026q3",
     "check:desktop:yuc": "node scripts/check-desktop.mjs --view=yuc --profile=test/.tmp/profile-yuc --season=2026q4",
+    "check:yucwarm": "node scripts/check-desktop.mjs --view=yuc --profile=test/.tmp/profile-yucwarm --season=2026q4 --wait=25000 --yuc-covers",
     "check:desktop:wp": "node scripts/check-desktop.mjs --view=season --profile=test/.tmp/profile-wp --season=2026q3 --wp",
     "check:desktop:cardopen": "node scripts/check-desktop.mjs --view=season --profile=test/.tmp/profile-cardopen --season=2026q3 --cardopen",
     "check:maxsync": "node scripts/check-maxsync.mjs",
