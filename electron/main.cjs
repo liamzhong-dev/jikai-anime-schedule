@@ -1393,7 +1393,9 @@ function createWindow() {
               * 「这一页有内容」在截图里是最容易看走眼的：八个分组标题对齐、
               * 底下一条都没有，跟「数据没读进来」长得一模一样。
               * 所以要分开数：分组数、条目数、**每一条都有的可点热区**、
-              * 以及封面里有没有直连远端（番堂的图挂在 B 站图床，直连就等于断网一片色块）。
+              * 以及**封面节点到底有没有渲染出来** —— 这一条不能省：「没有直连」单独看
+              * 会空转，一个封面都没有的时候它同样是 0，于是「忘了接封面」和「接对了」
+              * 在报告里长得一模一样（番堂的图挂在 B 站图床，直连就等于断网一片色块）。
               */
              yuc: (function () {
                const root = document.querySelector('[data-yuc-view]');
@@ -1410,6 +1412,12 @@ function createWindow() {
                  stale: document.querySelectorAll('[data-yuc-stale]').length,
                  detail: document.querySelectorAll('[data-yuc-detail]').length,
                  summary: document.querySelectorAll('[data-yuc-summary]').length,
+                 /*
+                  * 封面**限定在这一页里数**（顶层那两个 coverXxx 是全页的）。
+                  * covers = 「有没有渲染出来」，coverRemote = 「有没有直连」，两条成对看。
+                  */
+                 covers: root.querySelectorAll('.cover').length,
+                 coverRemote: root.querySelectorAll('.cover[data-cover="remote"]').length,
                };
              })(),
              /*
