@@ -24,6 +24,23 @@ const ITEMS = [
     ),
   },
   {
+    /*
+     * ⚠️ 这一项和 App.jsx 的 VIEWS 是两处各写一份的，加视图时两边都要改。
+     * 进视图时 `sidenav__item` 的顺序就是这里数组的顺序 ——「番堂」紧挨着「时间表」，
+     * 因为它们是同一件事的两种口径：时间表是我们按自己的库算出来的，
+     * 番堂是别人整理好的全量排播。
+     */
+    key: 'yuc',
+    label: '番堂排播',
+    icon: (
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6">
+        <rect x="2.5" y="3" width="15" height="14" rx="2" />
+        <path d="M2.5 7.2h15M7.8 7.2v9.8" />
+        <path d="M10.6 10.4h4.4M10.6 13.4h3" />
+      </svg>
+    ),
+  },
+  {
     key: 'following',
     label: '我的追番',
     icon: (

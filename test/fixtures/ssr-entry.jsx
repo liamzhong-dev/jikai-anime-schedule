@@ -8,6 +8,8 @@
  */
 
 import React from 'react';
+import fs from 'node:fs';
+import path from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import App from '../../src/App.jsx';
 import LibraryPanel from '../../src/components/LibraryPanel.jsx';
@@ -26,6 +28,9 @@ import SeasonView from '../../src/components/SeasonView.jsx';
 import WindowCard from '../../src/components/WindowCard.jsx';
 import WallpaperFrame from '../../src/components/WallpaperFrame.jsx';
 import ScaleDock, { ScaleDockProvider } from '../../src/components/ScaleDock.jsx';
+import YucView from '../../src/components/YucView.jsx';
+import YucDetail from '../../src/components/YucDetail.jsx';
+import { parseYucPage, slimYuc } from '../../src/data/yuc.js';
 import { makeDefaultTierlist } from '../../src/core/tierlist.js';
 import { seasonRange } from '../../src/core/time.js';
 import { makeDefaultReport } from '../../src/core/report.js';
@@ -33,6 +38,9 @@ import { load, seedInitialState } from '../../src/core/store.js';
 import { SAMPLE_ITEMS, SAMPLE_SEASON, buildSampleUserState } from './sample-state.js';
 
 let prepared = null;
+
+/** 番堂样本缓存：真实页面片段解析一次就够（解析本身由 yuc.test.mjs 守着） */
+let yucFixture = null;
 
 function prepare() {
   if (!prepared) {
@@ -273,6 +281,47 @@ export async function renderSeasonPicker(props = {}) {
  * 数起来会混进别的卡片（`% 8` 那种断言看着聪明，其实只要有张卡被折叠 /
  * 最大化就散了）。一张卡正好八条边，数得清楚。
  */
+/**
+ * 番堂那一页，以及它的「作品资料」卡。
+ *
+ * 数据**由真实页面片段现算**（`test/fixtures/yuc-schedule.sample.html` →
+ * `parseYucPage` → `slimYuc`），不是手搓一个对象。
+ * 手搓的对象只能证明「按我想的形状画得出来」——而这一页要对付的正是
+ * 「排播表里有、介绍区里没有」这种残缺条目，形状得是真的。
+ */
+export async function renderYuc(props = {}) {
+  const base = {
+    data: yucSample(),
+    status: 'ready',
+    error: null,
+    stale: false,
+    seasonKey: '2026q4',
+    seasonLabel: '2026 秋',
+    selectedId: null,
+    onSelect: () => {},
+    matched: new Map(),
+    onReload: () => {},
+  };
+  return renderToStaticMarkup(<YucView {...base} {...props} />);
+}
+
+export async function renderYucDetail(props = {}) {
+  const data = yucSample();
+  const items = data.groups.flatMap((g) => g.items);
+  // 挑一条资料齐全的（介绍区对上了的），否则断言会落在一个空壳上
+  const full = items.find((it) => (it.staff ?? []).length && (it.cast ?? []).length) ?? items[0];
+  const base = { item: full, lib: null, onOpenLibrary: () => {} };
+  return renderToStaticMarkup(<YucDetail {...base} {...props} />);
+}
+
+export function yucSample(itemsOnly = false) {
+  if (!yucFixture) {
+    const html = fs.readFileSync(path.resolve('test/fixtures/yuc-schedule.sample.html'), 'utf8');
+    yucFixture = slimYuc(parseYucPage(html));
+  }
+  return itemsOnly ? yucFixture.groups.flatMap((g) => g.items) : yucFixture;
+}
+
 /**
  * 单独渲染一张窗口卡片。
  *

@@ -15,6 +15,7 @@ import { APP_VERSION } from '../core/version.js';
 const STORE_KEY = 'jikai/state/v1';
 const WALLPAPER_KEY = 'jikai/wallpaper/v1';
 const NAME_INDEX_KEY = 'jikai/nameindex/v1';
+const YUC_CACHE_KEY = 'jikai/yuc/v1';
 
 /**
  * 浏览器这一侧不支持的能力，统一回这个形状。
@@ -86,6 +87,32 @@ const webAdapter = {
       if (err?.name === 'AbortError') throw new Error(`请求超时（${timeoutMs}ms）`);
       const c = err?.cause?.code;
       if (c === 'ENOTFOUND' || c === 'EAI_AGAIN') throw new Error('域名解析失败，可能是没网或被拦了');
+      throw err instanceof Error ? err : new Error(String(err));
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  /**
+   * 浏览器里取文本。
+   *
+   * ⚠️ 和 `fetchJson` 一样会撞 CORS —— 番堂（yuc.wiki）不发跨域头，
+   * 所以浏览器壳里这条一定失败。**失败就如实报错**，不要偷偷退回
+   * 「用 localStorage 里的旧数据」：那样用户看到的是几天前的排播表，
+   * 却以为是最新的。调用方拿到错误后会显示「要用桌面版」。
+   */
+  async fetchText(url, { timeoutMs = 20000, headers } = {}) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { headers, signal: ac.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.text();
+    } catch (err) {
+      if (err?.name === 'AbortError') throw new Error(`请求超时（${timeoutMs}ms）`);
+      // `TypeError: Failed to fetch` 在浏览器里最常见的两个原因就是跨域被拦和断网，
+      // 而它们长得一模一样 —— 提示里两条都写上，别让人只往一个方向查
+      if (err?.name === 'TypeError') throw new Error('取不到内容（跨域被拦，或者没网）');
       throw err instanceof Error ? err : new Error(String(err));
     } finally {
       clearTimeout(timer);
@@ -273,6 +300,23 @@ const webAdapter = {
     }
   },
 
+  // ---- 番堂缓存 ----
+  async readYucCache() {
+    return readJson(YUC_CACHE_KEY);
+  },
+  async writeYucCache(payload) {
+    return writeJson(YUC_CACHE_KEY, payload);
+  },
+  async clearYucCache() {
+    if (!hasLocalStorage()) return false;
+    try {
+      localStorage.removeItem(YUC_CACHE_KEY);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
   onCommand() {
     return () => {};
   },
@@ -297,6 +341,14 @@ const electronAdapter = {
     if (!r) throw new Error('主进程网络通道不可用');
     if (!r.ok) throw new Error(r.error || `HTTP ${r.status}`);
     return r.data;
+  },
+  async fetchText(url, { timeoutMs = 20000, headers } = {}) {
+    const r = await window.jikai?.fetchText?.({ url, timeoutMs, headers });
+    // 拿不到这个函数说明 preload 是旧的（比如装的是上一版、或者打包漏了新文件），
+    // 直说这一条，别让调用方以为「对方站点挂了」
+    if (!r) throw new Error('主进程没有取文本的通道（桌面壳版本太旧？）');
+    if (!r.ok) throw new Error(r.error || `HTTP ${r.status}`);
+    return r.text;
   },
   async readWallpaper() {
     return window.jikai?.readWallpaper?.() ?? null;
@@ -411,6 +463,17 @@ const electronAdapter = {
   },
   async clearNameIndex() {
     return window.jikai?.clearNameIndex?.() ?? false;
+  },
+
+  // ---- 番堂缓存 ----
+  async readYucCache() {
+    return window.jikai?.readYucCache?.() ?? null;
+  },
+  async writeYucCache(payload) {
+    return window.jikai?.writeYucCache?.(payload) ?? false;
+  },
+  async clearYucCache() {
+    return window.jikai?.clearYucCache?.() ?? false;
   },
 
   onCommand(cb) {

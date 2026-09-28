@@ -496,6 +496,18 @@ html:not([data-frost='on']) .modal {
 .window__body { flex: 1; overflow: auto; padding: 14px; }
 
 /*
+ * 「高度由内容决定」的卡片（现在只有「本季概览」用，见 WindowCard 的 `fitHeight`）。
+ *
+ * `flex: 0 1 auto` 是这里的关键，不是随手写的：`.window` 高度是 `auto`，
+ * 而上面那条 `flex: 1` 展开是 `flex-basis: 0%` —— 基准高度算出来是 0，
+ * 卡片会直接塌成只剩一条标题栏。改成 `auto` 之后正文才撑得起父容器。
+ *
+ * `overflow: visible` 就是「不加滑轮」那一条：这类卡片的内容是固定的，
+ * 不该出现滚动条。
+ */
+.window--fit .window__body { flex: 0 1 auto; overflow: visible; }
+
+/*
  * 卡片窗口**不再有**缩放把手（八条边那套已经删掉）。
  * 窗口能拉大而内容不变，不是用户要的 —— 见 WindowCard.jsx 顶部那段说明。
  */
@@ -765,6 +777,16 @@ html:not([data-frost='on']) .modal {
 .cover__img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
 
 /* ---------- 统计 ---------- */
+/*
+ * 统计块的字号**故意不接 `--fs`**（这是全站少数几个例外，改之前先看这段）。
+ *
+ * 这一条是用户定的：四个数字是**固定**的，卡片大小就该定死在那里，
+ * 一眼扫过去永远是同一个版式；跟着「文字大小」一起长，反而会让这张
+ * 常驻的总览条忽高忽低，还会把自己下面的「番剧库」顶开。
+ *
+ * 配合 `.window--fit`（高度由内容定、不滚动），「所有内容都看得见」是靠
+ * **容器长得下**做到的，不是靠把字缩小 —— 这两条是一起的，动一条要看另一条。
+ */
 .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px; }
 .stat { padding: 10px 14px; border-radius: var(--r); background: var(--panel-2); border: 1px solid var(--line); }
 .stat__value { font-size: 26px; font-weight: 600; line-height: 1.2; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
@@ -772,6 +794,184 @@ html:not([data-frost='on']) .modal {
 .stat--accent .stat__value { color: var(--accent); }
 .stat--teal .stat__value { color: var(--accent-2); }
 .stat--danger .stat__value { color: var(--danger); }
+
+/* ---------- 番堂排播（yuc.wiki） ---------- */
+/*
+ * 这一页的数据来自别人的站，字段和别处都不一样（有「几点放送」没有「第几话」），
+ * 所以样式也自成一族。共通的是**封面用的还是同一个 <Cover>**，
+ * 于是「缓存命中 / 直连 / 色块」那三档 `data-cover` 在这里照样数得出来。
+ */
+
+/* 「这次没更新上」的说明条。比顶栏那条 `.banner` 轻一档：它只影响这一张卡 */
+.yuc-note {
+  margin: 0 0 12px;
+  padding: 7px 10px;
+  border-radius: var(--r);
+  font-size: calc(11.5px * var(--fs, 1));
+  line-height: 1.65;
+  color: var(--text);
+  background: var(--warn-soft);
+  border: 1px solid rgba(var(--warn-rgb), 0.32);
+}
+
+/* 收录统计那排小标签：`原创动画 7` */
+.yuc-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.yuc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text-2);
+  font-size: calc(11px * var(--fs, 1));
+  white-space: nowrap;
+}
+.yuc-chip em { font-style: normal; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.yuc-chip--soft { background: transparent; color: var(--text-3); }
+
+.yuc-group { margin: 0 0 18px; }
+.yuc-group:last-of-type { margin-bottom: 6px; }
+.yuc-group__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 2px 6px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.yuc-group__name { font-size: calc(13.5px * var(--fs, 1)); font-weight: 600; }
+.yuc-group__count { font-size: calc(11px * var(--fs, 1)); color: var(--text-3); }
+
+.yuc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 12px 10px; }
+
+/*
+ * 一条排播。
+ *
+ * 整块可点，所以热区（`.yuc-item__hot`）是铺满整卡的**真的 <button>** ——
+ * 和 `.cover__hot` 同一套做法，理由也一样（`div + onClick` 吃不到 Tab 和回车）。
+ * 它 `z-index: 1` 压在内容上面：文字是 static，指针事件照样落到按钮上，
+ * 于是「点封面、点标题、点空白处」都是同一个动作。
+ */
+.yuc-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--panel);
+  transition: border-color 0.15s, background 0.15s;
+}
+.yuc-item:hover { border-color: var(--line-2); background: var(--panel-2); }
+.yuc-item.is-sel { border-color: var(--accent); background: var(--accent-soft); }
+.yuc-item__hot {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: var(--r);
+}
+.yuc-item__hot:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.yuc-item__cover { width: 100%; aspect-ratio: 3 / 4; border-radius: calc(var(--r) - 2px); }
+.yuc-item__cover .cover__glyph { font-size: 1.8em; }
+.yuc-item__title {
+  font-size: 0.92em;
+  line-height: 1.35;
+  font-weight: 500;
+  /* 名字长短差得离谱，两行封顶 —— 不封的话网格会被一条长名字拉得参差不齐 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.yuc-item__meta { display: flex; align-items: center; gap: 5px; font-size: 0.84em; color: var(--text-3); }
+.yuc-item__time { font-style: normal; color: var(--accent-2); font-variant-numeric: tabular-nums; }
+.yuc-item__date { font-variant-numeric: tabular-nums; }
+/* 「已收入」—— 番堂那边不知道该不该标，这是我们自己库里的事 */
+.yuc-item__own {
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--ok-rgb), 0.42);
+  background: var(--ok-soft);
+  color: var(--ok);
+  line-height: 1.5;
+}
+
+.yuc-foot {
+  margin: 10px 2px 0;
+  color: var(--text-3);
+  font-size: calc(11px * var(--fs, 1));
+  line-height: 1.7;
+}
+
+/* ---- 右边那张「作品资料」 ---- */
+.yuc-detail { font-size: calc(12px * var(--fs, 1)); }
+.yuc-detail__head { display: flex; gap: 10px; align-items: flex-start; }
+.yuc-detail__cover { flex: 0 0 68px; width: 68px; aspect-ratio: 3 / 4; border-radius: var(--r); }
+.yuc-detail__cover .cover__glyph { font-size: 22px; }
+.yuc-detail__names { min-width: 0; flex: 1; }
+.yuc-detail__title { margin: 0; font-size: calc(14px * var(--fs, 1)); line-height: 1.4; font-weight: 600; }
+.yuc-detail__ja {
+  margin: 2px 0 0;
+  font-size: calc(11px * var(--fs, 1));
+  color: var(--text-3);
+  line-height: 1.5;
+  word-break: break-word;
+}
+.yuc-detail__group { margin: 6px 0 0; font-size: calc(11px * var(--fs, 1)); color: var(--text-2); }
+.yuc-detail__bcast { margin: 2px 0 0; font-size: calc(11px * var(--fs, 1)); color: var(--text-3); }
+.yuc-detail__chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 7px 0 0; }
+
+.yuc-detail__own {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--r);
+  border: 1px solid rgba(var(--accent-2-rgb), 0.38);
+  background: var(--accent-2-soft);
+  font-size: calc(11.5px * var(--fs, 1));
+  line-height: 1.6;
+}
+.yuc-detail__own strong { margin-left: 3px; }
+.yuc-detail__sec {
+  margin: 16px 0 7px;
+  font-size: calc(11.5px * var(--fs, 1));
+  font-weight: 600;
+  color: var(--text-2);
+  letter-spacing: 0.3px;
+}
+.yuc-staff { margin: 0; }
+.yuc-staff__row { display: flex; gap: 8px; padding: 3px 0; border-top: 1px dashed var(--line); }
+.yuc-staff__row:first-child { border-top: 0; }
+.yuc-staff dt {
+  flex: 0 0 62px;
+  color: var(--text-3);
+  font-size: calc(11px * var(--fs, 1));
+  line-height: 1.65;
+}
+.yuc-staff dd { margin: 0; flex: 1; min-width: 0; font-size: calc(11.5px * var(--fs, 1)); line-height: 1.65; word-break: break-word; }
+.yuc-detail__cast { margin: 0; font-size: calc(11.5px * var(--fs, 1)); line-height: 1.8; color: var(--text-2); word-break: break-word; }
+.yuc-detail__links { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.yuc-detail__links .btn { text-decoration: none; }
+.yuc-detail__note {
+  margin: 14px 0 0;
+  font-size: calc(11px * var(--fs, 1));
+  line-height: 1.75;
+  color: var(--text-3);
+}
+
+/* `.empty` 是 flex 行 —— 里面要塞「一句话 + 一个按钮」时要竖过来 */
+.yuc .empty { flex-direction: column; gap: 10px; }
 
 /* ---------- 番剧卡片 ---------- */
 .cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-min, 112px), 1fr)); gap: 14px 12px; }
@@ -792,7 +992,8 @@ html:not([data-frost='on']) .modal {
 .cardgrid,
 .queue,
 .board,
-.weekgrid { font-size: calc(12.5px * var(--fs, 1)); }
+.weekgrid,
+.yuc-grid { font-size: calc(12.5px * var(--fs, 1)); }
 
 /* 工具栏里的「一格留多宽」滑块：比 .slider 窄一档，塞得进一行 */
 .toolbar__range {

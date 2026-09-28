@@ -57,6 +57,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { builtinItems } from '../src/data/builtin/index.js';
+import { matchLibrary, parseYucPage, slimYuc } from '../src/data/yuc.js';
+import { YUC_CACHE_SCHEMA } from '../src/data/yucSource.js';
 import { closeRunningApp } from './lib/killapp.mjs';
 
 const root = process.cwd();
@@ -171,6 +173,8 @@ function seedProfile(dir, forView, withWallpaper) {
   const state = {};
   // 名称索引是独立文件（跟真实实现一致：它约 1MB，不跟 state 混在一起）
   let nameIndex = null;
+  // 番堂缓存也是独立文件（userData/yucSeasons.json），只有 --view=yuc 才写
+  let yucCache = null;
   let expectation = null;
 
   if (forView === 'diary') {
@@ -298,6 +302,47 @@ function seedProfile(dir, forView, withWallpaper) {
       panel: others.length,
       titles: others.map((e) => e.zh),
     };
+  } else if (forView === 'yuc') {
+    /*
+     * 番堂那一页的输入是**它自己的缓存文件**（userData/yucSeasons.json），
+     * 不是 state —— 和 search 那一路同一个道理。
+     *
+     * ⚠️ 必须喂缓存。番堂的数据得联网去 yuc.wiki 拉，而自检**不能把网络当前提**：
+     * 断网、被墙、对方站点抖一下都会红，红的却不是我们的代码。
+     * （真联网那一次由 `npm run live:yuc` 单独跑，不进 check:all。）
+     *
+     * 喂进去的是**真实页面片段现解析出来的**，不是手搓的假对象 ——
+     * 「排播表里有、介绍区里没有」这种残缺条目正是这一页要对付的，形状得是真的。
+     *
+     * 缓存键用 `--season` 给的季度，而这个季度**必须和样本页面对得上**：
+     * 样本是 `yuc.wiki/202610`（2026 秋），所以这一路要用 `--season=2026q4`。
+     * 用 2026q3 也能跑绿，但那时「已收入」两边都是 0 —— 0 === 0 的绿等于没验。
+     */
+    const key = season || '2026q4';
+    const html = fs.readFileSync(path.join(root, 'test/fixtures/yuc-schedule.sample.html'), 'utf8');
+    const parsed = parseYucPage(html);
+    if (!parsed.ok) {
+      console.error(`✗ 番堂样本解析不出来（${parsed.reason}），这一页的自检没法播种`);
+      process.exit(2);
+    }
+    const slim = slimYuc(parsed);
+    const items = slim.groups.flatMap((g) => g.items);
+    // 期望值从**输入的库**现算，不写死数字
+    const own = matchLibrary(items, builtinItems(key)).size;
+    /*
+     * 前提检查，和搜索那一路同一个道理：一条都对不上的话，
+     * 下面那条「已收入几份」的断言会以 0 === 0 通过 —— 绿得毫无意义。
+     * 这种绿比不测更坏，因为它会让人以为「对表那条链路验过了」。
+     */
+    if (!own) {
+      console.error(
+        `✗ 番堂样本和内置的 ${key} 库一条都对不上 —— 「已收入」那条断言会变成 0 === 0。` +
+          '检查一下样本季度（应该是 2026 秋）和 --season 是否一致',
+      );
+      process.exit(2);
+    }
+    yucCache = { [key]: { ...slim, schema: YUC_CACHE_SCHEMA } };
+    expectation = { groups: slim.groups.length, items: items.length, own };
   }
 
   /*
@@ -324,6 +369,7 @@ function seedProfile(dir, forView, withWallpaper) {
   // 索引只有当这次自检真的需要时才写 —— 写了一份别的视图用不上的索引，
   // 会顺手把「没有索引时该怎么显示」这条分支从别的自检里遮掉。
   if (nameIndex) fs.writeFileSync(path.join(dir, 'nameIndex.json'), JSON.stringify(nameIndex), 'utf8');
+  if (yucCache) fs.writeFileSync(path.join(dir, 'yucSeasons.json'), JSON.stringify(yucCache), 'utf8');
   if (wallSeed) fs.writeFileSync(path.join(dir, 'wallpaper.json'), JSON.stringify(wallSeed.payload), 'utf8');
   return expectation;
 }
@@ -681,6 +727,92 @@ if (view === 'season') {
       `本季的封面在直连远端（coverRemote=${report.coverRemote}）—— 桌面壳会先下一遍再进缓存，等于下两遍`,
     );
   }
+
+  /*
+   * 「本季概览」：四个数字必须**一个不少地**显示在卡片里，而且不许有滚动条。
+   *
+   * 用户报的原话是「总是少一节」—— 卡片高度被摆位预设写死成 112px，减掉 42px 标题栏
+   * 和 28px 内边距只剩 42px，四个统计块要七十多。这是**纯渲染结果**的问题：
+   * SSR 只能验类名（见 render.test.mjs），浏览器壳不会出现（那边卡片高度是 auto），
+   * 只有真壳真渲染才量得到。
+   *
+   * ⚠️ 判据取 `scrollHeight - clientHeight`，不取「看着对不对」：
+   * 被切掉一截的统计块和排得好好的那个，在截图里一模一样。
+   */
+  const fit = report.statsFit;
+  if (!fit) {
+    check(false, '页面上找不到「本季概览」卡片（探针 statsFit 是 null）—— 卡片 id 改了？');
+  } else {
+    check(Number(fit.statRows) === 4, `概览卡里应有 4 个统计块，实际 ${fit.statRows}`);
+    check(
+      fit.cls.includes('window--fit'),
+      `概览卡没带上 window--fit（class="${fit.cls}"）—— 那就是高度又被写死，内容会被切`,
+    );
+    check(
+      Number(fit.bodyScroll) === 0,
+      `概览卡正文还能滚 ${fit.bodyScroll}px（scrollHeight 比 clientHeight 大）—— 内容没全部露出来`,
+    );
+    check(
+      fit.bodyOverflowY === 'visible',
+      `概览卡正文的 overflow-y 是 ${fit.bodyOverflowY}，应当是 visible —— 这就是那条滚动条的来源`,
+    );
+    check(
+      Number(fit.cut) >= 12,
+      `概览卡底边到最后一个统计块只剩 ${fit.cut}px —— 贴边了，多半已经被切掉一截`,
+    );
+    check(
+      Number(fit.gridGap) >= 0,
+      `概览卡和番剧库叠在一起了（gridGap=${fit.gridGap}）—— layoutPresets 里给概览条留的高度不够`,
+    );
+  }
+}
+
+// ---- 番堂排播：缓存文件里的数据能不能一路走到界面上 ----
+/*
+ * 守的是「userData/yucSeasons.json → useYuc → YucView → 每一条排播」这条接线。
+ *
+ * 这一页最容易出的错**不是崩溃**，而是「渲染出来了，但是空的」：
+ * 分组标题排得整整齐齐、底下一个条目都没有，截图上看和「数据没读进来」一模一样。
+ * 所以分组数、条目数、热区数分开数 —— 尤其是热区：少一条就是「这一条点不开」。
+ */
+if (view === 'yuc') {
+  const y = report.yuc;
+  if (!y) {
+    check(false, '番堂那一页没渲染出来（探针 yuc 是 null）—— 导航项或视图分支没接上？');
+  } else {
+    check(
+      y.state === null,
+      `番堂落到了 ${y.state} 状态 —— 自检喂的 yucSeasons.json 没被读出来（键或 schema 对不上？）`,
+    );
+    check(
+      Number(y.groups) === expected.groups,
+      `番堂应当有 ${expected.groups} 个分组，实际 ${y.groups}`,
+    );
+    check(
+      Number(y.items) === expected.items,
+      `番堂应当有 ${expected.items} 条排播，实际 ${y.items} —— 缓存读到了但没渲染全，或者条目被中途丢了`,
+    );
+    check(
+      Number(y.hots) === Number(y.items),
+      `每一条都要有可点热区（热区 ${y.hots} 条 / 条目 ${y.items} 条）—— 少一条就是这条点不开`,
+    );
+    check(
+      Number(y.own) === expected.own,
+      `「已收入」应当有 ${expected.own} 条，实际 ${y.own} —— 和库里对表那一步没接上`,
+    );
+    check(Number(y.summary) === 1, '收录统计那一行没渲染出来');
+    check(Number(y.detail) === 1, '作品资料卡没渲染出来');
+    // 这次读的是缓存、网一次没发，不该被标成「没更新上」—— stale 的语义串了
+    check(Number(y.stale) === 0, 'stale（这次没更新上）不该出现在读缓存的那一次');
+  }
+  /*
+   * 封面**一条都不许直连远端**。番堂的图挂在 B 站图床（i0.hdslb.com）上，
+   * 桌面壳里直连就是「浏览器先下一遍、主进程再下一遍」，断网则一片色块。
+   */
+  check(
+    Number(report.coverRemote) === 0,
+    `番堂的封面在直连远端（coverRemote=${report.coverRemote}）—— allowRemote 没关掉`,
+  );
 }
 
 // ---- 季度报告：磁盘上的块能不能一路走到画布上 ----

@@ -14,8 +14,19 @@ import { useCardScaleToggle } from './ScaleDock.jsx';
  *
  * 拖动期间只动本地 state，松手才写回 store —— 否则每帧都会触发一次全局重渲染
  * 与一次落盘，拖起来会发涩。
+ *
+ * `fitHeight`：「高度由内容决定」的卡片。正文能铺多高就多高，不出现滚动条。
+ *
+ * 为什么需要它：卡片高度是**摆位预设写死**的（layoutPresets.js），而「本季概览」
+ * 那四个数字要用 ~145px，预设却只给了 112px —— 减去 42px 标题栏和 28px 内边距
+ * 只剩 42px，统计块永远被切掉一截。更糟的是窗口**不能改大小**（八方向把手上一轮
+ * 已经删掉了），用户看到「总是少一节」却没有任何办法。
+ *
+ * 这类卡片的内容是**固定**的（就四个数），本来就不需要滚动 ——
+ * 与其猜一个够用的高度，不如让高度跟着内容走。宽度仍然听 `rect`，
+ * 拖拽、最大化、折叠都不受影响。
  */
-export default function WindowCard({ id, title, hint, actions, children, defaultRect, layout }) {
+export default function WindowCard({ id, title, hint, actions, children, defaultRect, layout, fitHeight = false }) {
   const saved = layout?.[id];
   const initial = saved ?? defaultRect ?? { x: 16, y: 16, w: 640, h: 420 };
 
@@ -134,13 +145,20 @@ export default function WindowCard({ id, title, hint, actions, children, default
     }
   };
 
+  /*
+   * ⚠️ `fitHeight` 时高度一律是 `auto`，**折叠是唯一的例外**（44px = 只剩标题栏）。
+   * 最大化也走 auto：这张卡内容就四个数，铺满整屏只会得到一张巨大的空卡片，
+   * 而「所有内容清晰可见」这个诉求，auto 本来就已经满足了。
+   */
   const style = maxed
-    ? { left: 12, top: 12, width: 'calc(100% - 24px)', height: 'calc(100% - 24px)' }
-    : { left: rect.x, top: rect.y, width: rect.w, height: collapsed ? 44 : rect.h };
+    ? { left: 12, top: 12, width: 'calc(100% - 24px)', height: fitHeight ? 'auto' : 'calc(100% - 24px)' }
+    : { left: rect.x, top: rect.y, width: rect.w, height: collapsed ? 44 : fitHeight ? 'auto' : rect.h };
 
   const cls = ['window'];
   if (maxed) cls.push('window--max');
   if (dragging) cls.push('window--dragging');
+  // 折叠时正文根本没渲染，加了这个类反而会让 `overflow: visible` 的规则空转
+  if (fitHeight && !collapsed) cls.push('window--fit');
 
   return (
     /*

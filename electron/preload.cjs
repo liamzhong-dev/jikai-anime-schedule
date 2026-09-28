@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld('jikai', {
 
   // 网络：走主进程，自动跟随系统代理 / VPN
   fetchJson: (payload) => ipcRenderer.invoke('http:json', payload),
+  // 文本（HTML）：和 fetchJson 分开，那个最后一步会 JSON.parse，拿来做 HTML 只会白报错
+  fetchText: (payload) => ipcRenderer.invoke('http:text', payload),
   fetchBinary: (payload) => ipcRenderer.invoke('http:binary', payload),
   setProxy: (proxy) => ipcRenderer.invoke('net:proxy', proxy),
 
@@ -41,6 +43,11 @@ contextBridge.exposeInMainWorld('jikai', {
   readNameIndex: () => ipcRenderer.invoke('nameindex:read'),
   writeNameIndex: (payload) => ipcRenderer.invoke('nameindex:write', payload),
   clearNameIndex: () => ipcRenderer.invoke('nameindex:clear'),
+
+  // 长门番堂（yuc.wiki）的季度缓存，同样单独一个文件
+  readYucCache: () => ipcRenderer.invoke('yuc:read'),
+  writeYucCache: (payload) => ipcRenderer.invoke('yuc:write', payload),
+  clearYucCache: () => ipcRenderer.invoke('yuc:clear'),
 
   // 自动更新：取更新源 JSON（比版本号在渲染层做）
   checkUpdate: (payload) => ipcRenderer.invoke('update:check', payload),

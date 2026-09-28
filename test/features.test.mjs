@@ -13,7 +13,7 @@ import { DEFAULT_THEME, THEMES, THEME_GROUPS, getTheme } from '../src/theme/them
 import { computeThemeVars, applyTheme, normalizeWallpaper, wantsFrost, DEFAULT_WALLPAPER } from '../src/theme/applyTheme.js';
 import { hotkeysByGroup, HOTKEYS, isTypingTarget, lookup, normalizeEvent, shouldHandle } from '../src/core/hotkeys.js';
 import { compareVersions, describeUpdate, evaluateUpdate, normalizeManifest, parseVersion, resolveManifestUrl, toApiUrl } from '../src/core/update.js';
-import { ALL_CARD_IDS, BUILTIN_PRESETS, dropCardFromLayout, presetById } from '../src/core/layoutPresets.js';
+import { ALL_CARD_IDS, BUILTIN_PRESETS, SEASON_STATS_H, dropCardFromLayout, presetById } from '../src/core/layoutPresets.js';
 import { FEATURES, hiddenFeatures, hiddenReason, isVisible } from '../src/core/features.js';
 import { DEFAULT_SOURCE, SOURCES, degradedText } from '../src/data/sources.js';
 import { dataUrlBytes, fitSize, formatBytes as wpBytes } from '../src/core/wallpaper.js';
@@ -322,7 +322,7 @@ test('describeUpdate 把三种状态说成人话', () => {
 
 test('内置预设覆盖全部卡片，且每个矩形都是合法数字', () => {
   assert.equal(BUILTIN_PRESETS.length, 4);
-  assert.equal(ALL_CARD_IDS.length, 9);
+  assert.equal(ALL_CARD_IDS.length, 11);
   for (const p of BUILTIN_PRESETS) {
     assert.ok(p.name && p.desc, `${p.id} 缺少名称或说明`);
     for (const id of ALL_CARD_IDS) {
@@ -337,6 +337,25 @@ test('内置预设覆盖全部卡片，且每个矩形都是合法数字', () =>
   }
   assert.equal(presetById('builtin-default').name, '默认 · 宽屏双栏');
   assert.equal(presetById('不存在'), null);
+});
+
+/*
+ * 「本季概览」用的是 fitHeight（高度由内容撑），摆位里的 `h` 对它不起作用 ——
+ * 它真正的身高由 CSS 决定，代码里看不出来。所以**唯一能守的就是「别让它盖住下面那张卡」**：
+ * 每套预设里「番剧库」的 y 必须给概览条留出 SEASON_STATS_H 的高度。
+ *
+ * 这条是自洽性检查（两边都是常量算出来的），不是「值对不对」的断言 ——
+ * 真正量过的是桌面自检里那条「两张卡不许叠」，它读的是渲染后的 getBoundingClientRect。
+ */
+test('每套预设都给「本季概览」留够了高度，不会盖住番剧库', () => {
+  for (const p of BUILTIN_PRESETS) {
+    const stats = p.layout['season-stats'];
+    const grid = p.layout['season-grid'];
+    assert.ok(
+      grid.y >= stats.y + SEASON_STATS_H,
+      `${p.id}：番剧库的 y=${grid.y} 没给概览条（y=${stats.y}，高 ${SEASON_STATS_H}）留够位置 —— 会叠在一起`,
+    );
+  }
 });
 
 test('dropCardFromLayout 只抹掉指定卡片', () => {
@@ -435,7 +454,7 @@ test('布局预设：保存、套用、改名、删除、导入导出', () => {
   // 内置预设也能套用
   applyLayoutPreset('builtin-compact');
   assert.equal(getState().activePreset, 'builtin-compact');
-  assert.deepEqual(getState().layout['season-stats'], { x: 12, y: 12, w: 880, h: 96 });
+  assert.deepEqual(getState().layout['season-stats'], { x: 12, y: 12, w: 880, h: SEASON_STATS_H });
   assert.equal(applyLayoutPreset('没有这个'), null);
 
   renameLayoutPreset(saved.id, '改名了');

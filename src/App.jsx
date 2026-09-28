@@ -11,6 +11,8 @@ import DiaryView from './components/DiaryView.jsx';
 import DiaryRatingInput from './components/DiaryRatingInput.jsx';
 import HistoryView from './components/HistoryView.jsx';
 import ReportView from './components/ReportView.jsx';
+import YucView from './components/YucView.jsx';
+import YucDetail from './components/YucDetail.jsx';
 import { CoverProvider } from './components/CoverContext.jsx';
 import ScaleDock, { ScaleDockProvider } from './components/ScaleDock.jsx';
 import DetailDrawer from './components/DetailDrawer.jsx';
@@ -31,6 +33,8 @@ import {
   exportableState, importState,
 } from './core/store.js';
 import { compareToBangumi } from './core/diary.js';
+import { useYuc } from './core/useYuc.js';
+import { matchLibrary } from './data/yuc.js';
 import { buildTransfer, bundleFolderName, bundleReadme, describeCounts, parseTransfer, transferCounts, transferFileName } from './core/transfer.js';
 import { autoRankByScore } from './core/tierlist.js';
 import { collectImages, exportTierlistPng } from './core/tierExport.js';
@@ -40,6 +44,7 @@ import {
 } from './core/report.js';
 import { buildReportHtml, canvasHtmlOf, collectStyles } from './core/reportHtml.js';
 import { coverScaleFromCardMin } from './core/layout.js';
+import { SEASON_STATS_H, SEASON_STATS_GAP } from './core/layoutPresets.js';
 import { DISPLAY_VARIANT, EXPORT_VARIANT, coverCoverage, coverEntries, coverVariant } from './core/covers.js';
 import { useCovers } from './core/useCovers.js';
 import { platform } from './platform/index.js';
@@ -60,7 +65,7 @@ import { deadlineStatus, progress, sortCatchup } from './core/catchup.js';
 
 // 这个常量和 SideNav 里的 ITEMS 是两处各写一份的 —— 加视图时两边都要改，
 // 只改一处会出现「导航能点到、但深链刷新就跳回来」。
-const VIEWS = ['season', 'schedule', 'following', 'catchup', 'diary', 'history', 'tier', 'report'];
+const VIEWS = ['season', 'schedule', 'yuc', 'following', 'catchup', 'diary', 'history', 'tier', 'report'];
 
 /** 同步指示的最短显示时长（毫秒）：只为防「一闪而过」，不影响取数 */
 const MIN_SYNC_MS = 480;
@@ -667,6 +672,25 @@ export default function App() {
     }
     return '';
   }, [view, poolCovers.supported, poolCovers.error, poolCovers.progress]);
+
+  /*
+   * 番堂（yuc.wiki）那一页的数据。
+   *
+   * ⚠️ `view === 'yuc' ? seasonKey : null` 不是抄近路 —— 传 null 等于「没人看这一页」，
+   * 取数层就一个字都不发。写成一直取的话，用户可能一整天都不点这个视图，
+   * 却在每次启动时都去拉一遍别人的站点。
+   *
+   * 配套的还有 `yuc.data` 的值从哪来：**不进 store**（它只读、可再生、
+   * 自带 `savedAt`），落盘由取数层直接写 `yucSeasons.json`。所以这里没有
+   * patch/持久化的动作，只有「读」和「重新拉」。
+   */
+  const yuc = useYuc(view === 'yuc' ? seasonKey : null);
+  const [yucSel, setYucSel] = useState(null);
+
+  // 番堂的条目 ↔ 我们库里的条目。两边各用各的长处：排播来自番堂、
+  // 评分/话数/日记来自 Bangumi，交汇点就是这一张表。
+  const yucItems = useMemo(() => (yuc.data?.groups ?? []).flatMap((g) => g.items ?? []), [yuc.data]);
+  const yucMatched = useMemo(() => matchLibrary(yucItems, season), [yucItems, season]);
 
   const handleAutoRank = useCallback(() => {
     const { items, ranked, unranked } = autoRankByScore(tierlist.items, season, tierlist.rows);
@@ -1466,7 +1490,13 @@ export default function App() {
                 title="本季概览"
                 hint={seasonLabel(seasonKey)}
                 layout={st.layout}
-                defaultRect={{ x: 16, y: 16, w: 1260, h: 112 }}
+                /*
+                 * `fitHeight`：高度由四个统计块撑出来，不滚动、不裁切。
+                 * `h` 在这里是**占位**（它同时决定下面那张「番剧库」该从哪开始，
+                 * 见 layoutPresets.js 的 SEASON_STATS_H），不是卡片真正的身高。
+                 */
+                fitHeight
+                defaultRect={{ x: 16, y: 16, w: 1260, h: SEASON_STATS_H }}
               >
                 <div className="stat-row">
                   <Stat value={filteredSeason.length} label="本季番剧" />
@@ -1481,7 +1511,7 @@ export default function App() {
                 title="番剧库"
                 hint="点封面右上角星标追番"
                 layout={st.layout}
-                defaultRect={{ x: 16, y: 142, w: 1260, h: 660 }}
+                defaultRect={{ x: 16, y: 16 + SEASON_STATS_H + SEASON_STATS_GAP, w: 1260, h: 622 }}
               >
                 <SeasonView
                   season={filteredSeason}
@@ -1535,6 +1565,50 @@ export default function App() {
                     ))}
                   </div>
                 )}
+              </WindowCard>
+            </>
+          )}
+
+          {/*
+            番堂排播：长门番堂（yuc.wiki）整理好的当季全量排播表。
+            它**不是**第四个数据源（那份数据没有 bgm id、没有评分），所以单开一页，
+            只在能对上的条目上标一个「已收入」，并给一条通回 Bangumi 详情的出口。
+          */}
+          {view === 'yuc' && (
+            <>
+              <WindowCard
+                id="yuc-board"
+                title="番堂排播"
+                hint={seasonLabel(seasonKey)}
+                layout={st.layout}
+                defaultRect={{ x: 16, y: 16, w: 940, h: 660 }}
+              >
+                <YucView
+                  data={yuc.data}
+                  status={yuc.status}
+                  error={yuc.error}
+                  stale={yuc.stale}
+                  seasonKey={seasonKey}
+                  seasonLabel={seasonLabel(seasonKey)}
+                  selectedId={yucSel?.id ?? null}
+                  onSelect={setYucSel}
+                  matched={yucMatched}
+                  onReload={yuc.reload}
+                />
+              </WindowCard>
+
+              <WindowCard
+                id="yuc-detail"
+                title="作品资料"
+                hint={yucSel ? yucSel.groupLabel : '点左边一条'}
+                layout={st.layout}
+                defaultRect={{ x: 970, y: 16, w: 306, h: 660 }}
+              >
+                <YucDetail
+                  item={yucSel}
+                  lib={yucSel ? (yucMatched.get(yucSel.id) ?? null) : null}
+                  onOpenLibrary={setDrawer}
+                />
               </WindowCard>
             </>
           )}

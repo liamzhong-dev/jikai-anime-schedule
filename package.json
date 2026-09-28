@@ -23,6 +23,7 @@
     "check:tier-export": "node scripts/tier-export-check.mjs",
     "live": "node scripts/live-check.mjs",
     "live:offline": "node scripts/live-check.mjs --offline",
+    "live:yuc": "node scripts/yuc-live-check.mjs",
     "live:shot": "node scripts/live-shot.cjs",
     "test": "node --test \"test/*.test.mjs\"",
     "check:desktop": "node scripts/check-desktop.mjs",
@@ -31,6 +32,7 @@
     "check:desktop:report": "node scripts/check-desktop.mjs --view=report --profile=test/.tmp/profile-report --season=2026q3",
     "check:desktop:history": "node scripts/check-desktop.mjs --view=history --profile=test/.tmp/profile-history --season=2026q3",
     "check:desktop:search": "node scripts/check-desktop.mjs --view=search --profile=test/.tmp/profile-search --season=2026q3",
+    "check:desktop:yuc": "node scripts/check-desktop.mjs --view=yuc --profile=test/.tmp/profile-yuc --season=2026q4",
     "check:desktop:wp": "node scripts/check-desktop.mjs --view=season --profile=test/.tmp/profile-wp --season=2026q3 --wp",
     "check:desktop:cardopen": "node scripts/check-desktop.mjs --view=season --profile=test/.tmp/profile-cardopen --season=2026q3 --cardopen",
     "check:maxsync": "node scripts/check-maxsync.mjs",
@@ -42,7 +44,7 @@
     "check:coverseed": "node scripts/check-coverseed.mjs",
     "check:perf": "node scripts/perf-check.mjs",
     "scan": "node scripts/scan-privacy.mjs",
-    "check:all": "npm test && npm run check:coverseed && npm run build && npm run check:tier && npm run check:tier-export && npm run check:desktop && npm run check:desktop:diary && npm run check:desktop:save && npm run check:desktop:report && npm run check:desktop:history && npm run check:desktop:search && npm run check:desktop:cardopen && npm run check:maxsync && npm run check:desktop:retryhw && npm run check:desktop:wp && npm run check:killapp && npm run check:ipc && npm run check:boot && npm run check:selfheal && npm run check:perf && npm run scan"
+    "check:all": "npm test && npm run check:coverseed && npm run build && npm run check:tier && npm run check:tier-export && npm run check:desktop && npm run check:desktop:diary && npm run check:desktop:save && npm run check:desktop:report && npm run check:desktop:history && npm run check:desktop:search && npm run check:desktop:yuc && npm run check:desktop:cardopen && npm run check:maxsync && npm run check:desktop:retryhw && npm run check:desktop:wp && npm run check:killapp && npm run check:ipc && npm run check:boot && npm run check:selfheal && npm run check:perf && npm run scan"
   },
   "dependencies": {
     "react": "^18.3.1",

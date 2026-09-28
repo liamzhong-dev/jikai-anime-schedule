@@ -34,7 +34,7 @@ await build({
   logLevel: 'silent',
 });
 
-const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport, renderHistory, renderSearchBox, renderSeasonPicker, renderWindowCard, renderWallpaperFrame, renderSeasonView, renderScaleDock } = await import(pathToFileURL(outfile).href);
+const { render, renderLibrary, renderCatchup, renderSettingsTabs, renderTier, renderDiary, renderDiaryInput, renderCatchupWithDiary, renderCover, renderReport, renderHistory, renderSearchBox, renderSeasonPicker, renderWindowCard, renderWallpaperFrame, renderSeasonView, renderScaleDock, renderYuc, renderYucDetail, yucSample } = await import(pathToFileURL(outfile).href);
 
 const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 // 有些约定只存在于样式表里（比如「取景框和壁纸用同一种铺法」），
@@ -994,6 +994,142 @@ test('卡片窗口：标题栏可拖、有折叠与最大化，但没有任何�
   assert.equal(html.includes('window__resize'), false, '旧的单角把手类名同样不该在');
 });
 
+/* ── 「本季概览」那张卡：高度由内容定，不滚动 ────────────── */
+
+/*
+ * 现象是「本季概览总是少一节」：卡片高度由摆位预设写死，减掉标题栏和内边距
+ * 只剩四十来像素，而四个统计块要七十多 —— 更糟的是窗口不能改大小，
+ * 用户看到内容被切掉却没有任何办法。
+ *
+ * SSR 只能验到这里（类名 + 行内高度），**「真的不滚了」只有桌面端量得到**
+ * —— 见 check-desktop.mjs 里那条 scrollHeight/clientHeight 的断言。
+ * 但这两条是配套的：类名没了、高度写回固定值，桌面那条也会跟着红。
+ */
+test('概览卡：fitHeight 时高度交给内容，且正文那一层不滚动', async () => {
+  const fit = await renderWindowCard({ fitHeight: true });
+  assert.ok(fit.includes('window--fit'), 'fitHeight 的卡片要带上 window--fit —— 不滚动那条规则挂在它下面');
+  assert.ok(/style="[^"]*height:auto/.test(fit), `fitHeight 时高度应当交给内容，实际是 ${fit.match(/style="[^"]*"/)?.[0]}`);
+
+  // 反向：普通卡片必须还是那个写死的高度 —— 这个开关不能变成全局行为，
+  // 番剧库、时间表都靠固定高度来做内部滚动。
+  const plain = await renderWindowCard();
+  assert.equal(plain.includes('window--fit'), false, '没传 fitHeight 的卡片不该被改掉');
+  assert.ok(/style="[^"]*height:420px/.test(plain), '普通卡片的高度仍然应当来自 defaultRect');
+
+  /*
+   * 「不滚动」这条机制在 CSS 里，SSR 渲染不出计算后的样式 —— 直接查规则本身。
+   * `flex: 0 1 auto` 不是可有可无的：默认那条 `flex: 1` 的 flex-basis 是 0%，
+   * 父容器高度又是 auto，卡片会塌成只剩标题栏。这两条一起写才算数。
+   */
+  const rule = /\.window--fit \.window__body\s*\{([^}]*)\}/.exec(CSS);
+  assert.ok(rule, 'styles.css 里缺 `.window--fit .window__body` —— 那就等于只有类名、没有行为');
+  assert.ok(/overflow:\s*visible/.test(rule[1]), '正文那一层要 overflow: visible，否则滚动条还在');
+  assert.ok(/flex:\s*0 1 auto/.test(rule[1]), '正文那一层要 flex: 0 1 auto —— 用默认的 flex: 1 卡片会塌成只剩标题栏');
+});
+
+/* ---------- 番堂排播（yuc.wiki） ---------- */
+
+/*
+ * 期望值一律从**样本**现算，不手写数字：样本是真实页面裁下来的，
+ * 哪天它多裁一组，手写的数字就会红成一句「12 !== 13」，谁也说不清是谁错了。
+ */
+const yucItems = () => yucSample(true);
+const yucGroups = () => yucSample().groups;
+
+test('番堂视图：八组排播、每一条都有可点热区，封面一律不走直连', async () => {
+  const html = await renderYuc();
+  const groups = yucGroups();
+  const items = yucItems();
+
+  assert.equal(
+    countOf(html, 'data-yuc-group='),
+    groups.length,
+    `应当渲染出 ${groups.length} 个分组（周一~周日 + 网络放送）`,
+  );
+  assert.equal(countOf(html, 'data-yuc-item='), items.length, `应当渲染出 ${items.length} 条排播`);
+
+  /*
+   * 「整块可点」不是装饰：以前只有本季那一页的封面能点开详情，
+   * 同样的封面换个页面就是死的 —— 所以这里逐条数热区，少一条就是「这条点不开」。
+   */
+  assert.equal(countOf(html, 'data-yuc-select='), items.length, '每一条都要有可点热区，缺一条就是点不开');
+
+  /*
+   * 封面必须走缓存，**一条直连都不许有**。
+   * 番堂的图挂在 B 站图床（i0.hdslb.com）上，`allowRemote` 一开桌面壳里就是
+   * 「浏览器先下一遍、主进程再下一遍」；断网则直接一片色块。
+   */
+  assert.equal(countOf(html, 'data-cover="remote"'), 0, '番堂的封面不该出现直连远端');
+  assert.equal(
+    countOf(html, 'class="cover yuc-item__cover"'),
+    items.length,
+    '每条排播都要有封面位（取不到图也留着色块位，不能整块没有）',
+  );
+
+  for (const g of groups) {
+    // 标题要按 HTML 转义后再比：分组名里有 `&`（「网络放送 & 其他」），
+    // React 会渲成 `&amp;` —— 拿原文去 includes 会红成「标题没渲染出来」，
+    // 而它其实好好地在那儿
+    assert.ok(html.includes(escapeHtml(g.label)), `分组标题「${g.label}」没渲染出来`);
+  }
+});
+
+test('番堂视图：拿不到数据时给的是原因和出口，不是一张空白卡', async () => {
+  const html = await renderYuc({ data: null, status: 'error', error: '连接超时' });
+  assert.ok(html.includes('data-yuc-state="error"'), '拉不到数据要有明确的状态位 —— 空白卡看不出是「没数据」还是「坏了」');
+  assert.ok(html.includes('连接超时'), '要把原因原样说出来');
+  assert.ok(html.includes('data-yuc-reload'), '要留一个再试一次的出口');
+  // 反向：这次根本没拿到数据，就不该冒出「看的是上次的」那句话
+  assert.equal(html.includes('data-yuc-stale'), false, '没有数据就谈不上陈旧，别挂那条说明');
+});
+
+test('番堂视图：有旧数据但没更新上时，必须把这件事说出来', async () => {
+  const html = await renderYuc({ stale: true, cached: true, error: '连接超时' });
+  assert.ok(html.includes('data-yuc-stale="1"'), 'stale 时必须显式标注');
+  assert.ok(/上次拉到/.test(html), '要说清「这是上次的」—— 不说的话用户以为看的是最新排播表');
+  // 数据照常显示：陈旧不等于不给看
+  assert.equal(countOf(html, 'data-yuc-item='), yucItems().length);
+});
+
+test('番堂的作品资料：真资料、真外链、对不上时不装样子', async () => {
+  const html = await renderYucDetail();
+  assert.match(html, /data-yuc-detail="y[0-9a-f]{8}"/, '要带上条目 id，自检靠它认「现在选的是哪一条」');
+  assert.ok(countOf(html, 'yuc-staff__row') > 0, '制作名单要列出来');
+  assert.ok(html.includes('yuc-detail__cast'), '声优要列出来');
+
+  // 外链必须带 noopener：应用窗口只有一个，被顶掉就回不来了
+  const links = html.match(/<a[^>]*class="btn"[^>]*>/g) ?? [];
+  assert.ok(links.length > 0, '官网 / PV 要有链接');
+  for (const a of links) {
+    assert.match(a, /target="_blank"/, '外链要新开，不能在应用窗口里打开');
+    assert.match(a, /rel="[^"]*noopener/, `外链缺 noopener：${a}`);
+  }
+
+  // 空壳状态：没选中时说清「点左边一条」，而不是画一堆空标题
+  const blank = await renderYucDetail({ item: null });
+  assert.ok(blank.includes('data-yuc-detail=""'), '没选中时详情卡要有一个明确的状态位');
+  assert.equal(blank.includes('yuc-staff'), false, '没选中就不该有制作的空壳');
+});
+
+test('番堂的作品资料：对上了自己的库时给一条回 Bangumi 的出口', async () => {
+  const item = yucItems().find((it) => (it.staff ?? []).length);
+  const html = await renderYucDetail({ item, lib: { id: 12345, titleZh: item.titleZh } });
+  assert.ok(html.includes('data-yuc-own="12345"'), '对上了要标出来');
+  assert.ok(html.includes('data-yuc-open-lib="12345"'), '并且要能点回自己的库（评分、话数、日记都在那边）');
+
+  // 反向：没对上时不该瞎标
+  const noLib = await renderYucDetail({ item, lib: null });
+  assert.equal(noLib.includes('data-yuc-own'), false, '对不上就是没有，不许借一条别的顶上');
+});
+
+test('番堂那一页接在大界面上：导航、卡片、深链都在', async () => {
+  const html = await render({ view: 'yuc' });
+  assert.equal(countOf(html, 'data-nav="yuc"'), 1, '侧栏要有番堂这一项');
+  assert.equal(countOf(html, 'data-window-id="yuc-board"'), 1, '排播卡要渲染出来');
+  assert.equal(countOf(html, 'data-window-id="yuc-detail"'), 1, '资料卡要渲染出来');
+  assert.equal(countOf(html, 'data-yuc-view="1"'), 1, '视图根节点要带状态位');
+});
+
 /* ── 壁纸取景框 ───────────────────────────────────────── */
 
 test('壁纸取景框：画出来的构图和真正铺上去的必须是同一件事', async () => {
@@ -1094,16 +1230,18 @@ test('设置面板外观页：卡片显示里两档都在，显示的得是夹�
 
 test('卡片区的字号必须跟着 --fs 走，不许再写死 px', async () => {
   assert.ok(
-    /\.cardgrid,\s*\.queue,\s*\.board,\s*\.weekgrid\s*\{\s*font-size:\s*calc\(12\.5px \* var\(--fs, 1\)\)/.test(CSS),
-    '四个卡片容器上要有基准字号，这是「文字大小」唯一的落点',
+    /\.cardgrid,\s*\.queue,\s*\.board,\s*\.weekgrid,\s*\.yuc-grid\s*\{\s*font-size:\s*calc\(12\.5px \* var\(--fs, 1\)\)/.test(CSS),
+    '五个卡片容器（含番堂那页）上要有基准字号，这是「文字大小」唯一的落点',
   );
 
   /*
    * 反向断言，比上面那条值钱：以后谁新加一个 `.card__xxx { font-size: 12px }`，
    * 界面上完全看不出来它不跟着滑块走 —— 只有当有人真去拉滑块才会发现。
    * 所以这里把「卡片区出现绝对 px 字号」一律判成错。
+   *
+   * ⚠️ `yuc-item` 也在名单里：番堂那一页的排版是自成一族的，最容易漏。
    */
-  const hard = [...CSS.matchAll(/^\.(?:card|queue|catchup|slot|weekcol)__[\w-]+[^{]*\{[^}]*font-size:\s*[0-9.]+px/gm)];
+  const hard = [...CSS.matchAll(/^\.(?:card|queue|catchup|slot|weekcol|yuc-item)__[\w-]+[^{]*\{[^}]*font-size:\s*[0-9.]+px/gm)];
   assert.equal(
     hard.length,
     0,

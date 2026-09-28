@@ -143,6 +143,96 @@ function fetchJson({ url, timeoutMs = 12000, headers } = {}) {
 }
 
 /**
+ * 发一个 GET 并把响应当**文本**读回来。
+ *
+ * 为什么不复用 `fetchJson`：那个函数在最后一步 `JSON.parse`，
+ * 拿 HTML 去 parse 只会得到「返回的不是合法 JSON」——
+ * 而报错信息会把人往「反代是不是坏了」上面带，其实只是找错了函数。
+ *
+ * 也不复用 `fetchBinary`：JSON 和二进制两条路各自有各自的坑
+ * （那边一变 base64 就多 33% 体积），能分开就分开。
+ *
+ * ⚠️ 只按 UTF-8 解。这类静态站都是 `<meta charset="UTF-8">`，
+ * 真要碰上 GBK 的页面得从响应头/`meta` 里取编码再交给 `TextDecoder` ——
+ * 现在不做，但要留个话在这儿，免得下次看到乱码又去怀疑网络。
+ *
+ * @returns {Promise<{ok, status, text?, bytes?, error?}>}
+ */
+function fetchText({ url, timeoutMs = 20000, headers, maxBytes = 4 * 1024 * 1024 } = {}) {
+  return new Promise((resolve) => {
+    if (!isAllowedUrl(url)) {
+      resolve({ ok: false, status: 0, error: '这个地址不被允许（只支持 https，或本机 http）' });
+      return;
+    }
+
+    let settled = false;
+    const finish = (v) => {
+      if (!settled) { settled = true; resolve(v); }
+    };
+
+    let req;
+    try {
+      req = net.request({ method: 'GET', url, redirect: 'follow' });
+    } catch (err) {
+      finish({ ok: false, status: 0, error: friendlyError(err) });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      try { req.abort(); } catch { /* 已经结束了 */ }
+      finish({ ok: false, status: 0, error: `请求超时（${Math.round(timeoutMs / 1000)}s）` });
+    }, Math.max(1000, timeoutMs));
+
+    try {
+      req.setHeader('Accept', 'text/html,application/xhtml+xml,text/plain,*/*');
+      req.setHeader('Accept-Language', 'zh-CN,zh;q=0.9');
+      req.setHeader('User-Agent', `jikai/${require('../package.json').version} (Electron)`);
+      for (const [k, v] of Object.entries(headers ?? {})) {
+        if (v == null) continue;
+        try { req.setHeader(k, String(v)); } catch { /* 非法头名，忽略 */ }
+      }
+    } catch { /* setHeader 失败不致命 */ }
+
+    req.on('response', (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        // 超限就掐断：拿到一半的 HTML 去解析，结果是「解析出来少几条」
+        // 而不是报错 —— 那种错比失败难查得多。
+        if (size > maxBytes) {
+          try { req.abort(); } catch { /* 已经结束了 */ }
+          clearTimeout(timer);
+          finish({ ok: false, status: res.statusCode, error: `页面太大（超过 ${Math.round(maxBytes / 1024)}KB）` });
+          return;
+        }
+        chunks.push(c);
+      });
+      res.on('end', () => {
+        clearTimeout(timer);
+        const body = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          finish({ ok: false, status: res.statusCode, error: `HTTP ${res.statusCode}` });
+          return;
+        }
+        finish({ ok: true, status: res.statusCode, text: body, bytes: Buffer.byteLength(body) });
+      });
+      res.on('error', (err) => {
+        clearTimeout(timer);
+        finish({ ok: false, status: 0, error: friendlyError(err) });
+      });
+    });
+
+    req.on('error', (err) => {
+      clearTimeout(timer);
+      finish({ ok: false, status: 0, error: friendlyError(err) });
+    });
+
+    try { req.end(); } catch (err) { clearTimeout(timer); finish({ ok: false, status: 0, error: friendlyError(err) }); }
+  });
+}
+
+/**
  * 发一个 GET 并把响应当成二进制读回来。
  *
  * 为什么单独一个函数而不是复用 fetchJson：那边的 Buffer.concat(chunks)
@@ -245,4 +335,4 @@ function fetchBinary({ url, timeoutMs = 20000, headers, maxBytes = 12 * 1024 * 1
   });
 }
 
-module.exports = { fetchJson, fetchBinary, applyProxy, friendlyError, isAllowedUrl };
+module.exports = { fetchJson, fetchText, fetchBinary, applyProxy, friendlyError, isAllowedUrl };

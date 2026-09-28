@@ -153,6 +153,16 @@ const wallpaperFile = () => path.join(app.getPath('userData'), 'wallpaper.json')
 const nameIndexFile = () => path.join(app.getPath('userData'), 'nameIndex.json');
 
 /**
+ * 长门番堂（yuc.wiki）的季度缓存，也是单独一个文件，理由和名称索引一样。
+ *
+ * 一个季度解析完约 40KB，而且**只增不减**（翻过多少个季度就留多少份）。
+ * 混进 state.json 的话，那 400ms 一次的防抖落盘会连它一起重写。
+ * 里面按 `{ [季度键]: 解析结果 }` 存，只留最近几季（裁剪在渲染层做，
+ * 见 `src/data/yuc.js` 的 `putCachedYuc` —— 那边能进单测）。
+ */
+const yucSeasonsFile = () => path.join(app.getPath('userData'), 'yucSeasons.json');
+
+/**
  * 随包封面图包放在哪。
  *
  * 打包之后 electron-builder 把它放到 `resources/covers`（见 package.json 的
@@ -1377,6 +1387,64 @@ function createWindow() {
              qsearchItems: document.querySelectorAll('[data-qsearch-item]').length,
              qsearchNames: [...document.querySelectorAll('[data-qsearch-item] .qsearch__name')].map((e) => e.textContent),
              wpdrag: wpdrag,
+             /*
+              * 番堂排播那一页。
+              *
+              * 「这一页有内容」在截图里是最容易看走眼的：八个分组标题对齐、
+              * 底下一条都没有，跟「数据没读进来」长得一模一样。
+              * 所以要分开数：分组数、条目数、**每一条都有的可点热区**、
+              * 以及封面里有没有直连远端（番堂的图挂在 B 站图床，直连就等于断网一片色块）。
+              */
+             yuc: (function () {
+               const root = document.querySelector('[data-yuc-view]');
+               if (!root) return null;
+               return {
+                 groups: document.querySelectorAll('[data-yuc-group]').length,
+                 items: document.querySelectorAll('[data-yuc-item]').length,
+                 hots: document.querySelectorAll('[data-yuc-select]').length,
+                 own: document.querySelectorAll('[data-yuc-own-item]').length,
+                 state: (function () {
+                   const el = document.querySelector('[data-yuc-state]');
+                   return el ? el.getAttribute('data-yuc-state') : null;
+                 })(),
+                 stale: document.querySelectorAll('[data-yuc-stale]').length,
+                 detail: document.querySelectorAll('[data-yuc-detail]').length,
+                 summary: document.querySelectorAll('[data-yuc-summary]').length,
+               };
+             })(),
+             /*
+              * 「本季概览」那张卡：正文还滚不滚、会不会盖住下面那张卡。
+              *
+              * 这两样都是**截图里看不出来**的东西：被切掉一截的统计块和排得好好的
+              * 统计块长得一模一样（这正是用户报「总是少一节」时我们没发现的原因），
+              * 而两张卡叠在一起只会看着像「番剧库的标题栏没了」。
+              * 只有把 scrollHeight 和 rect 的数拿出来才对得上。
+              *
+              * ⚠️ bodyScroll 是**直接判据**：它大于 0 就等于「还有内容看不见」。
+              * cut 是同一个意思的另一种量法（卡片底边到最后一个统计块底边还有多少），
+              * 两个一起看 —— 单看 cut 会在「内边距变了」的时候跟着一起漂。
+              *
+              * ⚠️ 这段注释在模板串里面，一个字都不能用反引号（见下面 1136 行那条告诫）。
+              */
+             statsFit: (function () {
+               const card = document.querySelector('[data-window-id="season-stats"]');
+               if (!card) return null;
+               const body = card.querySelector('.window__body');
+               const cb = card.getBoundingClientRect();
+               const grid = document.querySelector('[data-window-id="season-grid"]');
+               const gb = grid ? grid.getBoundingClientRect() : null;
+               const stats = card.querySelectorAll('.stat');
+               const last = stats.length ? stats[stats.length - 1] : null;
+               return {
+                 cls: card.className,
+                 cardH: Math.round(cb.height),
+                 statRows: stats.length,
+                 bodyScroll: body ? body.scrollHeight - body.clientHeight : -1,
+                 bodyOverflowY: body ? getComputedStyle(body).overflowY : null,
+                 cut: last ? Math.round(cb.bottom - last.getBoundingClientRect().bottom) : null,
+                 gridGap: gb ? Math.round(gb.top - cb.bottom) : null,
+               };
+             })(),
              perf: perf,
            });
           })()`,
@@ -1601,6 +1669,20 @@ const SMOKE_JPEG = Buffer.from(
 );
 
 /**
+ * 给本地 HTTP 服务当「远端网页」用的一小段 HTML。
+ *
+ * 里面刻意放了**中文、实体、标签**三样：`http:text` 唯一的活儿就是
+ * 「原样把字节按 UTF-8 解出来」，拿一段纯 ASCII 测的话，
+ * 编码那一步写成什么都看不出来。中文用「次回」这两个字，
+ * 断言里比对的就是它们 —— 解错编码时它会变成一对 U+FFFD。
+ */
+const SMOKE_HTML = [
+  '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>次回</title></head>',
+  '<body><p class="from">smoke</p><p>日本語のタイトル &amp; 半角&amp;</p>',
+  '<div class="big">' + 'x'.repeat(4096) + '</div></body></html>',
+].join('');
+
+/**
  * 把主进程所有 IPC handler 真跑一遍。
  *
  * 三条铁律：
@@ -1656,9 +1738,11 @@ async function runIpcSmoke() {
   const statePath = stateFile();
   const wallPath = wallpaperFile();
   const indexPath = nameIndexFile();
+  const yucPath = yucSeasonsFile();
   backup(statePath);
   backup(wallPath);
   backup(indexPath);
+  backup(yucPath);
 
   // ---- 1. 只读的，随便跑 ----
   await step('app:info', async () => {
@@ -1885,10 +1969,24 @@ async function runIpcSmoke() {
     record('nameindex 写 / 清 / 还原', w === true && got?._smoke === true && cleared === true && empty, `写=${w} 清空=${empty}`);
   });
 
+  await step('番堂缓存 写 / 读回 / 清空', async () => {
+    const w = await call('yuc:write', { '2026q4': { _smoke: true, stats: { items: 1 } } });
+    const got = await call('yuc:read');
+    const cleared = await call('yuc:clear');
+    const after = await call('yuc:read');
+    const empty = !after || Object.keys(after).length === 0;
+    record(
+      '番堂缓存 写 / 读回 / 清空',
+      w === true && got?.['2026q4']?._smoke === true && cleared === true && empty,
+      `写=${w} 读回=${got?.['2026q4']?._smoke} 清空=${empty}`,
+    );
+  });
+
   restore(statePath);
   restore(wallPath);
   restore(indexPath);
-  record('真实数据已还原', true, `state / wallpaper / nameIndex 各还原一次（备份在 ${tmp}）`);
+  restore(yucPath);
+  record('真实数据已还原', true, `state / wallpaper / nameIndex / yucSeasons 各还原一次（备份在 ${tmp}）`);
 
   // ---- 5. 有副作用的：只走安全的那条分支 ----
   await step('shell:open(危险协议必须被挡)', async () => {
@@ -1934,6 +2032,12 @@ async function runIpcSmoke() {
         } else if (req.url === '/img') {
           res.writeHead(200, { 'Content-Type': 'image/jpeg' });
           res.end(SMOKE_JPEG);
+        } else if (req.url === '/html') {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(SMOKE_HTML);
+        } else if (req.url === '/big') {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end('x'.repeat(200 * 1024));
         } else {
           res.writeHead(404).end('nope');
         }
@@ -1973,6 +2077,46 @@ async function runIpcSmoke() {
         r?.ok === true && same && isJpeg,
         `ok=${r?.ok} bytes=${r?.bytes} mime=${r?.mime} 逐字节一致=${same} JPEG结构=${isJpeg}`,
       );
+    });
+
+    await step('http:text(必须原样解出 UTF-8，且不能当成 JSON)', async () => {
+      const r = await call('http:text', { url: `${base}/html`, timeoutMs: 5000 });
+      /*
+       * 三条一起判，少一条都测不出真东西：
+       *   ① ok —— 通道通；
+       *   ② 中文没被换成 U+FFFD —— 编码那一步是对的；
+       *   ③ 拿到的是**文本**不是对象 —— `fetchText` 若被人图省事改成
+       *      「复用 fetchJson 再把 data 转回字符串」，HTML 会先在 JSON.parse 那步挂掉，
+       *      或者被当成字符串塞进 data 字段，形状和这里断言的不一样。
+       */
+      const t = typeof r?.text === 'string' ? r.text : '';
+      const hasCn = t.includes('次回') && t.includes('日本語のタイトル');
+      const hasEntity = t.includes('&amp;');
+      record(
+        'http:text(原样解出 UTF-8)',
+        r?.ok === true && hasCn && hasEntity && !t.includes('\uFFFD'),
+        `ok=${r?.ok} 中文=${hasCn} 实体保留=${hasEntity} 替换字符=${t.includes('\uFFFD')} bytes=${r?.bytes}`,
+      );
+    });
+
+    await step('http:text(404 必须明确失败，不能给空文本)', async () => {
+      const r = await call('http:text', { url: `${base}/nope`, timeoutMs: 5000 });
+      record('http:text(404)', r?.ok === false && !r?.text, `ok=${r?.ok} text=${JSON.stringify(r?.text)}`);
+    });
+
+    await step('http:text(超过体积上限要掐断，不能给半截)', async () => {
+      // 拿到一半的 HTML 去解析，结果是「解析出来少几条」而不是报错 —— 那种错最难查
+      const r = await call('http:text', { url: `${base}/big`, timeoutMs: 5000, maxBytes: 64 * 1024 });
+      record(
+        'http:text(超限要掐断)',
+        r?.ok === false && /太大/.test(String(r?.error)),
+        `ok=${r?.ok} err=${r?.error}`,
+      );
+    });
+
+    await step('fetchText 不能绕过 https 限制', async () => {
+      const r = await call('http:text', { url: 'ftp://example.com/x', timeoutMs: 3000 });
+      record('http:text(协议白名单)', r?.ok === false, `ok=${r?.ok} err=${r?.error}`);
     });
 
     await step('cover:warm(真下载 + 缓存)', async () => {
@@ -2256,6 +2400,7 @@ if (!hasSingleInstanceLock) {
     });
 
     handle('http:json', (_e, payload = {}) => netBridge.fetchJson(payload));
+    handle('http:text', (_e, payload = {}) => netBridge.fetchText(payload));
     handle('http:binary', (_e, payload = {}) => netBridge.fetchBinary(payload));
 
     // ---- 封面缓存 ----
@@ -2322,6 +2467,18 @@ if (!hasSingleInstanceLock) {
     handle('nameindex:read', () => readJsonFile(nameIndexFile()));
     handle('nameindex:write', (_e, payload) => writeJsonFile(nameIndexFile(), payload));
     handle('nameindex:clear', () => writeJsonFile(nameIndexFile(), null));
+
+    /*
+     * 番堂（yuc.wiki）的季度缓存。
+     *
+     * 只做「读一个 JSON / 写一个 JSON」，不认识里面的结构 ——
+     * 裁剪、校验、形状都在 `src/data/yuc.js` 那几个纯函数里做，
+     * 那样才进得了 `node --test`。「主进程里塞业务逻辑」是这个仓库踩过的坑：
+     * 主进程的东西没有测试路径，写错了只有真跑一遍才知道。
+     */
+    handle('yuc:read', () => readJsonFile(yucSeasonsFile()));
+    handle('yuc:write', (_e, payload) => writeJsonFile(yucSeasonsFile(), payload ?? null));
+    handle('yuc:clear', () => writeJsonFile(yucSeasonsFile(), null));
 
     // 保存二进制文件：导出 PNG 用。渲染层给的是 dataURL，这里剥掉前缀再解码。
     handle('file:save-binary', async (_e, { name = 'jikai.png', dataUrl = '' } = {}) => {
