@@ -346,6 +346,15 @@ const PROBE = () => {
     // 番堂那一页的条目数。「八组标题排得整整齐齐、底下一条都没有」和
     // 「缓存没喂进去」在截图上长得一模一样，只有数出来才能分开。
     yucItems: document.querySelectorAll('[data-yuc-item]').length,
+    /*
+     * 换季下拉**显示**的是哪一季。
+     *
+     * ⚠️ 这条不能省，而且必须是 DOM 的 value 而不是 data 属性：
+     * select 的 value 匹配不上任何 option 时，浏览器会退回显示列表第一项 ——
+     * 页面在放十月的排播、下拉框却写着「7 月 · 夏」。那个属性照样是对的，
+     * 所以光看属性永远发现不了，只有缩略图里那行小字是错的（2026-09-29 实际踩到）。
+     */
+    yucSeasonValue: document.querySelector('.yuc-season')?.value ?? null,
     // 封面是不是真的解码出来了。用自然宽度判断 —— complete 对加载失败的图也是 true，
     // 只有 naturalWidth > 0 才能说明像素到位了。
     coversLoaded: [...document.querySelectorAll('.card__cover img')].filter((i) => i.naturalWidth > 0).length,
@@ -532,6 +541,10 @@ function scaleOf(transform) {
       if (probe.theme !== wantTheme) problems.push(`主题不对：期望 ${wantTheme}，实际 ${probe.theme}`);
       // 番堂那一页必须有条目：喂不进去的话截下来是一句「拉不到排播表」
       if (shot.yuc && !(probe.yucItems > 0)) problems.push(`番堂那一条排播都没有（yucItems=${probe.yucItems}）`);
+      // 下拉框显示的必须就是这张图跑的那一季 —— 对不上就是「退回显示第一项」
+      if (shot.yuc && probe.yucSeasonValue !== q) {
+        problems.push(`番堂换季下拉显示的是 ${probe.yucSeasonValue}，这张图跑的是 ${q} —— 下拉和页面对不上`);
+      }
       if (shot.seed?.panelAlpha != null && Math.abs(Number(probe.panelAlpha) - shot.seed.panelAlpha) > 0.001) {
         problems.push(`卡片不透明度不对：期望 ${shot.seed.panelAlpha}，实际 ${probe.panelAlpha}`);
       }

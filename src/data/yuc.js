@@ -719,24 +719,43 @@ export function matchLibrary(items, candidates) {
 
 /* ---------- 换一季 ---------- */
 
+/** '2026q4' → 单调递增的整数（跨年也是连续的）；认不出来给 -1 */
+function seasonIndex(key) {
+  const s = parseSeason(key);
+  return s ? s.year * 4 + (s.q - 1) : -1;
+}
+
 /**
  * 界面上能选的季度，新的在前。
  *
- * 只给最近这几季（含当季）：番堂那边过季的页面虽然还在，
- * 但排播表本来就是「这一季要看什么」，往前翻太多没有意义，
- * 而列表太长会让「换季」这件事本身变得不好找。
+ * 只给最近这几季：番堂那边过季的页面虽然还在，但排播表本来就是
+ * 「这一季要看什么」，往前翻太多没有意义，列表太长又会让「换季」本身变得不好找。
+ *
+ * ⚠️ **当季要往前留一季**（`ahead`）。番堂是提前把下一季的表做出来的 ——
+ * 九月底就该能看十月新番的排播，如果列表从当季起算，那一季根本选不到。
+ *
+ * ⚠️ **`include` 里的那一季一定要在结果里。** `<select>` 的 `value` 匹配不上任何
+ * `option` 时，浏览器会退回显示**列表第一项** —— 页面明明在放十月的排播，
+ * 下拉框却写着「7 月 · 夏」，看起来像把季节搞错了，其实只是这一项缺了。
  *
  * @param {number} nowMs
- * @param {{back?:number}} opts back = 一共给几季（含当季）
+ * @param {{back?:number, ahead?:number, include?:string|null}} opts
+ *        back = 一共往回给几季（含当季）；ahead = 往未来给几季；include = 必须包含的季度
  * @returns {string[]} 形如 ['2026q4', '2026q3', ...]
  */
-export function yucSeasonKeys(nowMs = Date.now(), { back = 8 } = {}) {
+export function yucSeasonKeys(nowMs = Date.now(), { back = 8, ahead = 1, include = null } = {}) {
+  const wanted = include ? String(include) : '';
   const s = parseSeason(seasonOf(nowMs));
-  if (!s) return [];
+  if (!s) return wanted ? [wanted] : [];
   const idx = s.year * 4 + (s.q - 1);
+  const hi = idx + Math.max(0, Number(ahead));
   const lo = idx - Math.max(0, Number(back) - 1);
   const out = [];
-  for (let i = idx; i >= lo; i -= 1) out.push(`${Math.floor(i / 4)}q${(i % 4) + 1}`);
+  for (let i = hi; i >= lo; i -= 1) out.push(`${Math.floor(i / 4)}q${(i % 4) + 1}`);
+  if (wanted && !out.includes(wanted)) {
+    out.push(wanted);
+    out.sort((a, b) => seasonIndex(b) - seasonIndex(a));
+  }
   return out;
 }
 

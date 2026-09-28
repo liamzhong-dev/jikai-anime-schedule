@@ -1430,6 +1430,25 @@ function createWindow() {
                    const el = document.querySelector('[data-yuc-season]');
                    return el ? el.getAttribute('data-yuc-season') : null;
                  })(),
+                 /*
+                  * ⚠️ 只读 data-yuc-season 这个属性是**读不到真问题**的：它渲染时就写死了，
+                  * 就算 select 里没有对应的 option 它也不会变。用户看到的是另一回事 ——
+                  * value 匹配不上任何选项时，浏览器会退回显示**列表第一项**
+                  * （页面在放十月的排播，下拉框写着「7 月 · 夏」）。
+                  * 所以 DOM 自己的两样也要读出来：value 和 selectedIndex，
+                  * 匹配不上时它们分别是空串和 -1。
+                  *
+                  * ⚠️ 这段整块是**模板字符串**，注释里一个字面的反引号都会把字符串截断
+                  * （报出来的是十几行之外的「missing ) after argument list」，看不出是这里）。
+                  */
+                 seasonValue: (function () {
+                   const el = document.querySelector('.yuc-season');
+                   return el ? el.value : null;
+                 })(),
+                 seasonSelected: (function () {
+                   const el = document.querySelector('.yuc-season');
+                   return el ? el.selectedIndex : -99;
+                 })(),
                  seasonOptions: root.querySelectorAll('.yuc-season option').length,
                  coverProg: (function () {
                    const el = document.querySelector('[data-yuc-coverprog]');

@@ -1165,9 +1165,26 @@ test('番堂视图：能换季，而且是真 <select> 不是自己画的按钮'
   // 三个选项都得画出来，少一个就是那一季点不进去
   assert.equal(countOf(html, '<option'), 3);
 
+  /*
+   * ⚠️ **当前季度必须在可选项里。**
+   * `<select>` 的 value 匹配不上任何 option 时，浏览器会退回显示**列表第一项** ——
+   * 页面在放十月的排播、下拉框却写着「7 月 · 夏」，看起来像把季节算错了。
+   * 光数 option 的条数是抓不到这一条的（三条都在，只是缺了该在的那一条）。
+   */
+  const values = [...html.matchAll(/<option value="([^"]*)"/g)].map((m) => m[1]);
+  assert.ok(
+    values.includes('2026q3'),
+    `当前那一季（2026q3）不在可选项里，下拉框会显示成别的季节：${values.join(' / ')}`,
+  );
+
   // 反向：一个可选项都没有时也不能崩，得把当前季显示出来
   const flat = await renderYuc({ seasons: [], seasonKey: '2026q4', seasonLabel: '2026 秋' });
   assert.ok(flat.includes('data-yuc-season="2026q4"'), '没有列表时要退回当前这一季，不能空着');
+  assert.deepEqual(
+    [...flat.matchAll(/<option value="([^"]*)"/g)].map((m) => m[1]),
+    ['2026q4'],
+    '退回模式下列表里也必须是当前那一季 —— 否则一样会显示成别的季节',
+  );
 });
 
 test('番堂的资料卡：对上了库才给「提醒我」，并且把下一次播的时刻说出来', async () => {

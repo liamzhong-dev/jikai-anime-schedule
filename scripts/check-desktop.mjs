@@ -820,6 +820,22 @@ if (view === 'yuc') {
       Number(y.seasonOptions) > 1,
       `换季下拉只有 ${y.seasonOptions} 个选项 —— 那就换不了季`,
     );
+    /*
+     * ⚠️ 光比上面那个 `data-yuc-season` 是不够的 —— 它是渲染时写死的属性，
+     * 没有对应选项时它也不会变。真出问题的地方在 DOM 自己身上：
+     * `<select>` 的 value 匹配不上任何 option 时，浏览器退回显示**列表第一项**，
+     * 用户看到的就是「页面在放十月的排播，下拉框写着 7 月 · 夏」。
+     * 那时 value 是空串、selectedIndex 是 -1。
+     */
+    check(
+      y.seasonValue === (season || '2026q4'),
+      `换季下拉的 value 是「${y.seasonValue}」，这次跑的是 ${season || '2026q4'}`
+        + ' —— 匹配不上任何选项时浏览器会退回显示第一项，看到的季节就和页面对不上了',
+    );
+    check(
+      Number(y.seasonSelected) >= 0,
+      `换季下拉的 selectedIndex 是 ${y.seasonSelected} —— 负值说明当前季度不在可选项里`,
+    );
     check(Number(y.detail) === 1, '作品资料卡没渲染出来');
     // 这次读的是缓存、网一次没发，不该被标成「没更新上」—— stale 的语义串了
     check(Number(y.stale) === 0, 'stale（这次没更新上）不该出现在读缓存的那一次');

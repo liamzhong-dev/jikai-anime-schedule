@@ -698,7 +698,16 @@ export default function App() {
    */
   const [yucSeasonPick, setYucSeasonPick] = useState(null);
   const yucSeasonKey = yucSeasonPick ?? seasonKey;
-  const yucSeasons = useMemo(() => yucSeasonKeys(Date.now(), { back: 8 }), [seasonKey]);
+  /*
+   * `include: yucSeasonKey` 不是可有可无的：顶栏切到还没到的下一季时，
+   * 番堂这一页也跟着切过去，而「从现在往回的 8 季」里根本没有那一季 ——
+   * <select> 的 value 匹配不上任何 option 时会退回显示列表第一项，
+   * 于是页面放着十月的排播、下拉框却写着「7 月 · 夏」，看着像季节算错了。
+   */
+  const yucSeasons = useMemo(
+    () => yucSeasonKeys(Date.now(), { back: 8, ahead: 1, include: yucSeasonKey }),
+    [seasonKey, yucSeasonKey],
+  );
   const yuc = useYuc(view === 'yuc' ? yucSeasonKey : null);
   const [yucSel, setYucSel] = useState(null);
 

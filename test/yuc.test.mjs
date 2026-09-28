@@ -435,12 +435,47 @@ test('matchLibrary：脏输入不抛', () => {
 test('yucSeasonKeys：新的在前、含当季、数量对得上', () => {
   // 2026-10-10（日本时间）在 2026 秋
   const nowMs = Date.parse('2026-10-10T12:00:00Z');
-  const keys = yucSeasonKeys(nowMs, { back: 4 });
+  const keys = yucSeasonKeys(nowMs, { back: 4, ahead: 0 });
   assert.deepEqual(keys, ['2026q4', '2026q3', '2026q2', '2026q1']);
 });
 
+/*
+ * 番堂是**提前**把下一季的表做出来的 —— 九月底就该能看十月新番的排播。
+ * 列表要是只从当季起算，那一季根本选不到；下沉到界面上的表现是
+ * 「下拉框 value 匹配不上 option，浏览器退回显示第一项」，也就是
+ * 页面放着十月的排播、下拉框写着「7 月 · 夏」。
+ */
+test('yucSeasonKeys：默认要往未来多给一季，否则下一季根本选不到', () => {
+  const sep = Date.parse('2026-09-29T12:00:00Z');
+  const keys = yucSeasonKeys(sep, { back: 4 });
+  assert.equal(keys[0], '2026q4', '九月里排第一的该是十月新番那一季');
+  assert.ok(keys.includes('2026q3'), '当季当然也要在');
+  // 反向：把这一档关掉，第一位就该退回当季，不许冒出未来的季度
+  assert.equal(yucSeasonKeys(sep, { back: 4, ahead: 0 })[0], '2026q3', 'ahead:0 时第一位必须是当季');
+});
+
+test('yucSeasonKeys：include 那一季一定要落进结果里，且只多这一季', () => {
+  // 「现在」是 2026 夏，而被选中的是明年的秋 —— 默认区间里根本没有它
+  const nowMs = Date.parse('2026-08-20T12:00:00Z');
+  const plain = yucSeasonKeys(nowMs, { back: 3 });
+  assert.equal(plain.includes('2027q4'), false, '前提：默认区间里本来没有这一季');
+
+  const withKey = yucSeasonKeys(nowMs, { back: 3, include: '2027q4' });
+  assert.equal(withKey[0], '2027q4', '被选中的那一季要排在最新一位');
+  assert.equal(withKey.length, plain.length + 1, '只多这一季，别把别的挤掉');
+  assert.deepEqual(
+    withKey.filter((k) => k !== '2027q4'),
+    plain,
+    '其余几季一个都不能少',
+  );
+
+  // 反向：本来就在列表里的，不该被加第二遍
+  const same = yucSeasonKeys(nowMs, { back: 3, include: '2026q3' });
+  assert.equal(same.length, plain.length, '已经在列表里的季度不许重复出现');
+});
+
 test('yucSeasonKeys：跨年要退回去年冬季（2026q1 往前是 2025q4）', () => {
-  const keys = yucSeasonKeys(Date.parse('2026-02-10T12:00:00Z'), { back: 3 });
+  const keys = yucSeasonKeys(Date.parse('2026-02-10T12:00:00Z'), { back: 3, ahead: 0 });
   assert.deepEqual(keys, ['2026q1', '2025q4', '2025q3']);
 });
 
