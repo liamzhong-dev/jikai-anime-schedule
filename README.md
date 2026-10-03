@@ -272,7 +272,7 @@ npm run assets && npm run build && npx electron-builder --win --x64 --config ele
 
 ## 联系
 
-邮件：`liam.zhong` + `@` + `foxmail.com`（连起来，中间不加空格）
+邮件：`liam.zhong` + `@` + `foxmail.com`
 
 GitHub：[@liamzhong-dev](https://github.com/liamzhong-dev)
 
