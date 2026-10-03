@@ -16,6 +16,7 @@ const STORE_KEY = 'jikai/state/v1';
 const WALLPAPER_KEY = 'jikai/wallpaper/v1';
 const NAME_INDEX_KEY = 'jikai/nameindex/v1';
 const YUC_CACHE_KEY = 'jikai/yuc/v1';
+const AIR_ARCHIVE_KEY = 'jikai/air/v1';
 
 /**
  * 浏览器这一侧不支持的能力，统一回这个形状。
@@ -317,6 +318,28 @@ const webAdapter = {
     }
   },
 
+  // ---- 本地季度归档（每日放送的数据源） ----
+  async readAirArchive() {
+    return readJson(AIR_ARCHIVE_KEY);
+  },
+  async writeAirArchive(payload) {
+    return writeJson(AIR_ARCHIVE_KEY, payload);
+  },
+  async clearAirArchive() {
+    if (!hasLocalStorage()) return false;
+    try {
+      localStorage.removeItem(AIR_ARCHIVE_KEY);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  // 浏览器壳没有这条通道（导出本来就走不了主进程），返回空的取消函数
+  onReportProgress() {
+    return () => {};
+  },
+
   onCommand() {
     return () => {};
   },
@@ -474,6 +497,22 @@ const electronAdapter = {
   },
   async clearYucCache() {
     return window.jikai?.clearYucCache?.() ?? false;
+  },
+
+  // ---- 本地季度归档（每日放送的数据源） ----
+  async readAirArchive() {
+    return window.jikai?.readAirArchive?.() ?? null;
+  },
+  async writeAirArchive(payload) {
+    return window.jikai?.writeAirArchive?.(payload) ?? false;
+  },
+  async clearAirArchive() {
+    return window.jikai?.clearAirArchive?.() ?? false;
+  },
+
+  onReportProgress(cb) {
+    const off = window.jikai?.onReportProgress?.(cb);
+    return typeof off === 'function' ? off : () => {};
   },
 
   onCommand(cb) {

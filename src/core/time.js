@@ -224,10 +224,84 @@ export function isLateNight(utcMs) {
   return h >= 0 && h < 6;
 }
 
+/* ---------------- 季度归档（按开播时间） ---------------- */
+
+/**
+ * 季度边界按**半月**切，不是按整月。
+ *
+ * 「1 月番 / 4 月番 / 7 月番 / 10 月番」是按开播月份叫的，但真正的归档边界
+ * 落在月中：12 月下半开播的算明年 1 月番（那一季的表会提前放出来），
+ * 3 月下半开播的算 4 月番。按整月切的话「3 月 20 日开播」会被归成 1 月番，
+ * 而它明明是春季番 —— 过季之后这一整批就从当季视图里消失了。
+ *
+ * 下标 = (月份 - 1) * 2 + (日 > 15 ? 1 : 0)，值是 [季度, 年份偏移]。
+ */
+const SEASON_TABLE = [
+  [1, 0], [1, 0],  // 1 月
+  [1, 0], [1, 0],  // 2 月
+  [1, 0], [2, 0],  // 3 月：上半还是冬番，下半已经是春番
+  [2, 0], [2, 0],  // 4 月
+  [2, 0], [2, 0],  // 5 月
+  [2, 0], [3, 0],  // 6 月：上半还是春番，下半已经是夏番
+  [3, 0], [3, 0],  // 7 月
+  [3, 0], [3, 0],  // 8 月
+  [3, 0], [4, 0],  // 9 月：上半还是夏番，下半已经是秋番
+  [4, 0], [4, 0],  // 10 月
+  [4, 0], [4, 0],  // 11 月
+  [4, 0], [1, 1],  // 12 月：上半还是秋番，下半已经是明年的冬番
+];
+
 /** 某时刻所属季度（按 JST 归季），如 2026q4 */
 export function seasonOf(utcMs) {
   const p = toJST(utcMs);
-  return `${p.year}q${Math.ceil(p.month / 3)}`;
+  const slot = SEASON_TABLE[(p.month - 1) * 2 + (p.day > 15 ? 1 : 0)];
+  return `${p.year + slot[1]}q${slot[0]}`;
+}
+
+/**
+ * 一部番跨几个季度。
+ *
+ * 只按开播日归季的话，7 月开播、一直播到 12 月的半年番会在 10 月那一页里整份
+ * 消失 —— 而它那会儿正好在播。所以按话数把档期长度算出来：一季番（12/13 话）
+ * 只归起始季，半年番（24 话上下）归两季，年番归四季。
+ *
+ * ⚠️ 为什么用话数而不是「首播日 + 话数 × 周期」去推终播日：一季番播满 12 话
+ * 会落到 3 月下半（正好跨过春番的边界），按终播日算会被判成跨季，而 1 月番
+ * 从来不被当作 4 月番。话数是档期长度的可靠代理，边界不会误伤。
+ *
+ * @param {number|null} eps 总话数；未知（null）时按一季算
+ */
+export function seasonSpan(eps) {
+  const n = Number(eps);
+  // 话数在源数据里经常是 null（新番未定），这时宁可少归也别瞎扩
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  if (n <= 14) return 1;
+  return Math.min(4, Math.ceil(n / 13));
+}
+
+/**
+ * 一部番属于哪些季度。
+ *
+ * 半年番会同时出现在起始季和后续季（7 月番也出现在 10 月那一页），因为它确实
+ * 横跨两季在播；网络放送番（platform = WEB）一样计入，不做区分 —— 番堂那边是
+ * 单列一组，库里这边它们就是当季新番。
+ *
+ * @param {{begin?:string, eps?:number}} anime
+ * @returns {string[]} 形如 ['2026q3', '2026q4']，按时间先后
+ */
+export function seasonsOfAnime(anime) {
+  const beginMs = Date.parse(anime?.begin ?? '');
+  if (Number.isNaN(beginMs)) return [];
+  const s = parseSeason(seasonOf(beginMs));
+  if (!s) return [];
+  const span = seasonSpan(anime?.eps);
+  const out = [];
+  let idx = s.year * 4 + (s.q - 1);
+  for (let i = 0; i < span; i += 1) {
+    out.push(`${Math.floor(idx / 4)}q${(idx % 4) + 1}`);
+    idx += 1;
+  }
+  return out;
 }
 
 // 季度在 ACG 圈按「冬春夏秋」称呼，正好对应 1/4/7/10 月开播

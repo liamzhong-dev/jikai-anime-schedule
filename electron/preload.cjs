@@ -49,6 +49,11 @@ contextBridge.exposeInMainWorld('jikai', {
   writeYucCache: (payload) => ipcRenderer.invoke('yuc:write', payload),
   clearYucCache: () => ipcRenderer.invoke('yuc:clear'),
 
+  // 本地季度归档：按开播月份分组的番剧表，给每日放送用
+  readAirArchive: () => ipcRenderer.invoke('air:read'),
+  writeAirArchive: (payload) => ipcRenderer.invoke('air:write', payload),
+  clearAirArchive: () => ipcRenderer.invoke('air:clear'),
+
   // 自动更新：取更新源 JSON（比版本号在渲染层做）
   checkUpdate: (payload) => ipcRenderer.invoke('update:check', payload),
 
@@ -66,6 +71,12 @@ contextBridge.exposeInMainWorld('jikai', {
 
   // 季度报告长图：渲染层拼好自包含 HTML，主进程在隐藏窗口里出 PDF / PNG 再落盘
   reportExport: (payload) => ipcRenderer.invoke('report:export', payload),
+  // 导出进度：主进程一边截一边推，界面才不会像卡死
+  onReportProgress: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('report:progress', h);
+    return () => ipcRenderer.removeListener('report:progress', h);
+  },
 
   // 导出文件包：把报告 + 备份 + 说明收进同一个目录
   exportBundle: (payload) => ipcRenderer.invoke('bundle:export', payload),

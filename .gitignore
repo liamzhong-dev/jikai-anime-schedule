@@ -5,6 +5,7 @@ dist/
 # 同一个东西。`dist-old-*` 是 vite 构建留下的旧产物备份（重打前先把 dist 改名腾位置，
 # 因为沙盒对「一轮里删了多少文件」有上限，删不动）。
 release/
+release-*/
 release-out*/
 release-stale*/
 dist-old-*/

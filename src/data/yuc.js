@@ -731,8 +731,11 @@ function seasonIndex(key) {
  * 只给最近这几季：番堂那边过季的页面虽然还在，但排播表本来就是
  * 「这一季要看什么」，往前翻太多没有意义，列表太长又会让「换季」本身变得不好找。
  *
- * ⚠️ **当季要往前留一季**（`ahead`）。番堂是提前把下一季的表做出来的 ——
- * 九月底就该能看十月新番的排播，如果列表从当季起算，那一季根本选不到。
+ * ⚠️ **「提前一季」这件事已经由季度边界给了，不要再叠一层 `ahead`。**
+ * `seasonOf` 按半月切边界：9 月下半就算秋番。所以九月底打开这一页，
+ * 排第一的已经是十月新番那一季 —— 正是我们想要的「提前」。再叠 `ahead:1`
+ * 会冒出次年 1 月番，而番堂那时根本还没做那一页，点进去是空的。
+ * `ahead` 保留成参数（需要时显式传），默认给 0。
  *
  * ⚠️ **`include` 里的那一季一定要在结果里。** `<select>` 的 `value` 匹配不上任何
  * `option` 时，浏览器会退回显示**列表第一项** —— 页面明明在放十月的排播，
@@ -743,7 +746,7 @@ function seasonIndex(key) {
  *        back = 一共往回给几季（含当季）；ahead = 往未来给几季；include = 必须包含的季度
  * @returns {string[]} 形如 ['2026q4', '2026q3', ...]
  */
-export function yucSeasonKeys(nowMs = Date.now(), { back = 8, ahead = 1, include = null } = {}) {
+export function yucSeasonKeys(nowMs = Date.now(), { back = 8, ahead = 0, include = null } = {}) {
   const wanted = include ? String(include) : '';
   const s = parseSeason(seasonOf(nowMs));
   if (!s) return wanted ? [wanted] : [];

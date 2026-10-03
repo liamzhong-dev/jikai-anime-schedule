@@ -52,6 +52,7 @@ import { allBuiltinItems, builtinItems, BUILTIN_SEASONS } from './data/builtin/i
 import { currentSeason, fetchCatalog } from './data/bangumiData.js';
 import { describeSyncReport, syncLibrary } from './data/sync.js';
 import { degradedText, loadSeason } from './data/sources.js';
+import { archiveSeason, mergeArchive, mergeItems } from './data/archive.js';
 import { diagnose, probeSubject } from './data/bangumiApi.js';
 import { readImageFile } from './core/wallpaper.js';
 import { evaluateUpdate, resolveManifestUrl } from './core/update.js';
@@ -59,7 +60,7 @@ import { isVisible } from './core/features.js';
 import { lookup, normalizeEvent, shouldHandle } from './core/hotkeys.js';
 import { THEMES } from './theme/themes.js';
 import { applyTheme } from './theme/applyTheme.js';
-import { MS_PER_DAY, allSeasons, clockCST, countdown, countdownLabel, seasonLabel, watchState } from './core/time.js';
+import { MS_PER_DAY, allSeasons, clockCST, countdown, countdownLabel, seasonLabel, seasonOf, watchState } from './core/time.js';
 import { buildWeek, upcomingWithin } from './core/schedule.js';
 import { deadlineStatus, progress, sortCatchup } from './core/catchup.js';
 
@@ -111,6 +112,16 @@ export default function App() {
   // 断网时也不会有。真正的数据由下面的 loadData 按当前数据源决定。
   // 注意要和 seasonKey 取同一季 —— 否则深链指定了别的季度时，首屏会闪一下当季。
   const [season, setSeason] = useState(() => builtinItems(initialSeason));
+  /*
+   * 本地季度归档：每导入一批就按开播月份分组存一份。
+   * 每日放送原来只吃当季那一批，过季即丢 —— 往季新番在时间表里整片消失。
+   * 归档是可再生的（重新同步一次就有），所以不进 state.json，单独一个文件。
+   *
+   * 用 ref 存最新值：写归档是异步的，而 loadData 可能连着跑两次（切季度），
+   * 只读 state 会拿到上一轮的旧值，把刚导进来的那批冲掉。
+   */
+  const [airArchive, setAirArchive] = useState(null);
+  const airRef = useRef(null);
   const [syncing, setSyncing] = useState(false);
   const [progressPct, setProgressPct] = useState(0);
   const [progressLabel, setProgressLabel] = useState('');
@@ -156,6 +167,9 @@ export default function App() {
   // 组件内部 state 外面灌不进去，怎么测都是初始态。
   const [reportExporting, setReportExporting] = useState(false);
   const [reportNote, setReportNote] = useState('');
+  // 导出进度：{pct, label}。长图导出要走几十秒，没有进度的话
+  // 「还在拼」和「卡死了」在界面上长得一模一样。
+  const [reportProgress, setReportProgress] = useState(null);
   const [reportSel, setReportSel] = useState(null);
   const [reportKeyword, setReportKeyword] = useState('');
   /*
@@ -275,6 +289,23 @@ export default function App() {
     };
   }, [pushToast]);
 
+  // ---------- 本地季度归档 ----------
+  // 启动时先读回来：往季的数据只有这里还有，读不到就等于从没导过
+  useEffect(() => {
+    if (!ready) return undefined;
+    let alive = true;
+    platform.readAirArchive()
+      .then((a) => {
+        if (!alive || !a) return;
+        airRef.current = a;
+        setAirArchive(a);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [ready]);
+
   // ---------- 拉数据 ----------
   const loadData = useCallback(async (key, { live = false } = {}) => {
     const source = stRef.current.settings.dataSource;
@@ -302,7 +333,18 @@ export default function App() {
     const elapsed = Date.now() - startedAt;
     if (elapsed < MIN_SYNC_MS) await new Promise((r) => setTimeout(r, MIN_SYNC_MS - elapsed));
 
-    setSeason(res.items);
+    /*
+     * 先把这一批按开播月份落进本地归档，再把该季归档里已有的条目并回本次结果。
+     * 后半句不是多余动作：联网失败（降级）时 res.items 可能是空的，
+     * 而归档里还留着上次导进来的那份 —— 那样时间表不会整片空掉。
+     */
+    const arch = mergeArchive(airRef.current, res.items);
+    airRef.current = arch;
+    setAirArchive(arch);
+    platform.writeAirArchive(arch).catch(() => {});
+
+    const items = mergeItems(archiveSeason(arch, key), res.items);
+    setSeason(items);
     setDegraded(res.degraded);
 
     if (res.degraded) {
@@ -310,11 +352,11 @@ export default function App() {
     } else if (res.enrichStats && res.enrichStats.requested > 0) {
       const { ok, failed, requested } = res.enrichStats;
       setEnrichNote(`补全 ${ok}/${requested}${failed ? ` · ${failed} 条失败` : ''}`);
-      pushToast('同步完成', `${seasonLabel(key)} 共 ${res.items.length} 部 · 补全 ${ok}/${requested}`);
+      pushToast('同步完成', `${seasonLabel(key)} 共 ${items.length} 部 · 补全 ${ok}/${requested}`);
     } else if (res.cached) {
-      pushToast('用上了本地缓存', `${seasonLabel(key)} 共 ${res.items.length} 部`);
+      pushToast('用上了本地缓存', `${seasonLabel(key)} 共 ${items.length} 部`);
     } else {
-      pushToast('同步完成', `${seasonLabel(key)} 共 ${res.items.length} 部`);
+      pushToast('同步完成', `${seasonLabel(key)} 共 ${items.length} 部`);
     }
 
     setSyncing(false);
@@ -705,7 +747,9 @@ export default function App() {
    * 于是页面放着十月的排播、下拉框却写着「7 月 · 夏」，看着像季节算错了。
    */
   const yucSeasons = useMemo(
-    () => yucSeasonKeys(Date.now(), { back: 8, ahead: 1, include: yucSeasonKey }),
+    // ahead 不传（默认 0）：季度边界本身已经把 9 月下半算成秋番，
+    // 再叠一层会冒出番堂还没出版的次年 1 月番，点进去是空的
+    () => yucSeasonKeys(Date.now(), { back: 8, include: yucSeasonKey }),
     [seasonKey, yucSeasonKey],
   );
   const yuc = useYuc(view === 'yuc' ? yucSeasonKey : null);
@@ -714,6 +758,36 @@ export default function App() {
   // 番堂的条目 ↔ 我们库里的条目。两边各用各的长处：排播来自番堂、
   // 评分/话数/日记来自 Bangumi，交汇点就是这一张表。
   const yucItems = useMemo(() => (yuc.data?.groups ?? []).flatMap((g) => g.items ?? []), [yuc.data]);
+
+  /*
+   * 详情页单独取一张封面。
+   *
+   * 池子里只有当季那一批，而抽屉里这条可能是往季的追番、也可能是番堂的条目 ——
+   * 两者都不在池子里，于是详情页永远是色块，看着像「这个番没有封面」。
+   *
+   * group 用**它自己那一季**而不是当季：封面缓存按季度分目录，放对位置
+   * 下次打开才不用重新下一遍。番堂那条用 `yuc-<季度>`，和番堂列表页同一份缓存。
+   */
+  const detailCover = useMemo(() => {
+    if (drawer?.cover) {
+      const ms = Date.parse(drawer.begin ?? '');
+      return { group: Number.isNaN(ms) ? seasonKey : seasonOf(ms), entry: drawer };
+    }
+    if (yucSel?.cover) return { group: `yuc-${seasonKey}`, entry: yucSel };
+    return null;
+  }, [drawer, yucSel, seasonKey]);
+
+  const detailCovers = useCovers({
+    group: detailCover?.group ?? '',
+    entries: detailCover ? coverEntries([detailCover.entry], DISPLAY_VARIANT) : [],
+    enabled: Boolean(detailCover),
+  });
+
+  // 池子 + 详情那一张。键是条目 id，两边的 id 不可能撞（番堂是 y 开头）
+  const coverImages = useMemo(
+    () => ({ ...poolCovers.images, ...detailCovers.images }),
+    [poolCovers.images, detailCovers.images],
+  );
   const yucMatched = useMemo(() => matchLibrary(yucItems, season), [yucItems, season]);
 
   /*
@@ -1353,6 +1427,10 @@ export default function App() {
   const handleExportReport = useCallback(async (kind) => {
     setReportExporting(true);
     setReportNote('');
+    setReportProgress({ pct: 0.04, label: '准备导出' });
+    const offProgress = platform.onReportProgress?.((p) => {
+      if (p && Number.isFinite(p.pct)) setReportProgress({ pct: p.pct, label: p.label ?? '' });
+    });
     try {
       const canvas = canvasHtmlOf(document);
       if (!canvas) {
@@ -1389,6 +1467,8 @@ export default function App() {
     } catch (err) {
       pushToast('导出失败', err?.message ?? String(err));
     } finally {
+      if (typeof offProgress === 'function') offProgress();
+      setReportProgress(null);
       setReportExporting(false);
     }
   }, [report, seasonKey, pushToast]);
@@ -1492,7 +1572,7 @@ export default function App() {
   return (
     // 封面解析走上下文：七个用到 <Cover> 的地方不用各自去接缓存，
     // 也就不用各自决定「该用哪一档地址」—— 那正是 v1.1 桌面端出错的机制。
-    <CoverProvider images={poolCovers.images} allowRemote={coversRemote}>
+    <CoverProvider images={coverImages} allowRemote={coversRemote}>
     <ScaleDockProvider onToggle={() => setScaleOpen((v) => !v)}>
     <div className="app">
       <WallpaperLayer wallpaper={{ ...st.settings.wallpaper, dataUrl: wallpaper?.dataUrl ?? null }} />
@@ -1914,6 +1994,7 @@ export default function App() {
                 coverage={reportCoverage}
                 note={reportNote}
                 exporting={reportExporting}
+                progress={reportProgress}
                 keyword={reportKeyword}
                 onKeyword={setReportKeyword}
                 selectedId={reportSel}

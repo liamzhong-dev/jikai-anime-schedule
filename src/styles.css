@@ -803,6 +803,24 @@ html:not([data-frost='on']) .modal {
  */
 
 /* 「这次没更新上」的说明条。比顶栏那条 `.banner` 轻一档：它只影响这一张卡 */
+/* 数据来源标注：这页的排播表来自长门有C，得摆在明面上 */
+.yuc-credit {
+  font-size: calc(11px * var(--fs, 1));
+  color: var(--text-3);
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line, rgba(128, 128, 128, 0.28));
+  white-space: nowrap;
+}
+/* 数据来源标注：这页的排播表来自长门有C，得摆在明面上 */
+.yuc-credit {
+  font-size: calc(11px * var(--fs, 1));
+  color: var(--text-3);
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line, rgba(128, 128, 128, 0.28));
+  white-space: nowrap;
+}
 .yuc-note {
   margin: 0 0 12px;
   padding: 7px 10px;
@@ -2226,6 +2244,36 @@ body.print .rb { border-color: transparent !important; }
   border: 1px solid var(--warn); border-radius: var(--r-sm);
 }
 .report__note { margin: 0; font-size: 11.5px; color: var(--text-3); }
+
+/* 导出进度：长图导出要走几十秒，界面上得看得出它在动 */
+.report__progress { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.report__progress-track {
+  flex: 1; height: 6px; min-width: 80px; border-radius: 999px;
+  background: var(--bg-3); overflow: hidden;
+}
+.report__progress-bar {
+  height: 100%; border-radius: 999px; background: var(--accent);
+  transition: width 0.2s ease;
+}
+.report__progress-text {
+  font-size: 11.5px; color: var(--text-3); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 导出进度：长图导出要走几十秒，界面上得看得出它在动 */
+.report__progress { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.report__progress-track {
+  flex: 1; height: 6px; min-width: 80px; border-radius: 999px;
+  background: var(--bg-3); overflow: hidden;
+}
+.report__progress-bar {
+  height: 100%; border-radius: 999px; background: var(--accent);
+  transition: width 0.2s ease;
+}
+.report__progress-text {
+  font-size: 11.5px; color: var(--text-3); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 
 /* ---------- 右：属性 ---------- */
 .report__field { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--text-2); }

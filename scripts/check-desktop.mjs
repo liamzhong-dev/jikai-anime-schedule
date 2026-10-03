@@ -72,6 +72,8 @@ const profile = arg('profile', '');
 const click = Number(arg('click', '0'));
 const wp = process.argv.includes('--wp');
 const cardopen = process.argv.includes('--cardopen');
+const yucdetail = process.argv.includes('--yuc-detail');
+const keepdata = process.argv.includes('--keepdata');
 const retryhw = process.argv.includes('--retryhw');
 /*
  * `--yuc-covers`：番堂那一页**额外**断言「封面真的全部进了缓存」。
@@ -170,6 +172,8 @@ function buildWallpaperSeed() {
  */
 /** 这一轮播种进去的壁纸信息（`--wp` 才有），断言要用它算期望 */
 let wallSeed = null;
+/** `--keepdata` 埋进去的那条记录，跑完要回来查它还在不在 */
+let keepSeed = null;
 
 function seedProfile(dir, forView, withWallpaper) {
   if (SEEDS.length < 3) {
@@ -370,13 +374,61 @@ function seedProfile(dir, forView, withWallpaper) {
    * 比不做测试更坏**：它会让人去改本来正确的代码（这条教训的反面版本在第 17 条）。
    * 所以这里不再按分支各写一次，统一在出口处写。
    */
+  /*
+   * `--keepdata`：预先埋一份「用户自己的东西」—— 一条追番、一条日记、
+   * 一份本地季度归档、一张封面缓存 —— 跑完回来查它们还在不在。
+   *
+   * 守的是「升级 / 重启不清本地数据」。个人记录（追番、日记）丢一次就没了，
+   * 而缓存丢了只是重新下一遍，两者混在一起的话严重性就看不清，所以分开埋、分开断言。
+   *
+   * ⚠️ 必须**在 state.json 落盘之前**改 state：先写文件再改对象的话，
+   * 埋进去的东西根本没进文件，后面三条断言全是空转（脚本自己造出来的红，
+   * 比不做测试更坏 —— 它会让人去改本来正确的代码）。
+   *
+   * ⚠️ 埋的 id 必须是内置数据里真有的：否则「还在」只是文件还在，
+   * 而数据其实被归一化丢掉了 —— 那正是要抓的那类 bug。
+   */
+  if (keepdata) {
+    const keep = SEEDS[0];
+    const at = Date.UTC(2026, 9, 3);
+    state.following = {
+      ...(state.following ?? {}),
+      [keep.id]: { status: 'watching', watchedEps: 1, notify: true, followedAt: at, lastAt: at },
+    };
+    state.diary = {
+      ...(state.diary ?? {}),
+      [keep.id]: { entries: [{ at, rating: 8, note: '' }], updatedAt: at },
+    };
+    keepSeed = { id: keep.id, title: titleOf(keep) };
+  }
+
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(state, null, 2), 'utf8');
+  if (keepdata) {
+    fs.writeFileSync(
+      path.join(dir, 'airSeasons.json'),
+      JSON.stringify({ builtAt: Date.UTC(2026, 9, 3), seasons: { '2026q3': [{ id: keepSeed.id, titleZh: keepSeed.title }] } }, null, 2),
+      'utf8',
+    );
+    fs.mkdirSync(path.join(dir, 'covers', 'keepdata'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'covers', 'keepdata', 'seed.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
   // 索引只有当这次自检真的需要时才写 —— 写了一份别的视图用不上的索引，
   // 会顺手把「没有索引时该怎么显示」这条分支从别的自检里遮掉。
   if (nameIndex) fs.writeFileSync(path.join(dir, 'nameIndex.json'), JSON.stringify(nameIndex), 'utf8');
   if (yucCache) fs.writeFileSync(path.join(dir, 'yucSeasons.json'), JSON.stringify(yucCache), 'utf8');
   if (wallSeed) fs.writeFileSync(path.join(dir, 'wallpaper.json'), JSON.stringify(wallSeed.payload), 'utf8');
+
+  /*
+   * `--keepdata`：在存档里预先埋一份「用户自己的东西」—— 一条追番、一条日记、
+   * 一份本地季度归档、一张封面缓存 —— 跑完回来查它们还在不在。
+   *
+   * 守的是「升级 / 重启不清本地数据」。个人记录（追番、日记）丢一次就没了，
+   * 而缓存丢了只是重新下一遍，两者混在一起的话严重性就看不清，所以分开埋、分开断言。
+   *
+   * ⚠️ 埋的 id 必须是内置数据里真有的：否则「还在」只是文件还在，
+   * 而数据其实被 normalize 丢掉了 —— 那正是要抓的那类 bug。
+   */
   return expectation;
 }
 
@@ -404,6 +456,7 @@ if (wp) env.JIKAI_SMOKE_WPDRAG = '1';
  * 也照样「成功」，于是「用户点不开」永远查不出来。
  */
 if (cardopen) env.JIKAI_SMOKE_CARDOPEN = '1';
+if (yucdetail) env.JIKAI_SMOKE_YUCDETAIL = '1';
 /*
  * 「再试一次硬件加速」那一路：靠一个标记文件把重启后的那一份认出来。
  *
@@ -607,6 +660,19 @@ let cardReport = null;
       cardReport = JSON.parse(coLine.slice(coLine.indexOf('{')));
     } catch {
       cardReport = { parseError: coLine.slice(0, 200) };
+    }
+  }
+}
+
+/** 番堂详情卡那一路同样是主进程点出来的，走独立一行 */
+let yucDetailReport = null;
+{
+  const line = output.out.split(/\r?\n/).find((l) => l.trim().startsWith('SMOKE_YUCDETAIL'));
+  if (line) {
+    try {
+      yucDetailReport = JSON.parse(line.slice(line.indexOf('{')));
+    } catch {
+      yucDetailReport = { parseError: line.slice(0, 200) };
     }
   }
 }
@@ -1125,6 +1191,69 @@ if (cardopen) {
   }
 }
 
+// ---- 番堂详情卡的封面：不能是色块 ----
+// 详情卡画在番堂列表的封面 Provider **外面**（外层池子只有 Bangumi 当季那一批，
+// 番堂条目 id 是 y 开头，池子里没有），所以这里曾经永远是一片色块，
+// 看着像「这一部没有图」。修法是给当前打开的那一条单独取一张。
+if (yucdetail) {
+  const b = yucDetailReport?.before ?? {};
+  const a = yucDetailReport?.after ?? {};
+  check(
+    Number(b.found) === 1,
+    `番堂页里没有可点的条目（[data-yuc-select] 一个都没有）：${JSON.stringify(yucDetailReport)}`,
+  );
+  if (Number(b.found) === 1) {
+    check(Number(a.detail) === 1, `点了番堂条目，详情卡却没开（after=${JSON.stringify(a)}）`);
+    /*
+     * ⚠️ 判据是 data-cover 这个属性，不是「有没有 img 标签」——
+     * 图还没到位时 React 画的是色块，只看标签分不出「有图」和「还在取」。
+     * 也要先证明详情卡真的开了：一个都没渲染时这条断言照样成立（空转）。
+     */
+    if (Number(a.detail) === 1) {
+      check(
+        a.cover === 'cache',
+        `番堂详情卡的封面是 ${JSON.stringify(a.cover)}（期望 cache）`
+          + ' —— 详情卡不在列表页的封面 Provider 里，得单独取一张',
+      );
+    }
+  }
+}
+
+// ---- 升级 / 重启不清本地数据 ----
+/*
+ * 判据一律**从磁盘读**：界面上看得见的数据不等于落盘的数据，
+ * 而「升级之后东西没了」正是磁盘这一层的事。
+ *
+ * ⚠️ 先证明种子确实埋进去了 —— 埋都没埋上的话，后面三条断言全是空转。
+ */
+if (keepdata && keepSeed && profileDir) {
+  const statePath = path.join(profileDir, 'state.json');
+  let after = null;
+  try {
+    after = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  } catch (e) {
+    check(false, `跑完之后读不到 state.json（${e?.message ?? e}）—— 存档被清了`);
+  }
+  if (after) {
+    check(
+      after?.following?.[keepSeed.id] != null,
+      `追番记录不见了（following[${keepSeed.id}]《${keepSeed.title}》）—— 个人数据被清了`,
+    );
+    check(
+      (after?.diary?.[keepSeed.id]?.entries ?? []).length > 0,
+      '日记记录不见了 —— 个人数据被清了',
+    );
+  }
+  check(
+    fs.existsSync(path.join(profileDir, 'airSeasons.json')),
+    '本地季度归档 airSeasons.json 不见了 —— 往季新番会整片消失',
+  );
+  check(
+    fs.existsSync(path.join(profileDir, 'covers', 'keepdata', 'seed.png')),
+    '封面缓存被清了 —— 又得整季重新下一遍',
+  );
+}
+
 // ---- 内置数据在（离线开箱可用的前提）----
 check(report.library === 'yes', `内置作品库没加载（library=${report.library}），离线就开不了箱了`);
 
@@ -1218,6 +1347,10 @@ if (cardopen) {
   console.log(`  封面热区 ${b.box} · 正中命中 ${JSON.stringify(b.hit)}`);
   console.log(`  真实鼠标点击 → 详情抽屉 ${a.panel ?? '?'} 个${a.title ? ` · 标题「${a.title}」` : ''}`);
   if (Array.isArray(b.path)) console.log(`  命中链：${b.path.join(' < ')}`);
+}
+if (yucdetail) {
+  const a = yucDetailReport?.after ?? {};
+  console.log(`  番堂详情卡 ${a.detail ?? '?'} 个${a.title ? ` · 标题「${a.title}」` : ''} · 封面 ${a.cover ?? '?'}`);
 }
 console.log(`  截图：${path.relative(root, shot)}（${(fs.statSync(shot).size / 1024).toFixed(0)} KB）`);
 for (const w of warnings) console.log(`  ! ${w}`);

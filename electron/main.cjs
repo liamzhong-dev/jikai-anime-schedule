@@ -163,6 +163,15 @@ const nameIndexFile = () => path.join(app.getPath('userData'), 'nameIndex.json')
 const yucSeasonsFile = () => path.join(app.getPath('userData'), 'yucSeasons.json');
 
 /**
+ * 本地季度归档：按开播月份分组存下来的番剧表。
+ *
+ * 每日放送原来只吃当季那一批，过季即丢 —— 往季新番在时间表里整片消失。
+ * 这份归档让「导入过的数据」留在本地，往季也能照常排进每日放送。
+ * 同样不进 state.json（几百 KB，会和那 400ms 一次的防抖落盘打架）。
+ */
+const airSeasonsFile = () => path.join(app.getPath('userData'), 'airSeasons.json');
+
+/**
  * 随包封面图包放在哪。
  *
  * 打包之后 electron-builder 把它放到 `resources/covers`（见 package.json 的
@@ -804,6 +813,63 @@ function createWindow() {
             await nap(300);
           }
           console.log(`SMOKE_CARDOPEN ${JSON.stringify({ before, after })}`);
+        }
+
+        /*
+         * ---------- 番堂详情卡的封面：JIKAI_SMOKE_YUCDETAIL=1 ----------
+         *
+         * 番堂详情卡画在外层，不在 YucView 自己的封面 Provider 里，而外层池子只有
+         * Bangumi 当季那一批 —— 番堂条目的 id 是 y 开头，池子里根本没有它，
+         * 于是详情卡的封面永远是色块，看着就像「这一部没有图」。
+         *
+         * 判据用 data-cover 而不是「有没有 img 标签」：图没加载完时 React 会先画色块，
+         * 只看标签存在与否分不出「有图」和「还在取」。
+         */
+        const YUCDETAIL = process.env.JIKAI_SMOKE_YUCDETAIL || '';
+        if (YUCDETAIL) {
+          const nap = (ms) => new Promise((r) => setTimeout(r, ms));
+          const before = await win.webContents
+            .executeJavaScript(
+              `(() => {
+                 const btn = document.querySelector('[data-yuc-select]');
+                 if (!btn) return { found: 0 };
+                 const r = btn.getBoundingClientRect();
+                 return {
+                   found: 1,
+                   cx: Math.round(r.left + r.width / 2),
+                   cy: Math.round(r.top + r.height / 2),
+                   id: btn.getAttribute('data-yuc-select'),
+                   openBefore: document.querySelectorAll('.yuc-detail').length,
+                 };
+               })()`,
+            )
+            .catch((e) => ({ error: String(e?.message ?? e) }));
+
+          let after = null;
+          if (before && before.found) {
+            win.webContents.sendInputEvent({ type: 'mouseMove', x: before.cx, y: before.cy });
+            await nap(80);
+            win.webContents.sendInputEvent({ type: 'mouseDown', x: before.cx, y: before.cy, button: 'left', clickCount: 1 });
+            await nap(80);
+            win.webContents.sendInputEvent({ type: 'mouseUp', x: before.cx, y: before.cy, button: 'left', clickCount: 1 });
+            // 封面是异步取的（第一次打开这一季要真的去下一张图），给足时间再看
+            await nap(6000);
+            after = await win.webContents
+              .executeJavaScript(
+                `(() => {
+                   const d = document.querySelector('.yuc-detail');
+                   const c = d ? d.querySelector('.yuc-detail__cover') : null;
+                   return {
+                     detail: document.querySelectorAll('.yuc-detail').length,
+                     title: d ? (d.querySelector('.yuc-detail__title') || {}).textContent || null : null,
+                     cover: c ? c.getAttribute('data-cover') : null,
+                     img: c ? c.querySelectorAll('img').length : 0,
+                   };
+                 })()`,
+              )
+              .catch((e) => ({ error: String(e?.message ?? e) }));
+          }
+          console.log(`SMOKE_YUCDETAIL ${JSON.stringify({ before, after })}`);
         }
 
         /*
@@ -2524,6 +2590,10 @@ if (!hasSingleInstanceLock) {
     handle('yuc:write', (_e, payload) => writeJsonFile(yucSeasonsFile(), payload ?? null));
     handle('yuc:clear', () => writeJsonFile(yucSeasonsFile(), null));
 
+    handle('air:read', () => readJsonFile(airSeasonsFile()));
+    handle('air:write', (_e, payload) => writeJsonFile(airSeasonsFile(), payload ?? null));
+    handle('air:clear', () => writeJsonFile(airSeasonsFile(), null));
+
     // 保存二进制文件：导出 PNG 用。渲染层给的是 dataURL，这里剥掉前缀再解码。
     handle('file:save-binary', async (_e, { name = 'jikai.png', dataUrl = '' } = {}) => {
       const m = /^data:([^;,]+)?(;charset=[^;,]+)?;base64,(.*)$/s.exec(String(dataUrl));
@@ -2567,11 +2637,23 @@ if (!hasSingleInstanceLock) {
         const full = withReportStyles(text);
         // 这一段会开隐藏窗口，销毁时不能让「所有窗口都关闭」把整个应用带走
         hiddenExportWindows += 1;
+        /*
+         * 导出会卡上几十秒，而界面原先只有一个「正在导出…」—— 一动不动和卡死
+         * 在用户眼里没有区别。这里把主进程的进度推回渲染层。
+         * 推不出去不能让导出失败（界面可能已经关了），所以整段吞掉异常。
+         */
+        const sendProgress = (p) => {
+          try {
+            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('report:progress', p);
+          } catch {
+            /* 界面没了就算了 */
+          }
+        };
         let out;
         try {
           out = isPdf
-            ? await reportExport.renderPdf({ html: full, width: w })
-            : await reportExport.renderPng({ html: full, width: w });
+            ? await reportExport.renderPdf({ html: full, width: w, onProgress: sendProgress })
+            : await reportExport.renderPng({ html: full, width: w, onProgress: sendProgress });
         } finally {
           hiddenExportWindows -= 1;
         }
@@ -2692,9 +2774,10 @@ if (!hasSingleInstanceLock) {
           hiddenExportWindows += 1;
           let out;
           try {
+            // 文件包里可能有多份，进度推回去会互相覆盖，这里不给进度
             out = kind === 'pdf'
-              ? await reportExport.renderPdf({ html: withReportStyles(html), width: w })
-              : await reportExport.renderPng({ html: withReportStyles(html), width: w });
+              ? await reportExport.renderPdf({ html: withReportStyles(html), width: w, onProgress: () => {} })
+              : await reportExport.renderPng({ html: withReportStyles(html), width: w, onProgress: () => {} });
           } finally {
             hiddenExportWindows -= 1;
           }

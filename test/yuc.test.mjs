@@ -440,18 +440,21 @@ test('yucSeasonKeys：新的在前、含当季、数量对得上', () => {
 });
 
 /*
- * 番堂是**提前**把下一季的表做出来的 —— 九月底就该能看十月新番的排播。
- * 列表要是只从当季起算，那一季根本选不到；下沉到界面上的表现是
- * 「下拉框 value 匹配不上 option，浏览器退回显示第一项」，也就是
- * 页面放着十月的排播、下拉框写着「7 月 · 夏」。
+ * 「九月底就能看十月新番」这件事，现在由**季度边界**保证：
+ * seasonOf 按半月切，9 月下半开播的已经算秋番，所以这里排第一的必须是十月那一季。
+ *
+ * ⚠️ 不要再叠一层 ahead：那会冒出次年 1 月番，而番堂那时还没做那一页，
+ * 点进去是空的。下沉到界面上的表现是「下拉框 value 匹配不上 option，
+ * 浏览器退回显示第一项」—— 页面放着十月的排播、下拉框写着「7 月 · 夏」。
  */
-test('yucSeasonKeys：默认要往未来多给一季，否则下一季根本选不到', () => {
+test('yucSeasonKeys：九月底排第一的该是十月新番那一季（靠季度边界，不靠 ahead）', () => {
   const sep = Date.parse('2026-09-29T12:00:00Z');
   const keys = yucSeasonKeys(sep, { back: 4 });
   assert.equal(keys[0], '2026q4', '九月里排第一的该是十月新番那一季');
-  assert.ok(keys.includes('2026q3'), '当季当然也要在');
-  // 反向：把这一档关掉，第一位就该退回当季，不许冒出未来的季度
-  assert.equal(yucSeasonKeys(sep, { back: 4, ahead: 0 })[0], '2026q3', 'ahead:0 时第一位必须是当季');
+  assert.ok(keys.includes('2026q3'), '上一季也要在（往回看用）');
+  // 反向：只有显式要 ahead 时才冒出未来的季度，默认不许
+  assert.equal(keys.includes('2027q1'), false, '默认不许冒出还没出版的季度');
+  assert.equal(yucSeasonKeys(sep, { back: 4, ahead: 1 })[0], '2027q1', 'ahead:1 时才多给一季');
 });
 
 test('yucSeasonKeys：include 那一季一定要落进结果里，且只多这一季', () => {

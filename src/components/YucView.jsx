@@ -88,7 +88,15 @@ export default function YucView({
           <span className="toolbar__note" data-yuc-summary={data?.stats?.items ?? -1}>
             {data
               ? `${data.seasonName || seasonLabel || ''}　共收录 ${data.total ?? data.stats?.items ?? 0} 部`
-              : '长门番堂 · 排播表'}
+              : '番堂 · 排播表'}
+          </span>
+          {/*
+            数据来源要摆在明面上：这一页的排播表是长门有C（yuc.wiki）整理的，
+            不是我们自己算的。写清楚既是对来源的尊重，也让「这一页的数字为什么
+            和别的页不一样」有个出处可查。
+          */}
+          <span className="yuc-credit" data-yuc-source="yuc.wiki">
+            数据来源：长门有C
           </span>
           {data?.breakdown?.length ? (
             <span className="yuc-chips">

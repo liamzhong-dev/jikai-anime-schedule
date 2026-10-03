@@ -60,6 +60,7 @@ export default function ReportView({
   coverage = null,
   note = '',
   exporting = false,
+  progress = null,
   keyword: keywordProp,
   onKeyword: onKeywordProp,
   selectedId: selectedProp,
@@ -423,6 +424,30 @@ export default function ReportView({
           </p>
         ) : null}
         {note ? <p className="report__note" data-report-note="1">{note}</p> : null}
+        {/*
+          导出进度。长图要走几十秒，原来界面上只有一个「正在导出…」——
+          一动不动和卡死在用户眼里没有区别，所以把百分比和当前在干什么摆出来。
+
+          ⚠️ `data-report-exportpct` 给自检读：只断言「出现过进度」是不够的，
+          要能读出具体数字，才知道它到底走到了哪一步。
+        */}
+        {progress ? (
+          <div
+            className="report__progress"
+            data-report-exportpct={String(Math.round(Number(progress.pct) * 100))}
+            data-report-exportlabel={progress.label ?? ''}
+          >
+            <div className="report__progress-track">
+              <div
+                className="report__progress-bar"
+                style={{ width: `${Math.max(2, Math.round(Number(progress.pct) * 100))}%` }}
+              />
+            </div>
+            <span className="report__progress-text">
+              {Math.round(Number(progress.pct) * 100)}%{progress.label ? ` · ${progress.label}` : ''}
+            </span>
+          </div>
+        ) : null}
       </div>
 
       {/* ───────── 右：属性 ───────── */}

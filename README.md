@@ -1,6 +1,6 @@
 # 次回 · jikai
 
-[![Version](https://img.shields.io/badge/version-2.0.0-8b7cf6)](https://github.com/liamzhong-dev/jikai-anime-schedule/releases)
+[![Version](https://img.shields.io/badge/version-2.1.0-8b7cf6)](https://github.com/liamzhong-dev/jikai-anime-schedule/releases)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
@@ -15,9 +15,20 @@ Windows 追番桌面小工具。本季番剧、播出时间表、更新倒计时
 
 ## 下载
 
-到 [Releases](https://github.com/liamzhong-dev/jikai-anime-schedule/releases) 拿 `jikai-2.0.0-setup.exe`，双击装完就能用。安装包没有代码签名证书，Windows 第一次运行会弹 SmartScreen 的「未知发布者」，点「更多信息 → 仍要运行」即可。这一步躲不掉，除非买证书。
+到 [Releases](https://github.com/liamzhong-dev/jikai-anime-schedule/releases) 拿最新的 `jikai-<版本>-setup.exe`，双击装完就能用。安装包没有代码签名证书，Windows 第一次运行会弹 SmartScreen 的「未知发布者」，点「更多信息 → 仍要运行」即可。这一步躲不掉，除非买证书。
 
 不想装东西也可以跑源码，见下面「运行」。
+
+## 更新记录
+
+### 2.1.0
+
+- 番堂排播：封面改走图床缩略图并显示缓存进度；新增换季下拉、开播提醒、补番日记联动
+- 番堂排播：详情页能取到封面，不再是一片色块
+- 长图 PNG 导出改为整张一次截图，并显示导出进度
+- 季度归档改为按开播日期判定（12 月末开播算次年 1 月番），半年番同时归入起始季与后续季，网络放送番计入当季
+- 每日放送改为读本地归档，往季新番也能排进时间表
+- Tier List 候选改为当季新番全量
 
 ## 功能
 
@@ -43,9 +54,11 @@ Windows 追番桌面小工具。本季番剧、播出时间表、更新倒计时
 
 ![番堂作品资料](screenshots/26-yuc-detail.png)
 
-它和「播出时间表」是同一件事的两种口径：一张是我们按自己的库算出来的（谁在第几话、什么时候更新），一张是别人整理好的全量排播（连没入库的也在）。所以两边**不合并** —— 一份数据一个出处，混起来就说不清「这条时间是谁给的」。
+数据来源：[长门有C（yuc.wiki）](https://yuc.wiki/)。
 
-数据是进这一页时才去取的，**先看缓存**：拉过一次就一直用那一次，一天开十几次也只会请求一次。想强制刷新按右上角「重新拉取」。断网时用上次的结果并明确标注，不会假装是最新的。
+它和「播出时间表」是同一件事的两种口径：一张是按自己的库算出来的（谁在第几话、什么时候更新），一张是整理好的全量排播（连没入库的也在）。两边不合并，各用一个出处。
+
+排播数据进入这一页时才取，优先用本地缓存：拉过一次之后，一天开十几次也只请求一次。强制刷新按右上角「重新拉取」。断网时显示上次的结果，并标注不是最新的。
 
 和自己的库对得上的条目会标「已收入」，并在右侧给一条通回 Bangumi 详情的出口（评分、话数、日记都在那边）。
 
@@ -87,7 +100,7 @@ Windows 追番桌面小工具。本季番剧、播出时间表、更新倒计时
 
 画布默认按窗口宽度缩放到能看全，不用横向拖。想看细节点 `1:1`，或用 `−` / `＋` 自己调。缩放只影响预览，导出的图还是原始尺寸。
 
-导出前会算一次封面覆盖率，缺图就不让导。一张缺了十几张封面的墙看着只是「没那么好看」，发出去才会被人指出来。
+导出前会算一次封面覆盖率，缺图就不让导 —— 缺封面的墙要到发出去才会被发现。
 
 ![季度报告](screenshots/24-report.png)
 
@@ -136,7 +149,7 @@ Windows 追番桌面小工具。本季番剧、播出时间表、更新倒计时
 
 ### 托盘
 
-关闭窗口后进入托盘继续运行，不退出。图标上带数字角标，显示今天有几部更新；菜单里那行字得先右键才看得见，角标是扫一眼就知道有没有事儿的那层。托盘菜单显示今天几部更新、待补几部、已逾期几部，可以直接跳到对应视图。
+关闭窗口后进入托盘继续运行，不退出。图标上带数字角标，显示今天有几部更新；托盘菜单显示今天几部更新、待补几部、已逾期几部，可以直接跳到对应视图。
 
 支持开机自启，开机时带 `--hidden` 参数，不弹窗口。全局快捷键默认 `Ctrl+Shift+A`，在其他程序前台时也能呼出主窗口。
 
@@ -259,11 +272,9 @@ npm run assets && npm run build && npx electron-builder --win --x64 --config ele
 
 ## 联系
 
-用出问题，或者有想法想聊，发邮件给我：`liam.zhong` + `@` + `foxmail.com`（三段连起来，中间不加空格）
+邮件：`liam.zhong` + `@` + `foxmail.com`（连起来，中间不加空格）
 
-> 地址这样写是为了躲收地址的爬虫，源码里搜不到完整串，跟 `src/core/contact.js` 里拆成几段再拼是同一个道理。要改联系方式两处一起改。
-
-也可以在 GitHub 上找我：[@liamzhong-dev](https://github.com/liamzhong-dev)
+GitHub：[@liamzhong-dev](https://github.com/liamzhong-dev)
 
 ## 许可
 
