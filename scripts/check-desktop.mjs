@@ -73,6 +73,12 @@ const click = Number(arg('click', '0'));
 const wp = process.argv.includes('--wp');
 const cardopen = process.argv.includes('--cardopen');
 const yucdetail = process.argv.includes('--yuc-detail');
+/*
+ * `--vpscale`：窗口自适应。改一次窗口尺寸，比对各帧里**量出来的像素**。
+ * 倍率是 useEffect 算的、定位是 calc() 算的，SSR 与单测都只看得到初始态 ——
+ * 这条只能真窗口跑。
+ */
+const vpscale = process.argv.includes('--vpscale');
 const keepdata = process.argv.includes('--keepdata');
 const retryhw = process.argv.includes('--retryhw');
 /*
@@ -457,6 +463,10 @@ if (wp) env.JIKAI_SMOKE_WPDRAG = '1';
  */
 if (cardopen) env.JIKAI_SMOKE_CARDOPEN = '1';
 if (yucdetail) env.JIKAI_SMOKE_YUCDETAIL = '1';
+if (vpscale) env.JIKAI_SMOKE_VPSCALE = '1';
+/** 量基准时要能自己指定尺寸：默认那三档是给断言用的，不是给量基准用的 */
+const vpsizes = arg('vpsizes', '');
+if (vpscale && vpsizes) env.JIKAI_SMOKE_VPSCALE_SIZES = vpsizes;
 /*
  * 「再试一次硬件加速」那一路：靠一个标记文件把重启后的那一份认出来。
  *
@@ -674,6 +684,101 @@ let yucDetailReport = null;
     } catch {
       yucDetailReport = { parseError: line.slice(0, 200) };
     }
+  }
+}
+
+/** 窗口自适应：改了几次窗口尺寸，就有几帧 */
+let vpFrames = null;
+{
+  const line = output.out.split(/\r?\n/).find((l) => l.trim().startsWith('SMOKE_VPSCALE'));
+  if (line) {
+    try {
+      vpFrames = JSON.parse(line.slice(line.indexOf('[')));
+    } catch {
+      vpFrames = [{ parseError: line.slice(0, 200) }];
+    }
+  }
+}
+
+/*
+ * ---------- 窗口自适应：窗口变大了，界面到底有没有跟着变 ----------
+ *
+ * 三条一起才守得住：
+ *   ① 前提——这次真的量到了不同的宽度（否则下面的比较全部空转）；
+ *   ② 变量层面——内容倍率与画布倍率真的随宽度变；
+ *   ③ 像素层面——卡片**量出来的宽度**和一个真实的字号真的变大。
+ * 只查 ② 是最容易骗过自己的一种：变量写了却没人用，照样全绿。
+ */
+if (vpscale) {
+  const frames = Array.isArray(vpFrames) ? vpFrames : [];
+  /*
+   * 帧数据**先打出来再断言**：量基准时（几帧一样宽）断言必然失败，
+   * 而那时候恰恰最需要看数字 —— 打在最后的话，一次都看不到。
+   */
+  for (const f of frames) {
+    if (f.error) { console.log(`  ${f.want?.w}×${f.want?.h} → 取数失败 ${f.error}`); continue; }
+    console.log(
+      `  窗口 ${f.innerW}px（画布 ${f.canvasW}×${f.canvasH}）：倍率 u=${f.u} sp=${f.sp} kx=${f.kx} kh=${f.kh}`
+        + ` → 卡片 ${f.cardW}px / 一格 ${f.cardMin} / 网格字号 ${f.gridPx}px / 单卡 ${f.itemW}px`,
+    );
+  }
+  check(frames.length >= 2, `窗口自适应该量到至少 2 帧，实际 ${frames.length} 帧`);
+
+  const ok = frames.filter((f) => !f.error && Number(f.innerW) > 0);
+  check(
+    ok.length === frames.length,
+    `有 ${frames.length - ok.length} 帧取数失败：${JSON.stringify(frames.find((f) => f.error) ?? null)}`,
+  );
+
+  if (ok.length >= 2) {
+    const widths = ok.map((f) => Number(f.innerW));
+    const span = Math.max(...widths) - Math.min(...widths);
+    // 前提：setSize 有可能被屏幕工作区钳住，几帧其实一样宽 —— 那样下面全是空转
+    check(span >= 200, `这次自检没成立：几帧的内宽只差 ${span}px（要 ≥200）—— 多半是窗口尺寸被屏幕钳住了`);
+
+    const byW = [...ok].sort((a, b) => Number(a.innerW) - Number(b.innerW));
+    const narrow = byW[0];
+    const wide = byW[byW.length - 1];
+
+    check(
+      Number(wide.kx) > Number(narrow.kx),
+      `画布横向倍率没跟着窗口变：${narrow.innerW}px → ${narrow.kx}；${wide.innerW}px → ${wide.kx}`,
+    );
+    check(
+      Number(wide.u) > Number(narrow.u),
+      `内容倍率没跟着窗口变：${narrow.innerW}px → ${narrow.u}；${wide.innerW}px → ${wide.u}`,
+    );
+    /*
+     * ⚠️ 这一条不能写成「最宽的卡片比最窄的宽 20px」—— 那样会**空转**：
+     * 窄窗口下 fitRect 本来就会把超宽的卡片收进画布，于是就算倍率恒为 1，
+     * 卡片宽度照样从 1066 变到 1260，差 194px，断言照样绿。
+     * （诱饵验证时正是这么骗过去的：u 和 kx 都红了，这条没红。）
+     *
+     * 所以改成跟**设计基准**比：基准窗口下这张卡就是 1260px，窗口明显更宽时
+     * 它必须大于 1260 —— 倍率恒为 1 的话，它就永远停在 1260。
+     */
+    const DESIGN_CARD_W = 1260; // season-grid 的 defaultRect.w，摆位按它设计
+    if (Number(wide.innerW) >= 1500) {
+      check(
+        Number(wide.cardW) > DESIGN_CARD_W + 40,
+        `窗口 ${wide.innerW}px 已经比设计窗口宽不少，卡片却只有 ${wide.cardW}px（基准 ${DESIGN_CARD_W}px）`
+          + ' —— 摆位还是写死的 px，只在右边留了一块空白',
+      );
+    } else {
+      warnings.push(`最宽一帧只有 ${wide.innerW}px，跳过了「卡片该大于设计基准」那条（屏幕不够宽，判不了）`);
+    }
+    check(
+      Number(wide.cardW) - Number(narrow.cardW) >= 20,
+      `卡片宽度几乎没变（${narrow.cardW}px → ${wide.cardW}px）—— 摆位还是写死的 px，没乘画布倍率`,
+    );
+    check(
+      Number(wide.gridPx) > Number(narrow.gridPx),
+      `网格里真实的字号没跟着变大（${narrow.gridPx}px → ${wide.gridPx}px）—— 倍率没落到元素上`,
+    );
+    check(
+      Number(wide.itemW) >= Number(narrow.itemW),
+      `单张卡片反而变窄了（${narrow.itemW}px → ${wide.itemW}px）—— 一格的最小宽度没跟着走`,
+    );
   }
 }
 
@@ -1351,6 +1456,14 @@ if (cardopen) {
 if (yucdetail) {
   const a = yucDetailReport?.after ?? {};
   console.log(`  番堂详情卡 ${a.detail ?? '?'} 个${a.title ? ` · 标题「${a.title}」` : ''} · 封面 ${a.cover ?? '?'}`);
+}
+if (vpscale) {
+  const wide = [...(Array.isArray(vpFrames) ? vpFrames : [])].sort((a, b) => Number(a.innerW) - Number(b.innerW)).at(-1);
+  if (wide && !wide.error) {
+    console.log(
+      `  窗口自适应：最宽一帧卡片 ${wide.cardW}px（是 ${wide.innerW}px 窗口下的 ${Math.round((wide.cardW / wide.innerW) * 100)}%）`,
+    );
+  }
 }
 console.log(`  截图：${path.relative(root, shot)}（${(fs.statSync(shot).size / 1024).toFixed(0)} KB）`);
 for (const w of warnings) console.log(`  ! ${w}`);

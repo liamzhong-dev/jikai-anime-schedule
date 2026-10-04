@@ -1014,7 +1014,9 @@ test('概览卡：fitHeight 时高度交给内容，且正文那一层不滚动'
   // 番剧库、时间表都靠固定高度来做内部滚动。
   const plain = await renderWindowCard();
   assert.equal(plain.includes('window--fit'), false, '没传 fitHeight 的卡片不该被改掉');
-  assert.ok(/style="[^"]*height:420px/.test(plain), '普通卡片的高度仍然应当来自 defaultRect');
+  // 高度写成 `calc(基准px * var(--kh))`：随画布倍率缩放，但**来源仍然是 defaultRect** ——
+  // 这条守的是「高度别变成 auto」，倍率那一层由 core/scale 的测试守。
+  assert.ok(/style="[^"]*height:calc\(420px \* var\(--kh, 1\)\)/.test(plain), '普通卡片的高度仍然应当来自 defaultRect');
 
   /*
    * 「不滚动」这条机制在 CSS 里，SSR 渲染不出计算后的样式 —— 直接查规则本身。
@@ -1302,11 +1304,18 @@ test('番剧网格：一格宽档位落到网格的列宽上', async () => {
   const dflt = await renderSeasonView();
   assert.ok(dflt.includes('--card-min:112px'), '没给值时用默认 112');
 
-  // 越界的档位要夹回来（老存档被手改过、或以后改了范围）
+  /*
+   * 越界的档位要夹回来（老存档被手改过、或以后改了范围）。
+   *
+   * ⚠️ 上限是 360 不是滑块的 220：组件收到的是**已经乘过窗口倍率的最终格宽**
+   * （App 那边 `cardMinScaled` 之后再传进来），拿滑块的区间去夹会把自动缩放
+   * 整个吃掉 —— 那就是「开了自适应、封面拉满，最大化后没反应」。
+   * 滑块自己的区间由 layout.js 的 CARD_MIN 管，两边各管一段。
+   */
   const wild = await renderSeasonView({ cardMin: 9999 });
-  assert.ok(wild.includes('--card-min:220px'), '超大档位要夹到上限');
+  assert.ok(wild.includes('--card-min:360px'), '超大格宽要夹到上限');
   const tiny = await renderSeasonView({ cardMin: 1 });
-  assert.ok(tiny.includes('--card-min:76px'), '过小的档位要夹到下限');
+  assert.ok(tiny.includes('--card-min:56px'), '过小的格宽要夹到下限');
 });
 
 /* ── 卡片显示：封面尺寸 + 文字大小 ─────────────────────── */

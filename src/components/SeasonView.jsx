@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import AnimeCard from './AnimeCard.jsx';
 import { filterSeason, sortList } from '../core/filters.js';
 import { watchState } from '../core/time.js';
-import { CARD_MIN, clampCardMin } from '../core/layout.js';
+import { CARD_MIN, clampCardMinScaled } from '../core/layout.js';
 
 const SORTS = [
   ['air', '放送日'],
@@ -24,7 +24,8 @@ export default function SeasonView({ season, following, now, onToggle, onOpen, c
    * 同一个窗口里既能一眼扫完 60 部，也能看清 12 部的封面。
    * 值存在设置里（`settings.cardMin`），不跟窗口摆位混在一起。
    */
-  const min = clampCardMin(cardMin);
+  // 传进来的已经乘过窗口自适应倍率，所以走那条更宽的区间（见 layout.js）
+  const min = clampCardMinScaled(cardMin);
 
   // 平台选项从数据里长出来，不写死。
   // 写死成 TV / WEB 的时候踩过一次：某部条目的平台是「其他」，

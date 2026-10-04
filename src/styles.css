@@ -29,6 +29,20 @@
   --fs: 1;
   --cs: 1;
 
+  /*
+   * ---- 窗口自适应：由 App 按窗口尺寸算出来，同样写在 documentElement 上 ----
+   *
+   * `--u` 内容倍率；`--sp` 间距倍率（比 `--u` 更保守，理由见 core/scale.js）；
+   * `--kx` / `--kh` 卡片摆位的横向 / 纵向倍率。
+   *
+   * 兜底同样是 1：没有 App 去设它们的时候（组件单独 SSR、导出长图用的隐藏窗口）
+   * 界面就照设计稿画 —— 1 是唯一不会出错的兜底值。
+   */
+  --u: 1;
+  --sp: 1;
+  --kx: 1;
+  --kh: 1;
+
   /* ---- 兜底：夜航主题 ---- */
   --bg: #0c0e13;
   --bg-rgb: 12,14,19;
@@ -66,9 +80,10 @@
   --ok-rgb: 99,201,141;
   --ok-soft: rgba(99,201,141,0.12);
 
-  --r-lg: 14px;
-  --r: 10px;
-  --r-sm: 8px;
+  /* 圆角跟着间距一起走：小卡片配大圆角会显得头重脚轻 */
+  --r-lg: calc(14px * var(--sp, 1));
+  --r: calc(10px * var(--sp, 1));
+  --r-sm: calc(8px * var(--sp, 1));
   --shadow: 0 8px 24px rgba(0,0,0,0.34);
   --shadow-lg: 0 18px 44px rgba(0,0,0,0.5);
 
@@ -182,8 +197,8 @@ html:not([data-frost='on']) .modal {
 
 /* ---------- 侧边导航 ---------- */
 .sidenav {
-  width: 84px;
-  flex: 0 0 84px;
+  width: calc(84px * var(--sp, 1));
+  flex: 0 0 calc(84px * var(--sp, 1));
   background: var(--chrome);
   border-right: 1px solid var(--line);
   display: flex;
@@ -430,9 +445,9 @@ html:not([data-frost='on']) .modal {
   position: relative;
   flex: 1;
   overflow: auto;
-  padding: 16px;
+  padding: calc(16px * var(--sp, 1));
   background-image: radial-gradient(rgba(var(--text-rgb), 0.05) 1px, transparent 1px);
-  background-size: 22px 22px;
+  background-size: calc(22px * var(--sp, 1)) calc(22px * var(--sp, 1));
 }
 
 /* ---------- 卡片式窗口 ---------- */
@@ -452,8 +467,8 @@ html:not([data-frost='on']) .modal {
 .window--max { backdrop-filter: none; }
 
 .window__bar {
-  flex: 0 0 42px;
-  height: 42px;
+  flex: 0 0 calc(42px * var(--sp, 1));
+  height: calc(42px * var(--sp, 1));
   display: flex;
   align-items: center;
   gap: 9px;
@@ -493,7 +508,7 @@ html:not([data-frost='on']) .modal {
 .window__btn--scale { width: 34px; font-size: 12px; letter-spacing: 0.5px; }
 .window__btn--scale:hover { color: var(--accent); border-color: var(--accent); }
 
-.window__body { flex: 1; overflow: auto; padding: 14px; }
+.window__body { flex: 1; overflow: auto; padding: calc(14px * var(--sp, 1)); }
 
 /*
  * 「高度由内容决定」的卡片（现在只有「本季概览」用，见 WindowCard 的 `fitHeight`）。
@@ -787,7 +802,7 @@ html:not([data-frost='on']) .modal {
  * 配合 `.window--fit`（高度由内容定、不滚动），「所有内容都看得见」是靠
  * **容器长得下**做到的，不是靠把字缩小 —— 这两条是一起的，动一条要看另一条。
  */
-.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px; }
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(calc(118px * var(--sp, 1)), 1fr)); gap: calc(10px * var(--sp, 1)); }
 .stat { padding: 10px 14px; border-radius: var(--r); background: var(--panel-2); border: 1px solid var(--line); }
 .stat__value { font-size: 26px; font-weight: 600; line-height: 1.2; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
 .stat__label { font-size: 11.5px; color: var(--text-3); margin-top: 1px; }
@@ -862,7 +877,7 @@ html:not([data-frost='on']) .modal {
 .yuc-group__name { font-size: calc(13.5px * var(--fs, 1)); font-weight: 600; }
 .yuc-group__count { font-size: calc(11px * var(--fs, 1)); color: var(--text-3); }
 
-.yuc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 12px 10px; }
+.yuc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(104px * var(--sp, 1)), 1fr)); gap: calc(12px * var(--sp, 1)) calc(10px * var(--sp, 1)); }
 
 /*
  * 一条排播。
@@ -1058,7 +1073,7 @@ html:not([data-frost='on']) .modal {
 .yuc .empty { flex-direction: column; gap: 10px; }
 
 /* ---------- 番剧卡片 ---------- */
-.cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-min, 112px), 1fr)); gap: 14px 12px; }
+.cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-min, 112px), 1fr)); gap: calc(14px * var(--sp, 1)) calc(12px * var(--sp, 1)); }
 
 /*
  * 「文字大小」这一档（`--fs`）的唯一落点：**基准字号交给容器，里面的字一律相对 em 派生**。
@@ -1365,7 +1380,7 @@ html:not([data-frost='on']) .modal {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 412px;
+  width: calc(412px * var(--sp, 1));
   max-width: 92vw;
   z-index: 41;
   background: var(--panel);

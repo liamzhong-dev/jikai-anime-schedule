@@ -873,6 +873,66 @@ function createWindow() {
         }
 
         /*
+         * ---------- 窗口自适应：JIKAI_SMOKE_VPSCALE=1 ----------
+         *
+         * 「最大化之后界面没跟着变」这条只能由桌面壳来答：倍率是 useEffect 算出来的，
+         * 定位是 CSS 的 calc() 算出来的 —— SSR 读的是初始态（倍率全是 1），
+         * 单测里也没有真的窗口。只有真去改一次窗口尺寸，才看得到它到底动没动。
+         *
+         * 判据一律读**量出来的像素**（getBoundingClientRect）和一个真实的字号，
+         * 而不只是读 CSS 变量：变量写了却没人用，是最容易空转的一种绿。
+         * 那个真实字号取网格容器的 font-size —— 它是文字倍率的落点，
+         * 所以同时证明了「倍率算出来了」和「倍率接到了元素上」两件事。
+         */
+        const VPSCALE = process.env.JIKAI_SMOKE_VPSCALE || '';
+        if (VPSCALE) {
+          const napVs = (ms) => new Promise((r) => setTimeout(r, ms));
+          // 三档里必须有一档明显更高：纵向倍率只在画布高于基准时才大于 1
+          const sizes = (process.env.JIKAI_SMOKE_VPSCALE_SIZES || '1180x780,1440x900,1700x1010')
+            .split(',')
+            .map((s) => s.split('x').map(Number))
+            .filter((p) => p.length === 2 && p[0] > 400 && p[1] > 400);
+          const frames = [];
+          for (const [w, h] of sizes) {
+            win.setSize(w, h);
+            // 等久一点：resize 是 rAF 节流的，setSize 之后不可能同步就位；
+            // 而卡片定位走 calc()，变量变了浏览器还要再排一次版。
+            await napVs(700);
+            const m = await win.webContents
+              .executeJavaScript(
+                `(() => {
+                   const cs = getComputedStyle(document.documentElement);
+                   const num = (k) => { const v = parseFloat(cs.getPropertyValue(k)); return Number.isFinite(v) ? v : null; };
+                   const cv = document.querySelector('.canvas');
+                   const card = document.querySelector('[data-window-id="season-grid"]');
+                   const r = card ? card.getBoundingClientRect() : null;
+                   const grid = document.querySelector('.cardgrid');
+                   const gcs = grid ? getComputedStyle(grid) : null;
+                   const item = document.querySelector('.card');
+                   const ir = item ? item.getBoundingClientRect() : null;
+                   return {
+                     innerW: window.innerWidth,
+                     canvasW: cv ? cv.clientWidth : null,
+                     canvasH: cv ? cv.clientHeight : null,
+                     u: num('--u'),
+                     sp: num('--sp'),
+                     kx: num('--kx'),
+                     kh: num('--kh'),
+                     fs: num('--fs'),
+                     cardW: r ? Math.round(r.width) : null,
+                     cardMin: gcs ? gcs.getPropertyValue('--card-min').trim() : null,
+                     gridPx: gcs ? Math.round(parseFloat(gcs.fontSize) * 10) / 10 : null,
+                     itemW: ir ? Math.round(ir.width) : null,
+                   };
+                 })()`,
+              )
+              .catch((e) => ({ error: String(e?.message ?? e) }));
+            frames.push({ want: { w, h }, ...m });
+          }
+          console.log(`SMOKE_VPSCALE ${JSON.stringify(frames)}`);
+        }
+
+        /*
          * ---------- 全屏的卡片要不要跟着布局预设走：JIKAI_SMOKE_MAXSYNC=1 ----------
          *
          * 用户报的是：某张卡全屏之后，再去「布局预设」里套一套模板，别的卡都排好了，

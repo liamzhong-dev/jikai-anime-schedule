@@ -67,6 +67,7 @@ const DEFAULTS = {
     wallpaper: { ...DEFAULT_WALLPAPER },
     cardMin: CARD_MIN.def, // 番剧网格一格的宽度（px）——「一屏塞几列」的档位
     fontScale: FONT_SCALE.def, // 卡片里文字的大小倍率 —— 和 cardMin 配一对（一个管图、一个管字）
+    autoScale: true, // 上面两档要不要再跟着窗口大小自动变（关掉就纯手动）
 
     api: { ...DEFAULT_API },
 
@@ -119,6 +120,8 @@ function mergeSettings(saved) {
     cardMin: clampCardMin(s.cardMin),
     // 同上一条：老存档里没有这个字段，手改过的值也在这里夹回来
     fontScale: clampFontScale(s.fontScale),
+    // 老存档没有这一项 —— 默认开：升级上来的人不用自己去找开关
+    autoScale: s.autoScale !== false,
   };
 }
 

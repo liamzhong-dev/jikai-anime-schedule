@@ -21,6 +21,23 @@ export const MIN_CARD_H = 160;
  */
 export const CARD_MIN = { def: 112, min: 76, max: 220 };
 
+/*
+ * 乘上「窗口自适应倍率」之后的格宽。
+ *
+ * 上面那个 max 220 是**滑块能拉到**的范围，不是「画出来最大能有多大」：
+ * 窗口放大 1.55 倍时，220 × 1.55 ≈ 341 才是合理结果。拿 220 去夹，
+ * 表现就是「开了自适应、封面又拉满，最大化之后一点反应都没有」。
+ */
+export const CARD_MIN_SCALED = { min: 56, max: 360 };
+
+/** 同上：只用于已经乘过自适应倍率的格宽，别拿它夹滑块的值。 */
+export function clampCardMinScaled(v) {
+  if (v === null || v === undefined || v === '') return CARD_MIN.def;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return CARD_MIN.def;
+  return Math.max(CARD_MIN_SCALED.min, Math.min(CARD_MIN_SCALED.max, Math.round(n)));
+}
+
 /**
  * 卡片里文字的大小倍率。
  *

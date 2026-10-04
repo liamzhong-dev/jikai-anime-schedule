@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { setLayout } from '../core/store.js';
 import { fitRect } from '../core/layout.js';
 import { useCardScaleToggle } from './ScaleDock.jsx';
+import { useCanvasScale } from './CanvasScale.jsx';
 
 /**
  * 卡片式窗口：拖标题栏移动、双击标题栏最大化、按钮折叠。
@@ -46,6 +47,8 @@ export default function WindowCard({ id, title, hint, actions, children, default
   const restore = useRef(null);
   const rootRef = useRef(null);
   const fitted = useRef(false);
+  // 摆位存的是 1440 宽下的基准坐标，画出来要乘它；拖动时要反过来除掉它
+  const { kx, kh } = useCanvasScale();
 
   /*
    * 外部改了摆位（切换布局预设、一键整理排列）时同步一次。
@@ -84,10 +87,12 @@ export default function WindowCard({ id, title, hint, actions, children, default
     const parent = rootRef.current?.parentElement;
     if (!parent) return;
     setRect((r) => {
-      // 画布有 16px 内边距，而 absolute 定位的参照是 padding box，所以要减掉
+      // 画布有 16px 内边距，而 absolute 定位的参照是 padding box，所以要减掉。
+      // ⚠️ 量到的是**屏幕像素**，要先除回倍率才是基准坐标下的可用量 ——
+      // 不换算的话大屏上 fitRect 会把卡片压得比该有的小一圈（它只缩不放）。
       const next = fitRect(r, {
-        availW: parent.clientWidth - r.x - 16,
-        availH: parent.clientHeight - r.y - 16,
+        availW: parent.clientWidth / kx - r.x - 16,
+        availH: parent.clientHeight / kh - r.y - 16,
       });
       return next.w === r.w && next.h === r.h ? r : next;
     });
@@ -100,10 +105,12 @@ export default function WindowCard({ id, title, hint, actions, children, default
     const onMove = (e) => {
       const d = drag.current;
       if (!d) return;
+      // 位移要除回倍率：存的是基准坐标，画出来才乘倍率。
+      // 不除的话大屏上拖一下卡片就飞出去了 —— 手挪 100px，卡片实际走 133px。
       setRect({
         ...d.base,
-        x: Math.max(0, d.base.x + (e.clientX - d.sx)),
-        y: Math.max(0, d.base.y + (e.clientY - d.sy)),
+        x: Math.max(0, d.base.x + (e.clientX - d.sx) / (d.kx || 1)),
+        y: Math.max(0, d.base.y + (e.clientY - d.sy) / (d.kh || 1)),
       });
     };
     const onUp = () => {
@@ -127,7 +134,7 @@ export default function WindowCard({ id, title, hint, actions, children, default
   const start = () => (e) => {
     e.preventDefault();
     e.stopPropagation();
-    drag.current = { sx: e.clientX, sy: e.clientY, base: { ...rect } };
+    drag.current = { sx: e.clientX, sy: e.clientY, base: { ...rect }, kx, kh };
     setDragging(true);
   };
 
@@ -150,9 +157,23 @@ export default function WindowCard({ id, title, hint, actions, children, default
    * 最大化也走 auto：这张卡内容就四个数，铺满整屏只会得到一张巨大的空卡片，
    * 而「所有内容清晰可见」这个诉求，auto 本来就已经满足了。
    */
+  /*
+   * 定位一律写成 `calc(基准px * var(--kx / --kh))`。
+   *
+   * 用 calc 而不是算好的 px：倍率一变浏览器自己重排，React 那边一次 setState
+   * 都不用发 —— 拖窗口时每帧重渲染整棵卡片树，这界面是拖不动的。
+   * 折叠那 44px 是标题栏的高度，同样跟着纵向倍率走，否则折叠后和标题栏对不上。
+   */
   const style = maxed
     ? { left: 12, top: 12, width: 'calc(100% - 24px)', height: fitHeight ? 'auto' : 'calc(100% - 24px)' }
-    : { left: rect.x, top: rect.y, width: rect.w, height: collapsed ? 44 : fitHeight ? 'auto' : rect.h };
+    : {
+      left: `calc(${rect.x}px * var(--kx, 1))`,
+      top: `calc(${rect.y}px * var(--kh, 1))`,
+      width: `calc(${rect.w}px * var(--kx, 1))`,
+      height: collapsed
+        ? `calc(44px * var(--sp, 1))`
+        : fitHeight ? 'auto' : `calc(${rect.h}px * var(--kh, 1))`,
+    };
 
   const cls = ['window'];
   if (maxed) cls.push('window--max');

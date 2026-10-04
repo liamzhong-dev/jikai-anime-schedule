@@ -419,6 +419,24 @@ export default function SettingsPanel({
                     format={(v) => `${Math.round(v * 100)}%`}
                   />
                 </Row>
+                {/*
+                  上面两档的含义现在是「在自动的基础上再偏一点」。
+
+                  为什么还要留一个关掉的口子：多屏之间来回拖窗口、或者外接一块竖屏
+                  的人，界面跟着变反而是负担 —— 他要的是「到哪儿都一样大」。
+                  自动是默认，但别替他把这条路堵死。
+                */}
+                <Row label="跟随窗口" hint="窗口变大时，字、封面和卡片一起变大；关掉就只看上面两档">
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      data-autoscale="1"
+                      checked={settings?.autoScale !== false}
+                      onChange={(e) => patchSettings({ autoScale: e.target.checked })}
+                    />
+                    自动
+                  </label>
+                </Row>
               </section>
 
               {/*

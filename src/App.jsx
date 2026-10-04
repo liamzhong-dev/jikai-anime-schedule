@@ -44,6 +44,8 @@ import {
 } from './core/report.js';
 import { buildReportHtml, canvasHtmlOf, collectStyles } from './core/reportHtml.js';
 import { coverScaleFromCardMin } from './core/layout.js';
+import { COVER_SCALE_OUT, FONT_SCALE_OUT, canvasScale, cardMinScaled, mixScale, spacingScale, uiScale } from './core/scale.js';
+import CanvasScaleProvider from './components/CanvasScale.jsx';
 import { SEASON_STATS_H, SEASON_STATS_GAP } from './core/layoutPresets.js';
 import { DISPLAY_VARIANT, EXPORT_VARIANT, coverCoverage, coverEntries, coverVariant } from './core/covers.js';
 import { useCovers } from './core/useCovers.js';
@@ -234,6 +236,91 @@ export default function App() {
   }, [st.settings.theme, st.settings.wallpaper, st.settings.panelAlpha, wallpaper]);
 
   /*
+   * 窗口尺寸 → 界面倍率。这是「最大化之后界面纹丝不动」的根。
+   *
+   * 原来 `--fs` / `--cs` 只来自手动档位，跟窗口多大一点关系都没有 ——
+   * 于是从 1440 拉到 1920：列数多了两列、两边留白，而字、封面、间距
+   * 一个像素都不动。现在倍率是**两段相乘**：
+   *
+   *     最终 = 手动档位（个人偏好）× 窗口自适应倍率（下面这一段算）
+   *
+   * 手动档位留着，含义变成「在自动的基础上再偏一点」：有人就是想字再大一号，
+   * 那是偏好，不是让他去补自动化的缺。
+   *
+   * ⚠️ 用 JS 算，不用纯 CSS 的 `clamp(… 100vw …)`：CSS 里「长度除长度得数字」
+   * 在部分内核上算不出来，一算不出整个 clamp 就静默失效退回 1 —— 恰恰是
+   * 「看着没坏、其实没生效」那一类。放在这里算，倍率就是**可断言的纯函数**
+   * （单调性与两端夹逼由 test/scale.test.mjs 守着）。
+   *
+   * ⚠️ 量化到 0.01：改 root 上的变量会触发全站重排，拖窗口时每帧一次就是
+   * 几百次。量化之后大约每 14px 才真的变一次，肉眼看还是连续的。
+   */
+  const [viewport, setViewport] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    if (globalThis.window === undefined) return undefined;
+    let raf = 0;
+    const read = () => {
+      raf = 0;
+      const w = globalThis.window.innerWidth;
+      const h = globalThis.window.innerHeight;
+      // 小于 8px 的变化不理会：只可能来自滚动条或缩放抖动，为它重排全站不值得
+      setViewport((prev) => (Math.abs(prev.w - w) < 8 && Math.abs(prev.h - h) < 8 ? prev : { w, h }));
+    };
+    const onResize = () => {
+      if (!raf) raf = globalThis.requestAnimationFrame(read);
+    };
+    read();
+    globalThis.window.addEventListener('resize', onResize);
+    return () => {
+      globalThis.window.removeEventListener('resize', onResize);
+      if (raf) globalThis.cancelAnimationFrame(raf);
+    };
+  }, []);
+
+  /*
+   * 画布的可用尺寸。**量出来**而不是从窗口宽高减去骨架去算：
+   * 侧栏宽度、顶栏高度都是 CSS 里的值（还跟着 `--sp` 一起变），在这儿再抄一份
+   * 数字，改样式的时候必然对不上。
+   */
+  const canvasRef = useRef(null);
+  const [canvasBox, setCanvasBox] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(() => {
+      setCanvasBox({ w: el.clientWidth, h: el.clientHeight });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [view]);
+
+  const uiAuto = useMemo(
+    () => (st.settings.autoScale === false ? 1 : uiScale(viewport.w)),
+    [st.settings.autoScale, viewport.w],
+  );
+
+  /*
+   * 卡片摆位的倍率。
+   *
+   * 摆位存的是 1440×900 下的基准坐标，这里算出「当前画布是基准的几倍」；
+   * 定位交给 CSS 的 `calc(基准px * var(--kx))`，所以倍率一变浏览器自己重排，
+   * 不用重渲染任何一张卡片。
+   */
+  const canvasFit = useMemo(
+    () => (st.settings.autoScale === false ? { kx: 1, kh: 1 } : canvasScale(canvasBox.w, canvasBox.h)),
+    [st.settings.autoScale, canvasBox.w, canvasBox.h],
+  );
+
+  useEffect(() => {
+    const root = globalThis.document?.documentElement;
+    if (!root) return;
+    root.style.setProperty('--u', String(uiAuto));
+    root.style.setProperty('--sp', String(spacingScale(uiAuto)));
+    root.style.setProperty('--kx', String(canvasFit.kx));
+    root.style.setProperty('--kh', String(canvasFit.kh));
+  }, [uiAuto, canvasFit]);
+
+  /*
    * 卡片里文字的大小。
    *
    * 写在 root 上而不是某一处卡片上：「显示多大」这件事得全局一致 ——
@@ -245,8 +332,8 @@ export default function App() {
    */
   useEffect(() => {
     const root = globalThis.document?.documentElement;
-    if (root) root.style.setProperty('--fs', String(st.settings.fontScale ?? 1));
-  }, [st.settings.fontScale]);
+    if (root) root.style.setProperty('--fs', String(mixScale(st.settings.fontScale ?? 1, uiAuto, FONT_SCALE_OUT)));
+  }, [st.settings.fontScale, uiAuto]);
 
   /*
    * 封面画多大的倍率。
@@ -261,8 +348,8 @@ export default function App() {
    */
   useEffect(() => {
     const root = globalThis.document?.documentElement;
-    if (root) root.style.setProperty('--cs', String(coverScaleFromCardMin(st.settings.cardMin)));
-  }, [st.settings.cardMin]);
+    if (root) root.style.setProperty('--cs', String(mixScale(coverScaleFromCardMin(st.settings.cardMin), uiAuto, COVER_SCALE_OUT)));
+  }, [st.settings.cardMin, uiAuto]);
 
   // ---------- 代理：设置里一改就让主进程立刻生效 ----------
   useEffect(() => {
@@ -1572,6 +1659,7 @@ export default function App() {
   return (
     // 封面解析走上下文：七个用到 <Cover> 的地方不用各自去接缓存，
     // 也就不用各自决定「该用哪一档地址」—— 那正是 v1.1 桌面端出错的机制。
+    <CanvasScaleProvider value={canvasFit}>
     <CoverProvider images={coverImages} allowRemote={coversRemote}>
     <ScaleDockProvider onToggle={() => setScaleOpen((v) => !v)}>
     <div className="app">
@@ -1634,7 +1722,7 @@ export default function App() {
           </div>
         ) : null}
 
-        <div className="canvas">
+        <div className="canvas" ref={canvasRef}>
           {view === 'season' && (
             <>
               <WindowCard
@@ -1671,7 +1759,7 @@ export default function App() {
                   now={now}
                   onToggle={toggleFollow}
                   onOpen={setDrawer}
-                  cardMin={st.settings.cardMin}
+                  cardMin={cardMinScaled(st.settings.cardMin, uiAuto)}
                   onCardMin={(v) => patchSettings({ cardMin: v })}
                 />
               </WindowCard>
@@ -2134,5 +2222,6 @@ export default function App() {
     </div>
     </ScaleDockProvider>
     </CoverProvider>
+    </CanvasScaleProvider>
   );
 }

@@ -1,6 +1,6 @@
 # 次回 · jikai
 
-[![Version](https://img.shields.io/badge/version-2.1.0-8b7cf6)](https://github.com/liamzhong-dev/jikai-anime-schedule/releases)
+[![Version](https://img.shields.io/badge/version-2.2.0-8b7cf6)](https://github.com/liamzhong-dev/jikai-anime-schedule/releases)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
@@ -20,6 +20,12 @@ Windows 追番桌面小工具。本季番剧、播出时间表、更新倒计时
 不想装东西也可以跑源码，见下面「运行」。
 
 ## 更新记录
+
+### 2.2.0
+
+- 界面随窗口大小连续变化：窗口拉大时字、封面、间距和卡片本身一起变大，不再是「多出两列 + 两边留白」
+- 卡片摆位按画布等比缩放，最大化之后版面铺满，不会在右边空出一块
+- 原来的「封面尺寸 / 文字大小」两档保留，含义变成在自动的基础上再偏一点；设置里可关掉跟随窗口
 
 ### 2.1.0
 
