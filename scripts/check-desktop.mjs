@@ -101,6 +101,15 @@ const yucCovers = process.argv.includes('--yuc-covers');
  */
 const exportpng = arg('exportpng', '');
 const noslice = process.argv.includes('--noslice');
+/*
+ * `--trayrevive`：关到托盘再点回来，量「那一瞬间点不动」。
+ *
+ * 这条只能真窗口跑：hide / show 是主进程的行为，而「点不动」是渲染进程
+ * 主线程被堵住的表现，两边都不在 SSR 或单测里。
+ * 必给 `--profile` —— 它要真的隐藏 / 显示窗口并连点 20 下，
+ * 不能拿用户正开着的窗口做实验。
+ */
+const trayrevive = process.argv.includes('--trayrevive');
 
 if (wp && !profile) {
   console.error('✗ --wp 必须同时给 --profile：不给的话这次自检会去拖**用户真实存档**里的壁纸位置');
@@ -115,6 +124,12 @@ if (retryhw && !profile) {
 if (exportpng && !profile) {
   console.error('✗ --exportpng 必须同时给 --profile：它读的是那份档案里的报告和封面缓存，');
   console.error('  不给的话会去导**用户真实报告**（几十张封面、几千像素高），那是拿他的数据做实验。');
+  process.exit(2);
+}
+
+if (trayrevive && !profile) {
+  console.error('✗ --trayrevive 必须同时给 --profile：它要把窗口藏起来再点回来、连着点 20 下，');
+  console.error('  不给的话折腾的是**用户正开着的那个窗口**。');
   process.exit(2);
 }
 
@@ -519,6 +534,17 @@ if (exportpng) {
   if (noslice) env.JIKAI_PNG_NOSINGLE = '1';
 }
 
+/*
+ * 托盘复活那一路。⚠️ 默认只藏 1.5 秒是**不够**的：Chromium 的后台节流 /
+ * 冻结是随隐藏时长加重的，藏得太短根本复现不出「点不动」。
+ * 所以这里给一个能调的隐藏时长，默认 6 秒。
+ */
+if (trayrevive) {
+  env.JIKAI_SMOKE_TRAYREVIVE = '1';
+  env.JIKAI_SMOKE_TRAYREVIVE_HIDE = arg('tray-hide', '6000');
+  env.JIKAI_SMOKE_TRAYREVIVE_SAMPLE = '1';
+}
+
 let expected = null;
 let profileDir = '';
 if (profile) {
@@ -749,6 +775,19 @@ let exportReport = null;
       exportReport = JSON.parse(line.slice(line.indexOf('{')));
     } catch {
       exportReport = { parseError: line.slice(0, 200) };
+    }
+  }
+}
+
+/** 托盘复活：隐藏 → 显示 → 连点 20 下，量到的东西也走独立一行 */
+let trayReport = null;
+{
+  const line = output.out.split(/\r?\n/).find((l) => l.trim().startsWith('SMOKE_TRAYREVIVE'));
+  if (line) {
+    try {
+      trayReport = JSON.parse(line.slice(line.indexOf('{')));
+    } catch {
+      trayReport = { parseError: line.slice(0, 200) };
     }
   }
 }
@@ -1478,6 +1517,57 @@ if (exportpng) {
   }
 }
 
+/*
+ * ---- 托盘点回来的一瞬间点不动 ----
+ *
+ * ⚠️ 探针「藏起来」的时长必须够长：Chromium 的后台节流 / 冻结是随隐藏时长加重的，
+ * 藏一秒根本复现不出来（`--tray-hide` 可调，默认 6 秒）。
+ */
+if (trayrevive) {
+  const tr = trayReport;
+  check(!!tr && !tr.parseError, '托盘复活没拿到回执（SMOKE_TRAYREVIVE 那一行没打出来）');
+  if (tr && !tr.parseError) {
+    const sends = Array.isArray(tr.sends) ? tr.sends : [];
+    const got = Array.isArray(tr.probe?.clicks) ? tr.probe.clicks : [];
+    /*
+     * 最直接的一条：发出去的每一点击都必须被页面收到。
+     *
+     * ⚠️ 这里**不能**放宽成「收到 ≥1 下」—— 那正是这个 bug 的样子：
+     * 十几下里只丢第一下，其余全过，于是「随便点一下」的写法永远是绿的。
+     * 第一下丢掉的物理原因就是窗口「显示着但没被激活」，那一下只用于激活窗口。
+     */
+    check(
+      sends.length > 0 && got.length >= sends.length,
+      `藏起来再点回来，点出去 ${sends.length} 下页面只收到 ${got.length} 下 —— 正是「点回来一瞬间点不动」`,
+    );
+    if (got.length && sends.length) {
+      const firstDelay = got[0].t - sends[0];
+      check(
+        firstDelay <= 1000,
+        `点回来的第一下 ${firstDelay}ms 才到页面 —— 那一段界面是僵的（正常几十毫秒）`,
+      );
+    }
+    /*
+     * 连着三下 toggle 只该真的翻转一次。
+     * Windows 双击托盘图标会派发 click、click、double-click；三次都响应就是
+     * show → hide → show 闪一下。⚠️ 判据必须是**翻转次数**，不能看最后可见不可见 ——
+     * 切三次碰巧也会落回「可见」，闪的那一下照样漏掉。
+     */
+    check(
+      Number(tr.toggle?.flips) === 1,
+      `连着三下切换，窗口翻了 ${tr.toggle?.flips} 次（应该 1 次）—— 会在托盘上闪一下`,
+    );
+    // 目标点有没有被别的东西盖住：每一次采样都该落在那个按钮上
+    const samples = Array.isArray(tr.probe?.samples) ? tr.probe.samples : [];
+    const wantTag = String(tr.target?.tag || '');
+    const hits = samples.filter((s) => String(s.h || '').startsWith(wantTag)).length;
+    check(
+      samples.length > 0 && hits === samples.length,
+      `${samples.length} 次采样里只有 ${hits} 次落在 ${wantTag} 上 —— 有东西盖在按钮上面`,
+    );
+  }
+}
+
 if (failures.length) {
   console.error('✗ 桌面壳验证失败：');
   for (const f of failures) console.error(`  · ${f}`);
@@ -1584,6 +1674,16 @@ if (vpscale) {
       `  窗口自适应：最宽一帧卡片 ${wide.cardW}px（是 ${wide.innerW}px 窗口下的 ${Math.round((wide.cardW / wide.innerW) * 100)}%）`,
     );
   }
+}
+if (trayrevive && trayReport && !trayReport.parseError) {
+  const t = trayReport;
+  const got = Array.isArray(t.probe?.clicks) ? t.probe.clicks : [];
+  const first = got.length && Array.isArray(t.sends) && t.sends.length ? got[0].t - t.sends[0] : null;
+  console.log(
+    `  托盘复活：藏 ${((t.showAt - t.hideAt) / 1000).toFixed(1)}s 后点回来 · `
+    + `点出 ${t.sends?.length ?? '?'} 下全收到 · 第一下 ${first ?? '?'}ms · `
+    + `三下切换只翻 ${t.toggle?.flips} 次`,
+  );
 }
 console.log(`  截图：${path.relative(root, shot)}（${(fs.statSync(shot).size / 1024).toFixed(0)} KB）`);
 for (const w of warnings) console.log(`  ! ${w}`);

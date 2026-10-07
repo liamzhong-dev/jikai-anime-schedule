@@ -32,6 +32,7 @@
     "check:desktop:report": "node scripts/check-desktop.mjs --view=report --profile=test/.tmp/profile-report --season=2026q3",
     "check:desktop:export": "node scripts/check-desktop.mjs --view=report --profile=test/.tmp/profile-report --season=2026q3 --exportpng=png",
     "check:desktop:export:slice": "node scripts/check-desktop.mjs --view=report --profile=test/.tmp/profile-report --season=2026q3 --exportpng=png --noslice",
+    "check:trayrevive": "node scripts/check-desktop.mjs --view=season --profile=test/.tmp/profile-trayrevive --season=2026q3 --trayrevive",
     "check:desktop:history": "node scripts/check-desktop.mjs --view=history --profile=test/.tmp/profile-history --season=2026q3",
     "check:desktop:search": "node scripts/check-desktop.mjs --view=search --profile=test/.tmp/profile-search --season=2026q3",
     "check:desktop:yuc": "node scripts/check-desktop.mjs --view=yuc --profile=test/.tmp/profile-yuc --season=2026q4",
@@ -47,7 +48,7 @@
     "check:coverseed": "node scripts/check-coverseed.mjs",
     "check:perf": "node scripts/perf-check.mjs",
     "scan": "node scripts/scan-privacy.mjs",
-    "check:all": "npm test && npm run check:coverseed && npm run build && npm run check:tier && npm run check:tier-export && npm run check:desktop && npm run check:desktop:diary && npm run check:desktop:save && npm run check:desktop:report && npm run check:desktop:export && npm run check:desktop:export:slice && npm run check:desktop:history && npm run check:desktop:search && npm run check:desktop:yuc && npm run check:yucdetail && npm run check:keepdata && npm run check:vpscale && npm run check:desktop:cardopen && npm run check:maxsync && npm run check:desktop:retryhw && npm run check:desktop:wp && npm run check:killapp && npm run check:ipc && npm run check:boot && npm run check:selfheal && npm run check:perf && npm run scan",
+    "check:all": "npm test && npm run check:coverseed && npm run build && npm run check:tier && npm run check:tier-export && npm run check:desktop && npm run check:desktop:diary && npm run check:desktop:save && npm run check:desktop:report && npm run check:desktop:export && npm run check:desktop:export:slice && npm run check:desktop:history && npm run check:desktop:search && npm run check:desktop:yuc && npm run check:yucdetail && npm run check:keepdata && npm run check:vpscale && npm run check:desktop:cardopen && npm run check:maxsync && npm run check:trayrevive && npm run check:desktop:retryhw && npm run check:desktop:wp && npm run check:killapp && npm run check:ipc && npm run check:boot && npm run check:selfheal && npm run check:perf && npm run scan",
     "check:yucdetail": "node scripts/check-desktop.mjs --view=yuc --profile=test/.tmp/profile-yucdetail --season=2026q4 --wait=20000 --yuc-detail",
     "check:keepdata": "node scripts/check-desktop.mjs --view=season --profile=test/.tmp/profile-keepdata --season=2026q3 --keepdata",
     "check:vpscale": "node scripts/check-desktop.mjs --view=season --profile=test/.tmp/profile-vpscale --season=2026q3 --vpscale"
