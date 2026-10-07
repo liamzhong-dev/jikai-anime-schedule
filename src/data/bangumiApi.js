@@ -176,7 +176,17 @@ export function mapSubjectToPatch(subject) {
   const score = subject.rating?.score;
   const patch = {};
 
-  const eps = Number(subject.total_episodes ?? subject.eps ?? 0);
+  /*
+   * 话数取**正片**（`eps`），不是章节总数（`total_episodes`）。
+   *
+   * 这两个字段在 Bangumi 里不是一回事：`total_episodes` 把 OP、ED、预告、
+   * 特别篇那些单集也算进去。用它的后果是一部 12 集的番被记成 25 集 ——
+   * 于是① 按话数推档期时被当成半年番，多归一个季度；
+   * ② 详情页把「全 25 话已播完」和 25 行剧集列表摆出来，而其中十几集根本不存在。
+   * 只在正片话数还没定（0 / 缺失）时才退回总数，那种情况下两个数通常都是 0。
+   */
+  const epsRaw = Number(subject.eps) > 0 ? subject.eps : subject.total_episodes;
+  const eps = Number(epsRaw ?? 0);
   if (Number.isFinite(eps) && eps > 0) patch.eps = eps;
 
   if (Number.isFinite(score) && score > 0) patch.score = Math.round(score * 10) / 10;

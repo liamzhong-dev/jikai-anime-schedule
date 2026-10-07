@@ -55,6 +55,7 @@ import { currentSeason, fetchCatalog } from './data/bangumiData.js';
 import { describeSyncReport, syncLibrary } from './data/sync.js';
 import { degradedText, loadSeason } from './data/sources.js';
 import { archiveSeason, mergeArchive, mergeItems } from './data/archive.js';
+import { alignSeasonsWithYuc } from './data/yucAlign.js';
 import { diagnose, probeSubject } from './data/bangumiApi.js';
 import { readImageFile } from './core/wallpaper.js';
 import { evaluateUpdate, resolveManifestUrl } from './core/update.js';
@@ -425,7 +426,19 @@ export default function App() {
      * 后半句不是多余动作：联网失败（降级）时 res.items 可能是空的，
      * 而归档里还留着上次导进来的那份 —— 那样时间表不会整片空掉。
      */
-    const arch = mergeArchive(airRef.current, res.items);
+    /*
+     * 归档前先拿番堂的表校准一次。
+     *
+     * 番堂是**按季度出版的现成库**，一部番出现在哪几季的排播表里就是那几季的番；
+     * 而我们自己只能靠话数猜，话数偏偏又被 OP / ED 那些单集灌了水
+     * （12 集的番记成 25 集 → 被当成半年番多归一季）。
+     *
+     * 校准只对**番堂认得出**的条目生效，剩下的照样退回话数 ——
+     * 所以从没抓过番堂的时候行为跟以前完全一致，不会凭空少掉一批。
+     */
+    const yucMap = await platform.readYucCache().catch(() => null);
+    const align = yucMap ? alignSeasonsWithYuc(res.items, yucMap) : null;
+    const arch = mergeArchive(airRef.current, res.items, { align });
     airRef.current = arch;
     setAirArchive(arch);
     platform.writeAirArchive(arch).catch(() => {});

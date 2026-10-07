@@ -13,7 +13,7 @@
  * 那边每次改动都要整体 stringify，塞几百 KB 进去会拖慢每一次落盘。
  */
 
-import { seasonsOfAnime } from '../core/time.js';
+import { seasonsWithHint } from './yucAlign.js';
 
 /** 一条归档记录最少要有的字段 —— 没有 id 的条目没法去重、也没法取封面 */
 function usable(item) {
@@ -23,18 +23,20 @@ function usable(item) {
 /**
  * 按开播月份把一批条目分到季度桶里。
  *
- * ⚠️ `seasonsOfAnime` 对半年番返回**两个**季度，所以同一条会进两个桶 ——
+ * ⚠️ 半年番返回**两个**季度，所以同一条会进两个桶 ——
  * 这是有意的：7 月开播的 24 集番，在 10 月那一页里也要看得见。
  *
  * @param {Array} items
  * @returns {Record<string, Array>} 形如 { '2026q3': [...], '2026q4': [...] }
  */
-export function groupByAirSeason(items) {
+export function groupByAirSeason(items, { align } = {}) {
   const out = {};
   for (const it of items ?? []) {
     if (!usable(it)) continue;
-    const keys = seasonsOfAnime(it);
-    // seasonsOfAnime 认不出来（没有 begin）时退回数据自带的 season 字段，
+    // 有番堂结论就听番堂的（它按季度出版，比我们从话数反推准）；
+    // 没有才退回「开播时间 + 话数」那套启发式
+    const keys = seasonsWithHint(it, align?.get(String(it.id)));
+    // 认不出来（没有 begin）时退回数据自带的 season 字段，
     // 否则联网同步回来的一整批会被静默丢掉
     const fallback = typeof it.season === 'string' && /^\d{4}q[1-4]$/.test(it.season) ? [it.season] : [];
     for (const key of keys.length ? keys : fallback) {
@@ -78,8 +80,8 @@ export function mergeItems(existing = [], incoming = []) {
 }
 
 /** 把新的一批并进已有归档，返回新的归档（不改入参） */
-export function mergeArchive(archive, items, { nowMs = Date.now() } = {}) {
-  const grouped = groupByAirSeason(items);
+export function mergeArchive(archive, items, { nowMs = Date.now(), align } = {}) {
+  const grouped = groupByAirSeason(items, { align });
   const seasons = { ...(archive?.seasons ?? {}) };
   for (const [key, list] of Object.entries(grouped)) {
     seasons[key] = mergeItems(seasons[key], list);
