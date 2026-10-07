@@ -146,10 +146,28 @@ if (r.maxed !== 1) {
   if (a.maxed !== '0') fail(`套了布局预设之后，它还是全屏态（maxed=${a.maxed}）—— 正是用户报的那个现象`);
   else ok('套完预设后退出全屏 —— 修复生效');
 
-  const got = `${a.left},${a.top} ${a.w}x${a.h}`;
-  const expect = `${want.x},${want.y} ${want.w}x${want.h}`;
-  if (got !== expect) fail(`摆位没跟上预设：现在是 ${got}，预设里是 ${expect}`);
-  else ok(`摆位跟上了预设：${got}`);
+  /*
+   * ⚠️ 布局预设里存的是**基准**坐标，而界面上的卡片定位写的是
+   * `calc(基准px * var(--kx / --kh))`（v2.2 起）—— 读回来的是**缩放之后**的像素。
+   * 不除掉倍率，就是拿两把尺子量同一段：1400 会显示成 1393，
+   * 报出来的却是「摆位没跟上预设」，跟真正的原因完全不是一回事。
+   */
+  const kx = Number(r.scale?.kx) > 0 ? Number(r.scale.kx) : 1;
+  const kh = Number(r.scale?.kh) > 0 ? Number(r.scale.kh) : 1;
+  const base = { left: a.left / kx, top: a.top / kh, w: a.w / kx, h: a.h / kh };
+  const near = (x, y) => Math.abs(x - y) <= 1;
+  const onScreen = `${a.left},${a.top} ${a.w}x${a.h}`;
+  const asBase = `${Math.round(base.left)},${Math.round(base.top)} ${Math.round(base.w)}x${Math.round(base.h)}`;
+  const shapeOk = near(base.left, want.x) && near(base.top, want.y)
+    && near(base.w, want.w) && near(base.h, want.h);
+  if (!shapeOk) {
+    fail(
+      `摆位没跟上预设：屏幕上 ${onScreen} → 按倍率 ${kx}/${kh} 折算回基准是 ${asBase}，`
+      + `预设里是 ${want.x},${want.y} ${want.w}x${want.h}`,
+    );
+  } else {
+    ok(`摆位跟上了预设：屏幕上 ${onScreen}（基准 ${asBase} · 倍率 ${kx}/${kh}）`);
+  }
 }
 
 if (process.exitCode) {

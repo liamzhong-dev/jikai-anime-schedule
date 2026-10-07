@@ -27,8 +27,38 @@ const { BrowserWindow } = require('electron');
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/*
+ * 逐步留痕：`JIKAI_EXPORT_TRACE=<文件>` 时把每一步的时间戳写进去。
+ *
+ * 为什么非要写到文件而不是打日志：导出是在**隐藏窗口**里跑的，界面上只有一个
+ * 进度条，「卡住了」和「还在跑」在用户眼里长得一模一样 —— 而且它不报错，
+ * 于是连「哪一步慢」都只能靠猜。留痕之后「卡在第几步」是一个能读出来的数字。
+ */
+const TRACE_FILE = process.env.JIKAI_EXPORT_TRACE || '';
+const T0 = Date.now();
+function mark(what) {
+  if (!TRACE_FILE) return;
+  try {
+    fs.appendFileSync(TRACE_FILE, `${new Date().toISOString()} +${Date.now() - T0}ms ${what}\n`, 'utf8');
+  } catch {
+    /* 写不了就算了，不能让留痕本身把导出搞砸 */
+  }
+}
+
 /** Chromium canvas 的单边硬上限（和渲染层 `tierlist.CANVAS_LIMITS` 是同一个数） */
 const MAX_SIDE = 16384;
+
+/**
+ * 给滚动条留的余量。
+ *
+ * 滚动条会占掉 14px，而画布是**固定 1220px** 的 —— 窗口正好开 1220 的话，
+ * 可用宽度只有 1206，画布右边那一条就被挤到视口外，截出来的图少一块
+ * （实测截出 1809 而不是 1830）。试过 `::-webkit-scrollbar{display:none}`，
+ * 没用：主滚动条不吃那套。
+ *
+ * 所以窗口开宽一点（让画布完整放下），截图之后再按画布宽度裁回来。
+ */
+const GUTTER = 24;
 
 /**
  * 强制走分片、跳过「一次成图」。
@@ -52,14 +82,90 @@ function writeTempHtml(html, tag) {
  * 不等的话会导出一片空框，而且**偶发**：图小的时候看不出来，图大了必现。
  */
 async function waitForImages(win) {
-  await win.webContents
-    .executeJavaScript(
-      `Promise.all([...document.images].map((i) => (i.decode ? i.decode().catch(() => {}) : null)))
-         .then(() => document.images.length)`,
-    )
-    .catch(() => 0);
+  /*
+   * ⚠️ 下面每一步都套了超时 —— 这不是保险起见，是踩出来的：
+   *
+   * `img.decode()` 会**永远不 settle**（既不 resolve 也不 reject）。图没开始加载时
+   * 它就一直挂着，而 `Promise.all` 于是永远 pending，`executeJavaScript` 也就
+   * 永远不返回 —— 导出静静地卡在「准备导出页面」，界面上只有一个不动的进度条。
+   * 自检里那份最小报告**一张图都没有**，所以这条路径从来没被走到过。
+   *
+   * 超时之后不视为失败：图没解码完最多是导出图里少几张封面，
+   * 而卡住是「这个功能整个不能用」，两害相权很清楚。
+   */
+  const race = (p, ms, tag) => Promise.race([p, wait(ms).then(() => `timeout(${tag})`)]);
+  const run = (js, ms, tag) =>
+    race(win.webContents.executeJavaScript(js).catch((e) => `throw:${e?.message ?? e}`), ms, tag);
+
+  /*
+   * 封面在界面里是**懒加载**的（`Cover` 上写着 loading="lazy"）。
+   * 界面上这是对的 —— 一屏之外的图没必要先下；但导出窗口里那一屏之外
+   * 根本不存在「滚过去」这回事，于是它们永远停在 pending，
+   * 导出图里对应位置就是一块空。所以先手动把它们全部叫起来。
+   */
+  const woken = await run(
+    `(() => { let n = 0;
+       for (const i of document.images) {
+         if (i.loading === 'lazy') i.loading = 'eager';
+         if (!i.complete && i.src) { const s = i.src; i.src = ''; i.src = s; n += 1; }
+       }
+       return n; })()`,
+    6000,
+    'wake',
+  );
+  mark(`叫起懒加载的图：${woken}`);
+
+  /*
+   * 等它们真的解码完：轮询「已经解码出来的张数」，不再增长就认为到位。
+   *
+   * 不用 `Promise.all(decode())` —— 它会**永远不 settle**（既不 resolve 也不 reject），
+   * `executeJavaScript` 于是永远不返回，导出静静地停在「准备导出页面」，
+   * 界面上只剩一个不动的进度条。而自检喂的那份最小报告一张图都没有，
+   * 所以这条路径从来没被走到过。
+   */
+  let ready = -1;
+  let stable = 0;
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const n = await run(
+      `[...document.images].filter((i) => i.complete && i.naturalWidth > 0).length`,
+      5000,
+      'poll',
+    );
+    if (typeof n === 'number') {
+      if (n === ready) {
+        stable += 1;
+        // 连着两次一样就认为不会再多了；给两次是为了躲开「刚好这一拍没变化」
+        if (stable >= 2) break;
+      } else {
+        stable = 0;
+        ready = n;
+      }
+    }
+    await wait(400);
+  }
+  mark(`等图：解码出 ${ready} 张`);
+
   // 字体和布局落定
-  await win.webContents.executeJavaScript('document.fonts ? document.fonts.ready.then(() => true) : true').catch(() => false);
+  const fonts = await race(
+    win.webContents.executeJavaScript('document.fonts ? document.fonts.ready.then(() => true) : true').catch(() => false),
+    5000,
+    'fonts',
+  );
+  mark(`等字体：${fonts}`);
+
+  // 不管上面等没等到，都如实报一下每张图的状态 —— 「导出图里空了几块」靠这个定位
+  const state = await race(
+    win.webContents
+      .executeJavaScript(
+        `[...document.images].map((i) => (i.complete ? (i.naturalWidth > 0 ? 'ok' : 'empty') : 'pending')).join(',')`,
+      )
+      .catch(() => 'throw'),
+    4000,
+    'state',
+  );
+  mark(`图状态：${state}`);
+
   await wait(220);
 }
 
@@ -112,14 +218,20 @@ async function openHidden({ html, width, height, offscreen, tag, largerThanScree
     },
   });
   if (offscreen) win.webContents.setFrameRate?.(30);
+  mark(`openHidden(${tag}) 建窗口 offscreen=${offscreen} larger=${largerThanScreen} ${width}x${height}`);
   await win.loadFile(file);
+  mark(`openHidden(${tag}) loadFile 完成`);
   await waitForImages(win);
+  mark(`openHidden(${tag}) 等图完成`);
   return { win, file };
 }
 
 function cleanup(win, file) {
+  mark(`cleanup：销毁 ${win?.getSize?.() ? `${win.getSize()[0]}x${win.getSize()[1]}` : '?'} 窗口`);
   try { win?.destroy(); } catch { /* 已经没了 */ }
+  mark('cleanup：窗口已销毁');
   try { fs.rmSync(file, { force: true }); } catch { /* 删不掉就算了，是临时目录 */ }
+  mark('cleanup：临时文件已删');
 }
 
 /**
@@ -182,35 +294,61 @@ async function renderPng({ html, width, onProgress }) {
   };
   report(0.06, '准备导出页面');
 
-  // 量出来的这几个要带出 try 块（一次成图没成时分片还要用）
+  /*
+   * ⚠️ 量出来的这几个**必须声明在 try 外面**。
+   *
+   * 下面 `sliceShot(...)` 那个调用在 try 块之外，它要用到 `wantW`。
+   * 之前 `wantW` 是在 try 里 `const` 的，于是那行一执行就抛
+   * `ReferenceError: wantW is not defined` —— 而它抛在「转分片」这句留痕之后、
+   * `sliceShot` 第一句留痕之前，所以留痕上看着就像**导出凭空停住**，
+   * 完全看不出是作用域的问题。分片那条退路于是从来没真正跑到过。
+   */
   let contentH = 0;
   let dpr = 1;
   let scale = 1;
   let degraded = false;
+  let wantW = 0;
 
-  // 离屏窗口：截图里没有滚动条，宽度正好是 1220（阶段 0 实测）。
+  /*
+   * ⚠️ 不用离屏窗口（offscreen）。
+   *
+   * 离屏窗口里 `<img>` **不会真的去解码**：`img.decode()` 永远不 settle，
+   * `Promise.all` 于是永远挂着，`executeJavaScript` 也就永远不返回 ——
+   * 导出静静地停在「准备导出页面」，界面上只剩一个不动的进度条。
+   * 报告里嵌着几十张封面 dataURL，所以**只要报告有封面就必卡**；
+   * 而自检喂的那份最小报告一张图都没有，这条路从来没被走到过。
+   *
+   * 用普通隐藏窗口（show:false + paintWhenInitiallyHidden），图片正常走加载流程。
+   * 代价是可能带滚动条，下面注入的隐藏滚动条样式就是为这个准备的。
+   */
   const { win, file } = await openHidden({
     html,
-    width,
+    width: width + GUTTER,
     height: 1000,
-    offscreen: true,
+    offscreen: false,
     tag: 'png',
     largerThanScreen: true,
   });
   try {
     const wc = win.webContents;
-    // 兜底的去滚动条：离屏本来就没有滚动条，这行是**为了万一**退化成普通窗口时
-    // 不带一条灰边进来（普通窗口里滚动条会占 14px，画布就从 1220 变 1206）。
-    // 必须在量高度之前注入：可用宽度一变，换行和总高度都跟着变。
+    /*
+     * 去滚动条。⚠️ 光写 width/height 为 0 不够 —— 实测仍然占 14px
+     * （截出来是 1809 而不是 1830，导出图右侧多一条空白、内容还被压窄），
+     * 得连 display 一起干掉。
+     *
+     * 必须在量高度之前注入：可用宽度一变，换行和总高度都跟着变。
+     */
     await wc.executeJavaScript(
       `(() => { const s = document.createElement('style');
-         s.textContent = '::-webkit-scrollbar { width: 0 !important; height: 0 !important; }';
+         s.textContent = '::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }'
+           + ' html { scrollbar-width: none !important; }';
          document.head.appendChild(s); return true; })()`,
     ).catch(() => false);
 
     report(0.18, '渲染导出页面');
     contentH = await canvasHeight(win);
     if (!contentH) throw new Error('离屏窗口里没找到画布（.report__canvas）');
+    mark(`内容高 ${contentH}px`);
 
     dpr = Number(await wc.executeJavaScript('window.devicePixelRatio')) || 1;
 
@@ -218,13 +356,13 @@ async function renderPng({ html, width, onProgress }) {
     // `toDataURL()` **不抛错、只给一张空图**，那才是最难查的
     scale = Math.min(dpr, MAX_SIDE / contentH);
     degraded = scale < dpr - 1e-6;
-    const wantW = Math.round(width * scale);
+    wantW = Math.round(width * scale);
     const wantH = Math.round(contentH * scale);
 
     /*
      * ① 一次成图：把这个窗口拉到内容高度，一张 capturePage 拿全。
      *
-     * 创建时传的高度会被工作区钳住，**只有 setSize 才真的能超出屏幕** ——
+     * 创建时传的高度会被工作区钳住，**只有建好之后再改尺寸才真的能超出屏幕** ——
      * 实测创建 1220×6000 拿到的仍是 1019 高。
      *
      * ⚠️ 判据是**截出来的高度**，不是「有没有抛错」：窗口被钳住时它不报错，
@@ -235,16 +373,41 @@ async function renderPng({ html, width, onProgress }) {
      */
     if (wantH <= MAX_SIDE && !NO_SINGLE) {
       try {
-        win.setSize(Math.round(width), Math.round(contentH));
+        /*
+         * ⚠️ **必须用 `setContentSize`，不能用 `setSize`**。
+         *
+         * `setSize` 设的是**外框**的尺寸。实测内容要 5049，`setSize(w, 5049)`
+         * 之后 `window.innerHeight` 只有 5012 —— 窗框吃掉了 37px。
+         * 于是下面那条高度判据永远差这一点点，本来能一次拍完的报告
+         * 每次都静悄悄地掉到分片那条慢路上。它既不报错也不失败，
+         * 看上去只是「导出莫名变慢」，没有半点线索指向这里。
+         *
+         * `setContentSize` 设的是**页面**的尺寸，正是我们要的那个数。
+         */
+        mark(`① 一次成图：setContentSize ${Math.round(width + GUTTER)}x${Math.round(contentH)}`);
+        win.setContentSize(Math.round(width + GUTTER), Math.round(contentH));
         await wait(400);
-        const innerH = Number(await wc.executeJavaScript('window.innerHeight')) || 0;
+        let innerH = Number(await wc.executeJavaScript('window.innerHeight')) || 0;
+        // 万一某个平台的窗口比量出来的还要吃掉几个像素，按真实差值补一次再试。
+        // 不这么做的话只会表现为「导出莫名变慢」，没有任何线索指向这里。
+        if (innerH > 0 && innerH < contentH - 2) {
+          const delta = Math.round(contentH - innerH);
+          mark(`① 补 ${delta}px 窗框`);
+          win.setContentSize(Math.round(width + GUTTER), Math.round(contentH + delta));
+          await wait(400);
+          innerH = Number(await wc.executeJavaScript('window.innerHeight')) || 0;
+        }
+        mark(`① innerHeight=${innerH}（要 ${contentH}）`);
         const img = await wc.capturePage();
+        mark(`① capturePage 完成`);
         const size = img.getSize(); // JPEG 出来也是同样的像素尺寸，判据不变
+        mark(`① 截出来 ${size.width}x${size.height}（要 ${wantW}x${wantH}）`);
         if (innerH >= contentH - 2 && size.height >= Math.round(contentH * dpr) - 4) {
           report(0.9, '整张截图完成');
+          // 裁掉右边给滚动条留的那条，只留画布本身
           const out = size.width === wantW && size.height === wantH
             ? img
-            : img.resize({ width: wantW, height: wantH });
+            : img.crop({ x: 0, y: 0, width: Math.min(wantW, size.width), height: Math.min(wantH, size.height) });
           return {
             buffer: out.toPNG(),
             width: Math.round(width),
@@ -255,7 +418,8 @@ async function renderPng({ html, width, onProgress }) {
             mode: 'single',
           };
         }
-      } catch {
+      } catch (e) {
+        mark(`① 失败：${e?.message ?? String(e)}`);
         /* 一次成图这条路走不通，落到下面的分片 */
       }
       /*
@@ -268,8 +432,9 @@ async function renderPng({ html, width, onProgress }) {
     cleanup(win, file);
   }
 
+  mark(`① 没成，转分片（contentH=${contentH} scale=${scale} dpr=${dpr}）`);
   // ② 分片：另开一个干净的小窗口，滚动 → 逐片拍 → 在渲染进程里拼
-  return sliceShot({ html, width, contentH, dpr, scale, degraded, report });
+  return sliceShot({ html, width, contentH, dpr, scale, degraded, report, wantW });
 }
 
 /**
@@ -280,25 +445,39 @@ async function renderPng({ html, width, onProgress }) {
  *
  * 拼图放在渲染进程里做是因为主进程没有图像合成能力（`nativeImage` 只能裁剪、不能叠）。
  */
-async function sliceShot({ html, width, contentH, dpr, scale, degraded, report }) {
+async function sliceShot({ html, width, contentH, dpr, scale, degraded, report, wantW: wantWIn }) {
   /*
    * ⚠️ 分片这条路**不用离屏窗口**：实测离屏窗口滚动后不会重绘，
    * `capturePage()` 拿到的是一张空图 —— 空图的 data URL 是合法的，
    * 于是 `img.decode()` 不报错、只是永远等不到，表现出来就是导出卡死。
    * 普通隐藏窗口（show:false + paintWhenInitiallyHidden）滚动后能正常出帧。
    */
-  const { win, file } = await openHidden({ html, width, height: 1000, offscreen: false, tag: 'png-slice' });
+  mark(`② 分片：另开窗口 ${width + GUTTER}x1000`);
+  const { win, file } = await openHidden({
+    html,
+    width: width + GUTTER,
+    height: 1000,
+    offscreen: false,
+    tag: 'png-slice',
+  });
   try {
     const wc = win.webContents;
     await wc
       .executeJavaScript(
+        /*
+         * 去滚动条。⚠️ 光写 width/height 为 0 **不够**（实测仍然占 14px：
+         * 截出来是 1809 而不是 1830，导出图右侧多一条空白、内容还被压窄），
+         * 得连 display 一起干掉。
+         */
         `(() => { const s = document.createElement('style');
-           s.textContent = '::-webkit-scrollbar { width: 0 !important; height: 0 !important; }';
+           s.textContent = '::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }'
+             + ' html { scrollbar-width: none !important; }';
            document.head.appendChild(s); return true; })()`,
       )
       .catch(() => false);
 
     const viewH = Number(await wc.executeJavaScript('window.innerHeight')) || 1000;
+    const wantW = Number(wantWIn) > 0 ? Math.round(wantWIn) : Math.round(width * scale);
     const slices = Math.max(1, Math.ceil(contentH / viewH));
     report(0.35, `分 ${slices} 片截图`);
     await wc.executeJavaScript(
@@ -327,7 +506,9 @@ async function sliceShot({ html, width, contentH, dpr, scale, degraded, report }
        * 代价是最终那张图带一层 JPEG 压缩痕迹；但这条路本来就是「一次成图走不通」
        * 时的退路，能出图比出一张无损但永远出不来更重要。
        */
+      mark(`② 第 ${k + 1}/${slices} 片：scrollY=${y}`);
       const shot = await wc.capturePage();
+      mark(`② 第 ${k + 1}/${slices} 片：拍完`);
       // ⚠️ `toJPEG()` 给的是 Buffer 不是 data URL，少拼前缀的话 img.src 就是一串无效字符
       const dataUrl = `data:image/jpeg;base64,${shot.toJPEG(92).toString('base64')}`;
       const ok = await wc
@@ -336,7 +517,9 @@ async function sliceShot({ html, width, contentH, dpr, scale, degraded, report }
              const img = new Image(); img.src = ${JSON.stringify(dataUrl)};
              await img.decode();
              const r = g.scale / g.dpr;
-             g.ctx.drawImage(img, 0, Math.round(${y} * g.scale), Math.round(img.width * r), Math.round(img.height * r));
+             // 源那边只取画布那么宽：右边多出的是给滚动条留的余量，不能画进来
+             g.ctx.drawImage(img, 0, 0, Math.min(img.width, ${wantW}), img.height,
+                             0, Math.round(${y} * g.scale), ${wantW}, Math.round(img.height * r));
              return true; })()`,
         )
         .catch(() => false);
@@ -346,7 +529,9 @@ async function sliceShot({ html, width, contentH, dpr, scale, degraded, report }
       if (drawn > slices + 2) break; // 守卫，别因为某个平台的怪脾气死循环
     }
 
+    mark('② 全部拼完，出 PNG');
     const dataUrl = await wc.executeJavaScript(`globalThis.__jikaiShot.c.toDataURL('image/png')`);
+    mark(`② toDataURL 完成 ${typeof dataUrl === 'string' ? dataUrl.length : '非字符串'} 字符`);
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png')) {
       throw new Error('拼出来的不是 PNG（多半是画布超了上限）');
     }

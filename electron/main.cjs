@@ -46,6 +46,21 @@ const SMOKE_PNG = process.env.JIKAI_SMOKE || '';
 const IPC_SMOKE = process.env.JIKAI_IPC_SMOKE === '1';
 
 /**
+ * 自愈链路自检开关。同样定义在前面，因为它也要参与「关不关 GPU」的判断。
+ *
+ * ⚠️ 这事踩过一次：`check:selfheal` 是本机唯一一条**不关 GPU** 的自检，
+ * 于是它在这台没有可用 GPU 的机器上每次都死在启动阶段 ——
+ * 日志里是 `GPU process exited unexpectedly` 刷九次、然后
+ * `FATAL: GPU process isn't usable. Goodbye.`，主进程在 `did-finish-load` 之前就没了。
+ * 报出来却是「渲染进程没有被打死 / 没重开起来 / 重开也没加载完」，
+ * 三条**互相矛盾**的结论 —— 看上去像自愈代码坏了，其实自愈那几行一个字都没被执行到。
+ *
+ * 换句话说：那条链在这台机器上已经有一段时间没被真正验过了。
+ * 「自检红了」和「功能坏了」长得一样，所以这里必须先分清楚。
+ */
+const CRASH_TEST = process.env.JIKAI_CRASH_TEST === '1';
+
+/**
  * 「再试一次硬件加速」那条链的自检口子：`JIKAI_SMOKE_RETRYHW=<标记文件路径>`。
  *
  * 这是唯一一个会**主动重启程序**的按钮，而重启这种事没法靠读代码相信 ——
@@ -67,7 +82,9 @@ const RETRYHW_PROBE = process.env.JIKAI_SMOKE_RETRYHW || '';
  */
 // IPC 冒烟也算自检：它现在要开隐藏窗口跑一次长图导出（`report:export`），
 // 而那股「GPU 进程起不来 → 窗口全白 → 进程退出」的毛病在无头环境里照样会撞上。
-if (SMOKE_PNG || IPC_SMOKE) {
+// 自愈那条（`CRASH_TEST`）同理：它连 `did-finish-load` 都到不了，
+// 自愈代码自然一次都没被执行到 —— 那这条自检就废了。
+if (SMOKE_PNG || IPC_SMOKE || CRASH_TEST) {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu-sandbox');
 }
@@ -105,9 +122,8 @@ if (process.env.JIKAI_USERDATA) {
  * 为什么用注册表（handlers）而不是在冒烟里另写一份等价实现：
  *   另写一份只能证明「那份复制品是对的」。这里调的就是 ipcMain 真正注册的那个函数。
  */
-const CRASH_TEST = process.env.JIKAI_CRASH_TEST === '1';
-// `IPC_SMOKE` 声明在文件顶部（它要参与「关不关 GPU」的判断），这里不再重复定义 ——
-// 两处各写一份的话，改了一处就会出现「文档说关了、其实没关」。
+// `IPC_SMOKE` / `CRASH_TEST` 都声明在文件顶部（它们要参与「关不关 GPU」的判断），
+// 这里不再重复定义 —— 两处各写一份的话，改了一处就会出现「文档说关了、其实没关」。
 
 /**
  * 测试用轨迹标记（只在 `JIKAI_CRASH_TEST=1` 时生效）。
@@ -590,6 +606,17 @@ function createWindow() {
     },
   });
 
+  /*
+   * 关掉后台节流：藏到托盘之后渲染进程仍然照常跑。
+   *
+   * 默认开着的话，窗口一藏起来 Chromium 就把定时器压到一分钟一次、
+   * 再久还要冻起来。于是「点回来」的那一刻要先把渲染进程唤醒，
+   * 这一段时间里窗口已经画出来了、输入却还排在队列里 —— 同样是
+   * 「看着能点、点了没反应」。而常驻托盘本来就是为了继续报提醒
+   * （提醒的 tick 就在渲染层），让它一直睡着本来就是错的。
+   */
+  win.webContents.setBackgroundThrottling(false);
+
   trace('c1-browserwindow-ok');
 
   win.once('ready-to-show', () => {
@@ -942,6 +969,162 @@ function createWindow() {
          * 这条只能由桌面端来答：它是 useEffect 的时序行为，SSR 读到的是初始态；
          * 单元测试里也没有真的 React 运行时。
          */
+        /*
+         * ---------- 托盘复活：JIKAI_SMOKE_TRAYREVIVE=1 ----------
+         *
+         * 用户报的是：关到托盘之后，从托盘点回来的一瞬间，界面上什么都点不动。
+         * 这一条只能由桌面壳来答 —— hide / show 是主进程的行为，
+         * 而「点不动」是渲染进程主线程被堵住的表现，两者都不在 SSR 或单测里。
+         *
+         * 做法是量数字而不是靠肉眼：
+         *   long  —— show 之后的长任务（>50ms），它就是「点不动」的那段时间；
+         *   clickDelay —— 真实输入事件发出去到页面收到 click 的间隔；
+         *   resizes / varSets —— 顺带看窗口显示有没有触发我们的自适应重排；
+         *   big   —— 超过 100ms 的帧间隔，用来认出「哪一段是卡住的」。
+         */
+        const TRAYREVIVE = process.env.JIKAI_SMOKE_TRAYREVIVE || '';
+        if (TRAYREVIVE) {
+          const napTr = (ms) => new Promise((r) => setTimeout(r, ms));
+          const installTr = `(() => {
+            const w = window;
+            if (w.__trayProbe) return true;
+            const P = { long: [], frames: [], clicks: [], resizes: 0, varSets: 0, vis: [] };
+            w.__trayProbe = P;
+            try {
+              new PerformanceObserver((l) => {
+                for (const e of l.getEntries()) P.long.push({ t: Math.round(performance.now()), d: Math.round(e.duration) });
+              }).observe({ entryTypes: ['longtask'] });
+            } catch (err) { /* 内核不给 longtask 就算了，还有帧间隔兜底 */ }
+            let last = performance.now();
+            const loop = () => {
+              const n = performance.now();
+              P.frames.push(Math.round(n - last));
+              last = n;
+              requestAnimationFrame(loop);
+            };
+            requestAnimationFrame(loop);
+            w.addEventListener('click', (ev) => {
+              P.clicks.push({ t: Date.now(), tag: ev.target && ev.target.tagName, cls: String((ev.target && ev.target.className) || '').slice(0, 40) });
+            }, true);
+            w.addEventListener('resize', () => { P.resizes += 1; });
+            document.addEventListener('visibilitychange', () => { P.vis.push({ to: document.visibilityState, t: Date.now() }); });
+            const de = document.documentElement;
+            const origSet = de.style.setProperty.bind(de.style);
+            de.style.setProperty = function (k, v, pr) { P.varSets += 1; return origSet(k, v, pr); };
+            P.samples = [];
+            P.startSample = (x, y) => {
+              P.samples.length = 0;
+              let n = 0;
+              const id = setInterval(() => {
+                const el = document.elementFromPoint(x, y);
+                P.samples.push({
+                  t: Date.now(),
+                  f: document.hasFocus() ? 1 : 0,
+                  v: document.visibilityState,
+                  h: el ? el.tagName + '.' + String(el.className || '').slice(0, 28) : 'null',
+                });
+                n += 1;
+                if (n > 48) clearInterval(id);
+              }, 50);
+            };
+            P.mark = () => {
+              P.long.length = 0; P.frames.length = 0; P.clicks.length = 0;
+              P.resizes = 0; P.varSets = 0; P.vis.length = 0;
+              last = performance.now();
+            };
+            P.report = () => ({
+              long: P.long.slice(0, 12),
+              longTotal: P.long.reduce((a, b) => a + b.d, 0),
+              big: P.frames.filter((d) => d > 100).slice(0, 12),
+              frameCount: P.frames.length,
+              clicks: P.clicks.slice(0, 24),
+              samples: P.samples.slice(0, 40),
+              resizes: P.resizes,
+              varSets: P.varSets,
+              vis: P.vis,
+            });
+            return true;
+          })()`;
+          await win.webContents.executeJavaScript(installTr).catch(() => {});
+          // 关掉后台节流再 hide：用来判断「点不动」是不是渲染进程被节流了
+          if (process.env.JIKAI_SMOKE_TRAYREVIVE_NOTHROTTLE) win.webContents.setBackgroundThrottling(false);
+          await napTr(800);
+          const targetTr = await win.webContents
+            .executeJavaScript(
+              `(() => {
+                 const el = document.querySelector('.sidenav__btn') || document.querySelector('.sidenav button') || document.querySelector('button');
+                 if (!el) return null;
+                 const r = el.getBoundingClientRect();
+                 return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), tag: el.tagName };
+               })()`,
+            )
+            .catch(() => null);
+          // 真实用户是「关了窗去干别的，过一阵再点回来」—— 只藏 1.5 秒太短，
+          // Chromium 的后台节流/冻结是随隐藏时长加重的，藏得太短根本复现不出来。
+          const hideMsTr = Number(process.env.JIKAI_SMOKE_TRAYREVIVE_HIDE || 1500);
+          if (process.env.JIKAI_SMOKE_TRAYREVIVE_MAX) win.maximize();
+          await win.webContents.executeJavaScript('window.__trayProbe.mark()').catch(() => {});
+          const hideAtTr = Date.now();
+          win.hide();
+          await napTr(Number.isFinite(hideMsTr) ? hideMsTr : 1500);
+          const showAtTr = Date.now();
+          win.show();
+          focusSoon();
+          /*
+           * 连着点一串，覆盖整个恢复过程。
+           *
+           * 只点一次的话，点在「已经恢复了」的那一段上，延迟自然是正常的 ——
+           * 于是「点不动」看起来像不存在。用户说的是**一瞬间**，那就得把那一瞬间
+           * 采样出来：从 show 的同一毫秒开始，每 60ms 一下，连点 20 下。
+           */
+          const clickSentTr = Date.now();
+          if (targetTr && process.env.JIKAI_SMOKE_TRAYREVIVE_SAMPLE) {
+            // 每 50ms 记一次「那个点上现在是谁、窗口有没有焦点」—— 命中链是认出遮挡的唯一线索
+            win.webContents.executeJavaScript(`window.__trayProbe.startSample(${targetTr.x},${targetTr.y})`).catch(() => {});
+          }
+          if (targetTr) {
+            win.webContents.sendInputEvent({ type: 'mouseDown', x: targetTr.x, y: targetTr.y, button: 'left', clickCount: 1 });
+            win.webContents.sendInputEvent({ type: 'mouseUp', x: targetTr.x, y: targetTr.y, button: 'left', clickCount: 1 });
+          }
+          const sendsTr = [clickSentTr];
+          for (let i = 1; i < 20; i += 1) {
+            await napTr(60);
+            if (!targetTr) break;
+            const t = Date.now();
+            sendsTr.push(t);
+            win.webContents.sendInputEvent({ type: 'mouseDown', x: targetTr.x, y: targetTr.y, button: 'left', clickCount: 1 });
+            win.webContents.sendInputEvent({ type: 'mouseUp', x: targetTr.x, y: targetTr.y, button: 'left', clickCount: 1 });
+          }
+          await napTr(1200);
+          const repTr = await win.webContents
+            .executeJavaScript('window.__trayProbe.report()')
+            .catch((e) => ({ error: String(e && e.message ? e.message : e) }));
+
+          /*
+           * 连着叫三下 toggle：Windows 双击托盘图标就是这么派发的
+           * （click、click、double-click）。只该真的切换一次 ——
+           * 切三次的话窗口会 show → hide → show 闪一下，而那三下抢前台
+           * 会被系统互相抵消，闪完正好是「显示着但没激活」的坏状态。
+           *
+           * 判据数 show/hide 事件的次数，而不是看最后可见不可见：
+           * 只看最终状态的话，切三次碰巧也能落回「可见」，闪的那一下照样漏掉。
+           */
+          let flipsTr = 0;
+          const bumpTr = () => { flipsTr += 1; };
+          win.on('show', bumpTr);
+          win.on('hide', bumpTr);
+          const visibleBeforeTr = win.isVisible();
+          toggleWindow();
+          toggleWindow();
+          toggleWindow();
+          await napTr(400);
+          win.removeListener('show', bumpTr);
+          win.removeListener('hide', bumpTr);
+          const toggleTr = { flips: flipsTr, before: visibleBeforeTr, after: win.isVisible() };
+          const focusedTr = win.isFocused();
+          console.log(`SMOKE_TRAYREVIVE ${JSON.stringify({ hideAt: hideAtTr, showAt: showAtTr, clickSentAt: clickSentTr, sends: sendsTr, target: targetTr, focused: focusedTr, toggle: toggleTr, probe: repTr })}`);
+        }
+
         const MAXSYNC = process.env.JIKAI_SMOKE_MAXSYNC || '';
         if (MAXSYNC) {
           const napMs = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1001,9 +1184,27 @@ function createWindow() {
           await napMs(400);
           const afterPreset = await readCard();
 
+          /*
+           * 把当前的缩放倍率一并带出去。
+           *
+           * ⚠️ 卡片定位写的是 `calc(基准px * var(--kx/--kh))`（v2.2 起），
+           * 所以 `getComputedStyle` 读到的**是缩放之后**的像素，而布局预设里存的是
+           * **基准**坐标。不把倍率带出去的话，自检就会拿「缩放后的数」去比「基准的数」——
+           * 只要倍率不是 1 就必然差一截（实测 1400 显示成 1393），
+           * 报出来的却是「摆位没跟上预设」，跟真正的原因完全不是一回事。
+           */
+          const scale = await win.webContents
+            .executeJavaScript(
+              '(() => { const cs = getComputedStyle(document.documentElement);'
+                + ' return { kx: Number(cs.getPropertyValue("--kx")) || 1,'
+                + ' kh: Number(cs.getPropertyValue("--kh")) || 1,'
+                + ' innerW: window.innerWidth }; })()',
+            )
+            .catch(() => ({ kx: 1, kh: 1, innerW: 0 }));
+
           console.log(
             'SMOKE_MAXSYNC ' +
-              JSON.stringify({ card: CARD, preset: PRESET, before, maxed, afterMax, opened, tabbed, applied, afterPreset }),
+              JSON.stringify({ card: CARD, preset: PRESET, scale, before, maxed, afterMax, opened, tabbed, applied, afterPreset }),
           );
         }
 
@@ -1633,6 +1834,94 @@ function createWindow() {
         } else {
           console.log(`SMOKE_OK ${probe}`);
         }
+
+        /*
+         * ---------- 用真实报告跑一次导出：JIKAI_SMOKE_EXPORTPNG=png|pdf ----------
+         *
+         * 自检里那条导出用例喂的是一份最小报告（12 个色块、一张封面都没有），
+         * 它能过而用户的真实报告过不去 —— 差的就是「报告里嵌着几十张封面 dataURL」。
+         * 所以这一条必须**喂真数据**：点界面上那个真的按钮，走和用户体验完全相同的那条路。
+         *
+         * 判据是「产物文件长出来并且不再变大」，不是「有没有报错」：
+         * 卡住的时候它也不报错，只是在原地不动。
+         */
+        const EXPORTKIND = process.env.JIKAI_SMOKE_EXPORTPNG || '';
+        if (EXPORTKIND) {
+          const napEx = (ms) => new Promise((r) => setTimeout(r, ms));
+          const selEx = EXPORTKIND === 'pdf' ? '[data-report-export-pdf]' : '[data-report-export-png]';
+          const clickedEx = await win.webContents
+            .executeJavaScript(
+              `(() => {
+                 const b = document.querySelector(${JSON.stringify(selEx)});
+                 if (!b) return { found: 0 };
+                 if (b.disabled) return { found: 1, disabled: 1 };
+                 b.click();
+                 return { found: 1, disabled: 0 };
+               })()`,
+            )
+            .catch((e) => ({ error: String(e && e.message ? e.message : e) }));
+
+          const targetEx = process.env.JIKAI_EXPORT_PATH || '';
+          const startedEx = Date.now();
+          let sizeEx = -1;
+          let stableEx = 0;
+          let doneEx = false;
+          /*
+           * 正常一次 8 秒上下（40 张封面、5000px 高的报告），所以这里等的是
+           * 「它到底会不会结束」而不是「它有多快」。真的卡住时它也不报错，
+           * 只是原地不动 —— 那个上限就是给这种情形留的。
+           * 自检里可以调小，免得一条挂掉的用例把整套拖上四分钟。
+           */
+          const budgetEx = Number(process.env.JIKAI_EXPORT_WAIT_MS) > 0
+            ? Number(process.env.JIKAI_EXPORT_WAIT_MS)
+            : 240000;
+          while (Date.now() - startedEx < budgetEx) {
+            await napEx(2000);
+            let s = -1;
+            try { s = fs.statSync(targetEx).size; } catch { s = -1; }
+            if (s > 1000 && s === sizeEx) {
+              stableEx += 1;
+              if (stableEx >= 2) { doneEx = true; break; }
+            } else {
+              stableEx = 0;
+            }
+            sizeEx = s;
+          }
+          const pctEx = await win.webContents
+            .executeJavaScript(
+              `(() => { const el = document.querySelector('[data-report-exportpct]');
+                 const lb = document.querySelector('[data-report-exportlabel]');
+                 return { pct: el ? el.getAttribute('data-report-exportpct') : null,
+                          label: lb ? String(lb.textContent || '').trim() : null }; })()`,
+            )
+            .catch(() => ({ pct: null, label: null }));
+          /*
+           * 顺带把产物 PNG 的**真实宽高**读出来。
+           *
+           * 「文件长出来了」不等于「图是对的」：之前右侧被滚动条挤掉 14px 那回，
+           * 文件照样生成、大小看着也正常，只是宽度少了 21 个像素。
+           * 宽度必须是 1220（画布宽）乘以一个设备倍率 —— 自检那边按这条断言。
+           */
+          let pngEx = null;
+          try {
+            const buf = fs.readFileSync(targetEx);
+            if (buf.length > 24 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+              pngEx = { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+            }
+          } catch { /* 没产物就是没产物，下面自检会报出来 */ }
+
+          const canvasEx = await win.webContents
+            .executeJavaScript(
+              `(() => { const el = document.querySelector('.report__canvas');
+                 if (!el) return null;
+                 // ⚠️ 用 offsetWidth/Height，不用 getBoundingClientRect：
+                 // 界面上画布是**缩放显示**的，rect 拿到的是缩放后的尺寸。
+                 return { w: el.offsetWidth, h: el.offsetHeight }; })()`,
+            )
+            .catch(() => null);
+
+          console.log(`SMOKE_EXPORT ${JSON.stringify({ kind: EXPORTKIND, clicked: clickedEx, done: doneEx, ms: Date.now() - startedEx, size: sizeEx, png: pngEx, canvas: canvasEx, ui: pctEx })}`);
+        }
       } catch (err) {
         console.log(`SMOKE_FAIL ${err?.message ?? String(err)}`);
       } finally {
@@ -1741,6 +2030,23 @@ function createWindow() {
   return win;
 }
 
+/**
+ * 把窗口叫回来。
+ *
+ * ⚠️ `focus()` 要做两遍，中间隔一拍 —— 这不是迷信：Windows 对「短时间内反复
+ * 抢前台」有自己的保护，一次 show() 紧跟一次 focus() 常常抢不到，于是窗口
+ * 是**显示着但没激活**（标题栏灰着）。那之后用户点第一下只被用于激活窗口，
+ * 内容收不到 —— 也就是「从托盘点回来的一瞬间，上面什么都点不动」。
+ * 隔一拍补一次，抢到前台的概率才是真的高。
+ */
+function focusSoon() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.focus();
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.focus();
+  }, 60);
+}
+
 function showWindow() {
   if (!mainWindow) {
     mainWindow = createWindow();
@@ -1748,10 +2054,24 @@ function showWindow() {
   }
   if (mainWindow.isMinimized()) mainWindow.restore();
   if (!mainWindow.isVisible()) mainWindow.show();
-  mainWindow.focus();
+  focusSoon();
 }
 
+/**
+ * 托盘图标上的单击：藏着就叫回来，开着就收起来。
+ *
+ * ⚠️ 为什么要挡掉连着的第二次：Windows 上双击托盘图标会连着派发
+ * click、click、double-click，三次都响应就是 show → hide → show，
+ * 窗口当场闪一下。而抢前台那三下会被系统互相抵消（前台保护），
+ * 闪完之后窗口往往就是「显示着但没激活」—— 用户于是点不动。
+ * 这个间隔取 400ms：人手双击的两下间隔在 200ms 上下，够挡住；
+ * 又短到不会影响「点一下收起、马上再点一下打开」这种正常连击。
+ */
+let lastToggleAt = 0;
 function toggleWindow() {
+  const now = Date.now();
+  if (now - lastToggleAt < 400) return;
+  lastToggleAt = now;
   if (mainWindow && mainWindow.isVisible() && !mainWindow.isMinimized()) {
     mainWindow.hide();
     return;
@@ -3009,6 +3329,7 @@ if (!hasSingleInstanceLock) {
     trace('p3-tray-start');
     tray = createTray({
       onToggleWindow: toggleWindow,
+      onShowWindow: showWindow,
       onCommand: (cmd) => {
         if (cmd?.type === 'navigate') {
           showWindow();
@@ -3044,6 +3365,7 @@ if (!hasSingleInstanceLock) {
   app.on('window-all-closed', () => {
     // 导出长图用的隐藏窗口也会走到这里，那不算「用户把窗口关光了」。
     // 不排掉的话，连续导出两次时第二次必挂（见 hiddenExportWindows 的注释）。
+    console.log(`[jikai] window-all-closed hiddenExportWindows=${hiddenExportWindows}`);
     if (hiddenExportWindows > 0) return;
     if (!tray && process.platform !== 'darwin') app.quit();
   });

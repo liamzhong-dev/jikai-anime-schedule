@@ -57,6 +57,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { builtinItems } from '../src/data/builtin/index.js';
+import { REPORT_WIDTH } from '../src/core/report.js';
 import { matchLibrary, parseYucPage, slimYuc } from '../src/data/yuc.js';
 import { YUC_CACHE_SCHEMA } from '../src/data/yucSource.js';
 import { closeRunningApp } from './lib/killapp.mjs';
@@ -87,6 +88,19 @@ const retryhw = process.argv.includes('--retryhw');
  * 断网、对方图床抖一下都会红，而红的不是我们的代码。
  */
 const yucCovers = process.argv.includes('--yuc-covers');
+/*
+ * `--exportpng=png|pdf`：真的点一下界面上那个导出按钮，等产物落盘再验。
+ *
+ * 为什么要单独来一条：这条链路上「卡住」和「成功」在界面上一模一样 ——
+ * 都是一个不动的进度条。而它又只在**有封面**的报告上才会卡，
+ * 所以喂一份空报告永远查不出来（正经报告里有几十张封面）。
+ *
+ * `--noslice`：强制走分片退路（`JIKAI_PNG_NOSINGLE=1`）。那条路平时不走，
+ * 恰恰最容易烂在里面 —— 曾经因为一个作用域错误，它一步都没进去就抛了，
+ * 留痕上只表现为「导出凭空停住」，查了很久。
+ */
+const exportpng = arg('exportpng', '');
+const noslice = process.argv.includes('--noslice');
 
 if (wp && !profile) {
   console.error('✗ --wp 必须同时给 --profile：不给的话这次自检会去拖**用户真实存档**里的壁纸位置');
@@ -95,6 +109,12 @@ if (wp && !profile) {
 
 if (retryhw && !profile) {
   console.error('✗ --retryhw 必须同时给 --profile：它要往 boot.json 里写一份降级标记，不能拿用户真实档案试');
+  process.exit(2);
+}
+
+if (exportpng && !profile) {
+  console.error('✗ --exportpng 必须同时给 --profile：它读的是那份档案里的报告和封面缓存，');
+  console.error('  不给的话会去导**用户真实报告**（几十张封面、几千像素高），那是拿他的数据做实验。');
   process.exit(2);
 }
 
@@ -479,6 +499,26 @@ if (retryhw) {
   env.JIKAI_SMOKE_RETRYHW = retryMarker;
 }
 
+/*
+ * 导出那一路：产物和留痕都落在 test/.tmp，名字带时间戳 ——
+ * 上一轮的产物留着也没关系，但**不能复用同一个名字**，
+ * 否则「文件本来就存在」会被当成「这一轮导出成功了」。
+ */
+let exportPath = '';
+let exportTrace = '';
+if (exportpng) {
+  const stamp = `${process.pid}-${Date.now()}`;
+  const ext = exportpng === 'pdf' ? 'pdf' : 'png';
+  exportPath = path.join(root, 'test', '.tmp', `export-check-${stamp}.${ext}`);
+  exportTrace = path.join(root, 'test', '.tmp', `export-trace-${stamp}.txt`);
+  env.JIKAI_SMOKE_EXPORTPNG = exportpng;
+  env.JIKAI_EXPORT_PATH = exportPath;
+  env.JIKAI_EXPORT_TRACE = exportTrace;
+  // 正常一次八秒上下；卡住时不报错、只是不动，所以给一个上限当判据
+  env.JIKAI_EXPORT_WAIT_MS = arg('export-wait', '90000');
+  if (noslice) env.JIKAI_PNG_NOSINGLE = '1';
+}
+
 let expected = null;
 let profileDir = '';
 if (profile) {
@@ -696,6 +736,19 @@ let vpFrames = null;
       vpFrames = JSON.parse(line.slice(line.indexOf('[')));
     } catch {
       vpFrames = [{ parseError: line.slice(0, 200) }];
+    }
+  }
+}
+
+/** 导出长图：主进程点按钮、等产物、再把 PNG 头读回来，走独立一行 */
+let exportReport = null;
+{
+  const line = output.out.split(/\r?\n/).find((l) => l.trim().startsWith('SMOKE_EXPORT'));
+  if (line) {
+    try {
+      exportReport = JSON.parse(line.slice(line.indexOf('{')));
+    } catch {
+      exportReport = { parseError: line.slice(0, 200) };
     }
   }
 }
@@ -1366,6 +1419,65 @@ check(report.library === 'yes', `内置作品库没加载（library=${report.lib
 const shotOk = fs.existsSync(shot) && fs.statSync(shot).size > 12 * 1024;
 check(shotOk, `截图没生成或疑似空白（小于 12KB）：${shot}`);
 
+/*
+ * ---- 导出长图 ----
+ *
+ * 这一条守的是「链路上任何一步悄悄不走」：卡住、被裁、抛在作用域上，
+ * 在界面上全都长成「一个不动的进度条」，只有产物文件本身说得清。
+ */
+if (exportpng) {
+  const ex = exportReport;
+  const traceTail = () => {
+    try {
+      const lines = fs.readFileSync(exportTrace, 'utf8').trim().split(/\r?\n/);
+      return `\n    留痕最后三步：\n${lines.slice(-3).map((l) => `      ${l}`).join('\n')}`;
+    } catch {
+      return '\n    留痕：一条都没有（说明导出连第一步都没走到）';
+    }
+  };
+  check(!!ex && !ex.parseError, `导出没拿到回执（SMOKE_EXPORT 那一行没打出来）${traceTail()}`);
+  if (ex && !ex.parseError) {
+    check(ex.clicked?.found === 1, `报告页上找不到导出按钮（按钮选择器改了，或者报告视图没渲染出来）${traceTail()}`);
+    const waitMs = Number(env.JIKAI_EXPORT_WAIT_MS);
+    check(ex.clicked?.disabled === 0, '导出按钮是灰的 —— 报告还有封面没缓存，界面自己把导出拦住了（这条自检要用一份封面已缓存的档案）');
+    check(
+      ex.done === true,
+      `导出没跑完（等了 ${waitMs}ms，产物 ${ex.size} 字节）—— 卡住时不报错、只是不动${traceTail()}`,
+    );
+    check(Number(ex.size) > 1000, `导出产物太小（${ex.size} 字节），多半是张空图${traceTail()}`);
+    if (exportpng === 'png') {
+      check(!!ex.png, `产物不是一张能解析的 PNG${traceTail()}`);
+      check(!!ex.canvas, `没读到报告画布（.report__canvas 不在），没法核对导出图的尺寸${traceTail()}`);
+      if (ex.png && ex.canvas) {
+        // 种子报告用的就是默认画布宽；对不上说明报告宽度自己变了，期望值也就无从算起
+        check(
+          ex.canvas.w === REPORT_WIDTH,
+          `报告画布宽 ${ex.canvas.w}px，不是默认的 ${REPORT_WIDTH}px —— 种子报告和界面用的宽度对不上了`,
+        );
+        /*
+         * 期望值**从画布现算**，不写死数字。
+         *
+         * 导出图的宽高必须正好是画布宽高乘以一个设备倍率。这条同时守住两件事：
+         *   ① 右边被裁 —— 滚动条 / 窗框吃掉十几个像素那回，产物照样生成、
+         *      大小看着也正常，只是宽度少了 21px，文件层面完全看不出来；
+         *   ② 下边被截 —— 窗口没真正拉到内容高度时会静悄悄只拍半张。
+         * 倍率只能是有限几个值，落不到上面就说明宽度不是从画布来的。
+         */
+        const k = ex.png.w / ex.canvas.w;
+        const legal = [1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+        check(
+          legal.some((s) => Math.abs(k - s) < 0.005),
+          `导出图宽 ${ex.png.w}px ÷ 画布宽 ${ex.canvas.w}px = ${k.toFixed(4)}x，不是设备倍率 —— 右边多半被裁掉了一条`,
+        );
+        check(
+          Math.abs(ex.png.h - ex.canvas.h * k) <= 2,
+          `导出图高 ${ex.png.h}px 和画布高 ${ex.canvas.h}px×${k.toFixed(2)}（=${Math.round(ex.canvas.h * k)}）对不上 —— 高度被截了或者拼片错位`,
+        );
+      }
+    }
+  }
+}
+
 if (failures.length) {
   console.error('✗ 桌面壳验证失败：');
   for (const f of failures) console.error(`  · ${f}`);
@@ -1409,6 +1521,14 @@ if (view === 'report') {
   // 打出来是因为「缩没缩」在截图里看不出来 —— 一张缩过的长图和一张原尺寸的，
   // 缩略图级别看上去都是「一块有内容的画布」。只有数字能证明它真的缩了。
   console.log(`  画布缩放：${report.reportZoomPct}%（倍率 ${report.reportZoom}）· 横向溢出 ${report.reportOverflowX}px（应为 0）`);
+}
+if (exportpng && exportReport && !exportReport.parseError) {
+  const e = exportReport;
+  console.log(
+    `  导出 ${String(e.kind).toUpperCase()}：${(Number(e.size) / 1048576).toFixed(2)} MB · 用时 ${(e.ms / 1000).toFixed(1)}s`
+    + (e.png ? ` · 图 ${e.png.w}×${e.png.h}` : '')
+    + (noslice ? ' · 走的分片退路' : ''),
+  );
 }
 if (view === 'history') {
   console.log(

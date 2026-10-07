@@ -39,7 +39,7 @@ function trayIcon() {
 }
 
 /**
- * @param {{ onCommand:(cmd:object)=>void, onQuit:()=>void, onToggleWindow:()=>void, onCheckUpdate:()=>void, onToggleAutoLaunch:(v:boolean)=>void }} hooks
+ * @param {{ onCommand:(cmd:object)=>void, onQuit:()=>void, onToggleWindow:()=>void, onShowWindow:()=>void, onCheckUpdate:()=>void, onToggleAutoLaunch:(v:boolean)=>void }} hooks
  */
 function createTray(hooks = {}) {
   const icon = trayIcon();
@@ -66,14 +66,16 @@ function createTray(hooks = {}) {
       : `待补 ${state.catchupCount} 部`;
 
     const template = [
-      item('打开主窗口', () => hooks.onToggleWindow?.()),
+      // 菜单里写的是「打开」，那就只能是打开 —— 用切换的话，窗口开着时点它
+      // 反而把窗口收起来了，跟字面意思正好相反
+      item('打开主窗口', () => (hooks.onShowWindow ?? hooks.onToggleWindow)?.()),
       { type: 'separator' },
       nav('season', '本季番剧'),
       nav('schedule', '播出时间表'),
       nav('following', `我的追番（${state.followingCount}）`),
       nav('catchup', `补番清单（${state.catchupCount}）`),
       { type: 'separator' },
-      item(todayLine, () => hooks.onToggleWindow?.(), { enabled: state.todayCount > 0 }),
+      item(todayLine, () => (hooks.onShowWindow ?? hooks.onToggleWindow)?.(), { enabled: state.todayCount > 0 }),
       item(catchupLine, () => hooks.onCommand?.({ type: 'navigate', view: 'catchup' }), { enabled: state.catchupCount > 0 }),
     ];
 
