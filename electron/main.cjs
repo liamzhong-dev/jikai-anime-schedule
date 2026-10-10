@@ -30,6 +30,9 @@ const updater = require('./updater.cjs');
  * 模块名」和「顶部 require 的模块名」一起写下来，改这里的时候对着数一遍。
  */
 const reportExport = require('./reportExport.cjs');
+// 用户自己导入的图（报告 / Tier List 都要用）。和封面缓存是两套：
+// 那些图能重新下载，这些图丢了就再也拿不回来。
+const { CustomImageStore } = require('./customImages.cjs');
 
 const DEV_URL = process.env.JIKAI_DEV_URL || '';
 
@@ -208,6 +211,9 @@ let currentHotkey = '';
 
 /** 封面缓存实例：等 whenReady 之后才知道 userData 在哪，所以先留空 */
 let coverCache = null;
+
+/** 用户导入的图，同上，等 whenReady 才建 */
+let customImages = null;
 
 // 从托盘启动（开机自启）时不弹窗，直接蹲在托盘里
 const START_HIDDEN = process.argv.includes('--hidden');
@@ -1694,6 +1700,25 @@ function createWindow() {
              })(),
              // 缩放绝不能落在画布自己身上 —— 导出抓的是它的 outerHTML
              reportCanvasTransform: (document.querySelector('[data-report-canvas]')?.style?.transform ?? '') || 'none',
+             /*
+              * 报告里每张封面**实际拿到多大**（naturalWidth 分桶）。
+              *
+              * 截图是看不出「用的是原图还是缩略图」的 —— 两者差好几倍分辨率，
+              * 缩略图铺进 300px 的坑位只是「看着有点糊」，肉眼看不出是接错了。
+              * 这里不写死断言：离线环境本来就取不到原图，硬断言会变成
+              * 「环境红了、怪代码」。但数字要摆出来，人一眼能看出是 1200 还是 150。
+              */
+             reportCoverSizes: (function () {
+               const ws = [...document.querySelectorAll('.report__canvas .cover__img')]
+                 .map((i) => i.naturalWidth || 0)
+                 .filter((w) => w > 0);
+               return {
+                 total: ws.length,
+                 sharp: ws.filter((w) => w >= 300).length,
+                 thumb: ws.filter((w) => w > 0 && w < 300).length,
+                 maxW: ws.length ? Math.max.apply(null, ws) : 0,
+               };
+             })(),
              // 追番历程：总数 / 有时间戳的 / 没时间戳的 / 事件条数。
              // 「时间轴是空的」和「时间戳一条都没记上」在截图里长得一模一样 ——
              // 只有把 untimed 单独数出来，才分得清是「还没到那天」还是「记漏了」。
@@ -2756,7 +2781,15 @@ async function runIpcSmoke() {
         + '.report__canvas{width:1220px;box-sizing:border-box;background:#101820;color:#eef2f8;padding:40px;font-size:18px}'
         + '.rb-wall__grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}'
         + 'h1{font-size:40px}div.t{height:60px;background:#23324a}';
-      const tiles = Array.from({ length: 12 }, () => '<div class="t"></div>').join('');
+      /*
+       * ⚠️ 前两格放**真的** `<img>`，不是为了排版好看，是为了让「导出里封面没丢」
+       * 这条断言**有可能失败**。原来这 12 格全是空 div —— 一张图都没有的时候
+       * `missing === 0` 永远成立，那就是一条空转的断言，比没有更坏：
+       * 它绿着，看上去像验过了，而真实报告掉图时照样什么都不报。
+       */
+      const tiles = Array.from({ length: 12 }, (_, i) => (i < 2
+        ? `<img class="cover__img" src="${SMOKE_PNG_DATAURL}" width="60" height="60" alt="">`
+        : '<div class="t"></div>')).join('');
       const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>冒烟</title>`
         + `<style>${css}</style></head><body class="print"><div class="report">`
         + `<div class="report__canvas" data-report-canvas="1"><h1>季度报告冒烟</h1>`
@@ -2764,10 +2797,17 @@ async function runIpcSmoke() {
 
       const prev = process.env.JIKAI_EXPORT_PATH;
       try {
-        for (const kind of ['pdf', 'png']) {
-          const out = path.join(tmp, `report.${kind}`);
+        /*
+         * 最后多跑一轮 2x：验「用户挑的倍率真的落到了产物尺寸上」。
+         * 只跑默认档的话，界面 → IPC → renderPng 这一整条**没被走过**，
+         * 而它错了的表现只是「导出比预期糊一点」，谁也不会去查是倍率没传下去。
+         */
+        for (const spec of [{ kind: 'pdf' }, { kind: 'png' }, { kind: 'png', scale: 2 }]) {
+          const kind = spec.kind;
+          const tag = spec.scale ? `${kind}-${spec.scale}x` : kind;
+          const out = path.join(tmp, `report.${tag}`);
           process.env.JIKAI_EXPORT_PATH = out;
-          const r = await call('report:export', { kind, html, width: 1220, name: 'smoke-report' });
+          const r = await call('report:export', { kind, html, width: 1220, name: 'smoke-report', scale: spec.scale ?? 0 });
           let buf = null;
           try {
             buf = r?.ok ? fs.readFileSync(out) : null;
@@ -2779,14 +2819,31 @@ async function runIpcSmoke() {
             ? Boolean(buf && buf.subarray(0, 5).toString('latin1') === '%PDF-')
             : Boolean(buf && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47);
           const size = buf?.length ?? 0;
+          // 指定了倍率就照它算期望值，不写死数字 —— 宽度档位以后改了也不用回来改断言
+          const wantW2 = Math.round(1220 * (spec.scale || 1));
+          const scaleOk = kind === 'pdf' || spec.scale ? r?.width === wantW2 : true;
           record(
-            `report:export(${kind})`,
-            Boolean(r?.ok) && sigOk && size > 1000,
+            `report:export(${tag})`,
+            Boolean(r?.ok) && sigOk && size > 1000 && scaleOk,
             r?.ok
               ? `${size} 字节 · 文件头${sigOk ? '对' : '不对'} · ${kind === 'pdf'
                 ? `内容高 ${r.contentHeight}px`
-                : `${r.width}×${r.height} · ${r.slices} 片`}`
+                : `${r.width}×${r.height} · ${r.slices} 片 · 倍率${scaleOk ? '对' : `不对（要 ${wantW2}）`}`}`
               : (r?.error ?? '没有返回'),
+          );
+          /*
+           * 封面一张都没丢才算过。
+           *
+           * 这条看着是重复劳动（上面那条已经验了「文件是那个格式」），但缺图
+           * **不报错也不改文件大小**：一份掉了一半封面的图照样是合法 PNG，
+           * 体积甚至差不多 —— 所以只能靠「导出前那张体检表」来判。
+           * 上面那两张 png 是这份报告唯一的图，所以期望值就是它俩，写死 2。
+           */
+          const im = r?.images ?? {};
+          record(
+            `report:export(${tag} 不缺封面)`,
+            Number(im.total) === 2 && Number(im.missing) === 0,
+            `封面 ${im.total ?? '?'} 张（应有 2）· 缺 ${im.missing ?? '?'}`,
           );
         }
       } finally {
@@ -2797,6 +2854,130 @@ async function runIpcSmoke() {
     });
 
     await new Promise((resolve) => server.close(resolve));
+  }
+
+  // ---- 用户导入的图：桌面专属链路（浏览器壳走 localStorage，碰不到这套）----
+  /*
+   * ⚠️ 先把 store 的根目录临时指到 tmp。
+   * 这套冒烟跑的是**用户本人的 userData**（上面那条 boot.json 断言就是证据）：
+   * 在本人目录里建 `custom-images/` 再删掉会留下空目录，中途失败更是会把
+   * 一张图永远留在他盘上 —— 用户的图库不该被自检碰。
+   */
+  {
+    /*
+     * ⚠️ CustomImageStore 自己会在传进去的根目录下面再建一层 `custom-images/`，
+     * 所以这里要传 tmp —— 写成传 imgDir 就套了两层，表现为「导入明明成功，
+     * 按 imgDir 去数文件却一个都没有」（真踩过一次，红得很莫名）。
+     */
+    const imgDir = path.join(tmp, 'custom-images');
+    const realStore = customImages;
+    customImages = new CustomImageStore(tmp);
+
+    // 一张真 PNG（1×1），再把末尾翻掉一字节造出「第二张不同的图」——
+    // 两张都能各自存下来，才说明去重是按内容 hash 而不是按文件名。
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const png2 = Buffer.from(png);
+    png2[png2.length - 5] = png2[png2.length - 5] ^ 0xff;
+
+    const srcA = path.join(tmp, 'a.png');
+    const srcB = path.join(tmp, 'b.png');
+    fs.writeFileSync(srcA, png);
+    fs.writeFileSync(srcB, png2);
+
+    // 假选图框：按 [A, A, B] 吐路径，吐完就报「取消」
+    const queue = [srcA, srcA, srcB];
+    const fakeDialog = {
+      showOpenDialog: async () => {
+        const p = queue.shift();
+        return p ? { canceled: false, filePaths: [p] } : { canceled: true, filePaths: [] };
+      },
+    };
+
+    let fileA = '';
+    let fileB = '';
+
+    await step('image:import(导入并落盘)', async () => {
+      const r = await call('image:import', fakeDialog);
+      const back = Buffer.from(String(r?.dataUrl ?? '').split(',')[1] ?? '', 'base64');
+      const ok = r?.ok === true
+        && /^ci-[0-9a-f]{12}\.png$/.test(String(r?.file))
+        && r?.bytes === png.length
+        && String(r?.dataUrl ?? '').startsWith('data:image/png;base64,')
+        && back.equals(png);
+      fileA = String(r?.file ?? '');
+      record('image:import(导入并落盘)', ok, `file=${fileA} bytes=${r?.bytes} 回读一致=${back.equals(png)}`);
+    });
+
+    await step('image:import(同一张图不重复存)', async () => {
+      const r = await call('image:import', fakeDialog);
+      const list = await call('image:list');
+      const onDisk = fs.readdirSync(imgDir).filter((f) => f.endsWith('.png'));
+      const ok = r?.ok === true && r?.reused === true && r?.file === fileA
+        && list?.items?.length === 1 && onDisk.length === 1;
+      record('image:import(同一张图不重复存)', ok, `reused=${r?.reused} 索引=${list?.items?.length} 磁盘=${onDisk.length} 个`);
+    });
+
+    await step('image:import(第二张不同的图另存一份)', async () => {
+      const r = await call('image:import', fakeDialog);
+      fileB = String(r?.file ?? '');
+      const ok = r?.ok === true && fileB !== fileA && r?.bytes === png2.length;
+      record('image:import(第二张不同的图另存一份)', ok, `${fileA} / ${fileB} bytes=${r?.bytes}`);
+    });
+
+    await step('image:list(索引与磁盘大小对得上)', async () => {
+      const list = await call('image:list');
+      const items = Array.isArray(list?.items) ? list.items : [];
+      const sizeOk = items.every((it) => fs.statSync(path.join(imgDir, it.file)).size === it.bytes);
+      const nameOk = items.every((it) => /^ci-[0-9a-f]{12}\.png$/.test(it.file));
+      record('image:list(索引与磁盘大小对得上)', items.length === 2 && sizeOk && nameOk,
+        `${items.length} 条 · 大小全对=${sizeOk} · 名字都合法=${nameOk}`);
+    });
+
+    await step('image:read(读出来就是那张图)', async () => {
+      const r = await call('image:read', { file: fileA });
+      const back = Buffer.from(String(r?.dataUrl ?? '').split(',')[1] ?? '', 'base64');
+      const ok = r?.ok === true && r?.file === fileA && back.equals(png);
+      // 报告长图是「不同源的临时 HTML」，只有 dataURL 进得去产物 —— 所以必须验它真是 dataURL
+      record('image:read(读出来就是那张图)', ok, `${back.length}B · 与原图一致=${back.equals(png)} · ${String(r?.dataUrl).slice(0, 22)}…`);
+    });
+
+    await step('image:read(不合法的名字一律挡住)', async () => {
+      const bad = ['../state.json', 'ci-0123456789ab.txt', 'sub/ci-0123456789ab.png', 'ci-aaaaaaaaaaaa.png', ''];
+      const leaks = [];
+      for (const f of bad) {
+        const r = await call('image:read', { file: f });
+        if (r?.ok !== false) leaks.push(`${JSON.stringify(f)}→ok=${r?.ok}`);
+      }
+      record('image:read(不合法的名字一律挡住)', leaks.length === 0,
+        leaks.length ? `漏了：${leaks.join(' / ')}` : `${bad.length} 个坏名字全被挡住（含路径穿越与不存在的文件）`);
+    });
+
+    await step('image:remove(删掉后索引和磁盘都没了)', async () => {
+      const r = await call('image:remove', { file: fileA });
+      const gone = !fs.existsSync(path.join(imgDir, fileA));
+      const list = await call('image:list');
+      const ok = r?.ok === true && r?.removed === 1 && gone
+        && list?.items?.length === 1 && list?.items?.[0]?.file === fileB;
+      record('image:remove(删掉后索引和磁盘都没了)', ok, `removed=${r?.removed} 盘上没了=${gone} 剩 ${list?.items?.length} 条`);
+    });
+
+    await step('image:remove(删已经没有的不报错)', async () => {
+      const r = await call('image:remove', { file: fileA });
+      record('image:remove(删已经没有的不报错)', r?.ok === true && r?.removed === 0, `removed=${r?.removed}`);
+    });
+
+    await step('image:import(点了取消不落盘也不算失败)', async () => {
+      const before = (await call('image:list'))?.items?.length ?? -1;
+      const r = await call('image:import', fakeDialog); // 队列已空 → 取消
+      const after = (await call('image:list'))?.items?.length ?? -1;
+      const ok = r?.ok === false && /取消/.test(String(r?.error)) && before === after && before === 1;
+      record('image:import(点了取消不落盘也不算失败)', ok, `ok=${r?.ok} err=${r?.error} 索引 ${before}→${after}`);
+    });
+
+    customImages = realStore;
   }
 
   // ⚠️ 反向自检：故意造一条假 FAIL，确认它**真的会被统计进去**。
@@ -2953,6 +3134,43 @@ if (!hasSingleInstanceLock) {
       });
     });
 
+    // ---- 用户导入的图 ----
+    // 目录在 userData 下，只有用户点删除才会少东西 —— 清理封面缓存那一套不碰它。
+    customImages = new CustomImageStore(app.getPath('userData'));
+
+    /**
+     * 选一张图 → 存进 userData → 把名字记进索引。
+     *
+     * 只回索引里的那点元信息和 dataUrl：渲染层拿到就能直接用，
+     * 不用再走一次 `image:read`（省一趟 IPC，也省一次 base64 编码）。
+     */
+    /**
+     * ⚠️ `opts.dialog` 只有在自检里才认 —— 冒烟那台机器没人能点选图框，
+     * 不注入的话「用户图落盘」这条桌面专属链路一次都跑不到（浏览器壳走的是
+     * localStorage，压根碰不到它）。正常运行时渲染层经 preload 调的是无参版本。
+     */
+    handle('image:import', async (_e, opts = {}) => {
+      /*
+       * ⚠️ 自检里绝不能弹真框：没人去点它，进程会一直挂到被 kill，
+       * 报出来的错是「没打出 IPC_SMOKE_END」，指向一个完全不对的方向
+       * （真踩过一次：假框放在 opts.dialog 里，而这里判的是 opts 本身）。
+       * 所以自检模式下拿不到注入的假框就直接失败 —— 宁可红一条，不要挂死。
+       */
+      if (IPC_SMOKE && typeof opts?.showOpenDialog !== 'function') {
+        return { ok: false, error: '自检没注入选图框' };
+      }
+      try {
+        const dlg = IPC_SMOKE ? opts : dialog;
+        return await customImages.importImage({ dialog: dlg });
+      } catch (err) {
+        // 选图框抛错多半是「这个环境弹不了框」，如实回给界面，别静默
+        return { ok: false, error: err?.message ?? String(err) };
+      }
+    });
+    handle('image:list', () => customImages.list());
+    handle('image:read', async (_e, { file } = {}) => customImages.read(file));
+    handle('image:remove', async (_e, { file } = {}) => customImages.remove(file));
+
     // ---- 名称索引（单独文件） ----
     handle('nameindex:read', () => readJsonFile(nameIndexFile()));
     handle('nameindex:write', (_e, payload) => writeJsonFile(nameIndexFile(), payload));
@@ -3006,11 +3224,22 @@ if (!hasSingleInstanceLock) {
     // 渲染层负责把「画布那份 DOM + 全部样式」拼成一份自包含的 HTML（图都是 dataURL），
     // 这里负责在隐藏窗口里重新渲染、出 PDF 或 PNG，然后落到磁盘。
     // 真正的活在同目录的 `reportExport.cjs`，主进程只做参数校验与存盘。
-    handle('report:export', async (_e, { kind = 'pdf', html = '', width = 1220, name = 'jikai-report' } = {}) => {
+    /**
+     * `scale`：导出倍率。`0` / 不合法值 = 跟随屏幕（下面读 devicePixelRatio）。
+     * 上限卡在 3：再高只是把插值放大得更重，而像素量是平方增长，
+     * 长图会直接撞 16384 那条边，白等几十秒再得到一个被降过比例的结果。
+     */
+    handle('report:export', async (_e, {
+      kind = 'pdf', html = '', width = 1220, name = 'jikai-report', scale = 0,
+    } = {}) => {
       const text = String(html);
       if (text.length < 200) return { ok: false, error: '报告内容为空，没什么可导出的' };
       const w = Number(width);
       if (!Number.isFinite(w) || w < 200 || w > 4000) return { ok: false, error: `画布宽度不合理：${width}` };
+      const wantScale = Number(scale);
+      const fixedScale = Number.isFinite(wantScale) && wantScale > 0
+        ? Math.min(3, wantScale)
+        : 0;
 
       try {
         const isPdf = kind === 'pdf';
@@ -3033,7 +3262,7 @@ if (!hasSingleInstanceLock) {
         try {
           out = isPdf
             ? await reportExport.renderPdf({ html: full, width: w, onProgress: sendProgress })
-            : await reportExport.renderPng({ html: full, width: w, onProgress: sendProgress });
+            : await reportExport.renderPng({ html: full, width: w, onProgress: sendProgress, scale: fixedScale });
         } finally {
           hiddenExportWindows -= 1;
         }
@@ -3059,6 +3288,14 @@ if (!hasSingleInstanceLock) {
         }
 
         fs.writeFileSync(target, out.buffer);
+        /*
+         * 缺几张封面这件事**不会报错**，只在成品上表现为几个空位，
+         * 所以把这个数字单独打出来给自检读 —— 光看「文件长出来了、格式对」
+         * 是看不出掉了图的，那正是它难查的地方。
+         */
+        if (SMOKE_PNG) {
+          console.log(`SMOKE_EXPORTIMG ${JSON.stringify({ kind, ...(out.images ?? {}) })}`);
+        }
         return {
           ok: true,
           path: target,
@@ -3070,6 +3307,8 @@ if (!hasSingleInstanceLock) {
           scale: out.scale ?? null,
           degraded: Boolean(out.degraded),
           slices: out.slices ?? null,
+          /** 导出前的封面体检：{ total, ok, missing } —— 界面不显示，给自检当判据 */
+          images: out.images ?? null,
         };
       } catch (err) {
         return { ok: false, error: err?.message ?? String(err) };

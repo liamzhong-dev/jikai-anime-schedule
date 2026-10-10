@@ -23,6 +23,8 @@ export default function TierListView({
   images = {},
   coversNote = '',
   onPatch,
+  onAddImage,
+  imageBusy = false,
   onAutoRank,
   onReset,
   onExport,
@@ -154,6 +156,19 @@ export default function TierListView({
           </>
         ) : null}
 
+        {/*
+          自定义图片：档位表里不是只能放本季的番 ——
+          想给某张官方视觉图、某张插画排个位置，也该排得进去。
+        */}
+        <button
+          type="button"
+          className="btn btn--mini"
+          data-tier-add-image="1"
+          disabled={imageBusy}
+          onClick={() => onAddImage?.()}
+        >
+          {imageBusy ? '正在读图…' : '＋ 自定义图片'}
+        </button>
         <button type="button" className="btn btn--mini" onClick={() => onAutoRank?.()}>
           按评分自动分档
         </button>

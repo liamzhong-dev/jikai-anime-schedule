@@ -39,6 +39,12 @@ contextBridge.exposeInMainWorld('jikai', {
     return () => ipcRenderer.removeListener('cover:warm-progress', handler);
   },
 
+  // 用户自己导入的图：报告长图、Tier List 都能往里塞插画 / 截图
+  importImage: () => ipcRenderer.invoke('image:import'),
+  listImages: () => ipcRenderer.invoke('image:list'),
+  readImage: (payload) => ipcRenderer.invoke('image:read', payload),
+  removeImage: (payload) => ipcRenderer.invoke('image:remove', payload),
+
   // 名称索引：全量番剧名，单独一个文件（约 1MB，不能混进 state）
   readNameIndex: () => ipcRenderer.invoke('nameindex:read'),
   writeNameIndex: (payload) => ipcRenderer.invoke('nameindex:write', payload),
