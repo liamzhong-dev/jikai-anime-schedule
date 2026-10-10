@@ -17,6 +17,31 @@ const WALLPAPER_KEY = 'jikai/wallpaper/v1';
 const NAME_INDEX_KEY = 'jikai/nameindex/v1';
 const YUC_CACHE_KEY = 'jikai/yuc/v1';
 const AIR_ARCHIVE_KEY = 'jikai/air/v1';
+const CUSTOM_IMAGE_KEY = 'jikai/customimages/v1';
+
+/** 浏览器壳里「用户导入的图」只能落在 localStorage，容量比桌面端小得多 */
+function readImageStore() {
+  const raw = readJson(CUSTOM_IMAGE_KEY);
+  const items = Array.isArray(raw?.items) ? raw.items : [];
+  return items.filter((it) => typeof it?.file === 'string' && typeof it?.dataUrl === 'string');
+}
+
+function writeImageStore(items) {
+  return writeJson(CUSTOM_IMAGE_KEY, { items });
+}
+
+/** 12 位十六进制。文件名必须是 `ci-<hex12>.<ext>`，和主进程那条正则对齐 */
+function randHex(n) {
+  const buf = new Uint8Array(Math.ceil(n / 2));
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(buf);
+  else for (let i = 0; i < buf.length; i += 1) buf[i] = Math.floor(Math.random() * 256);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('').slice(0, n);
+}
+
+function extOfName(name) {
+  const m = /\.(jpe?g|png|webp|gif|avif)$/i.exec(String(name ?? ''));
+  return m ? `.${m[1].toLowerCase()}` : '.png';
+}
 
 /**
  * 浏览器这一侧不支持的能力，统一回这个形状。
@@ -253,6 +278,66 @@ const webAdapter = {
     return () => {};
   },
 
+  // ---- 用户导入的图 ----
+  // 浏览器里没有 userData，退到 localStorage。它是唯一一处「用户看不见、
+  // 重启还在」的地方 —— 代价是容量小（一般 5MB 上下），所以超限必须如实报，
+  // 不能静默丢图：图丢了用户是找不回来的。
+  async pickImage() {
+    if (typeof document === 'undefined') return { ok: false, error: '当前环境不能读文件' };
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.style.display = 'none';
+      let done = false;
+      const finish = (r) => { if (!done) { done = true; input.remove(); resolve(r); } };
+      input.addEventListener('change', () => {
+        const f = input.files?.[0];
+        if (!f) return finish({ ok: false, error: '已取消' });
+        // 12MB 上限：再大的多半是「选错了文件」，base64 之后体积还要再涨三成
+        if (f.size > 12 * 1024 * 1024) {
+          return finish({ ok: false, error: `这张图有 ${(f.size / 1048576).toFixed(1)} MB，上限是 12 MB` });
+        }
+        const fr = new FileReader();
+        fr.onload = () => {
+          const dataUrl = String(fr.result ?? '');
+          const file = `ci-${randHex(12)}${extOfName(f.name)}`;
+          const name = String(f.name ?? '').slice(0, 60) || '图片';
+          const items = readImageStore().filter((it) => it.file !== file);
+          items.unshift({ file, name, bytes: f.size, addedAt: Date.now(), dataUrl });
+          if (!writeImageStore(items)) {
+            return finish({ ok: false, error: '本地存储写不下了，先到报告页删几张旧的图' });
+          }
+          return finish({ ok: true, file, name, bytes: f.size, dataUrl });
+        };
+        fr.onerror = () => finish({ ok: false, error: '读文件出错' });
+        fr.readAsDataURL(f);
+      });
+      globalThis.addEventListener?.('focus', () => setTimeout(() => {
+        if (!input.files?.length) finish({ ok: false, error: '已取消' });
+      }, 500), { once: true });
+      document.body.appendChild(input);
+      input.click();
+    });
+  },
+
+  async listImages() {
+    return { items: readImageStore().map(({ file, name, bytes, addedAt }) => ({ file, name, bytes, addedAt })) };
+  },
+
+  async readImage({ file } = {}) {
+    const want = String(file ?? '');
+    const hit = readImageStore().find((it) => it.file === want);
+    return hit ? { ok: true, file: hit.file, dataUrl: hit.dataUrl } : { ok: false, error: '这张图不在本地存储里了' };
+  },
+
+  async removeImage({ file } = {}) {
+    const want = String(file ?? '');
+    const before = readImageStore();
+    writeImageStore(before.filter((it) => it.file !== want));
+    return { ok: true, removed: before.some((it) => it.file === want) ? 1 : 0 };
+  },
+
   /** 浏览器里也试着走一次 fetch→blob→dataURL。CORS 允许就成，不允许照实报错。 */
   async saveBinaryFile({ name = 'jikai.png', dataUrl = '' } = {}) {
     if (typeof document === 'undefined') return { ok: false, error: '当前环境不能保存文件' };
@@ -453,13 +538,44 @@ const electronAdapter = {
     return typeof off === 'function' ? off : () => {};
   },
 
+  // ---- 用户导入的图 ----
+  /**
+   * 弹选图框 → 存进 userData → 记进索引。
+   *
+   * @returns {{ok:boolean, file?:string, name?:string, bytes?:number, dataUrl?:string, error?:string}}
+   *   用户取消时 `error` 是 '已取消' —— 界面据此什么都不做
+   */
+  async pickImage() {
+    const r = await window.jikai?.importImage?.();
+    if (!r) return unsupported('导入图片', '主进程没有提供图片通道（preload 没更新？）');
+    return r;
+  },
+  async listImages() {
+    const r = await window.jikai?.listImages?.();
+    return r && Array.isArray(r.items) ? r : { items: [] };
+  },
+  async readImage({ file } = {}) {
+    const r = await window.jikai?.readImage?.({ file });
+    if (!r) return unsupported('读取图片', '主进程没有提供图片通道（preload 没更新？）');
+    return r;
+  },
+  async removeImage({ file } = {}) {
+    const r = await window.jikai?.removeImage?.({ file });
+    if (!r) return unsupported('删除图片', '主进程没有提供图片通道（preload 没更新？）');
+    return r;
+  },
+
   /**
    * 长图导出。`html` 由渲染层拼好（样式内联、图都是 dataURL），
    * 主进程只负责在隐藏窗口里渲染并落盘。
    * @returns {{ok:boolean, path?:string, bytes?:number, kind?:string, error?:string}}
    */
-  async reportExport({ kind = 'pdf', html = '', width = 1220, name = 'jikai-report' } = {}) {
-    const r = await window.jikai?.reportExport?.({ kind, html, width, name });
+  /**
+   * `scale` 是导出倍率：`0` / 不传表示跟随屏幕（主进程读 devicePixelRatio），
+   * 其余是固定档。浏览器壳用不上（它压根不支持长图导出）。
+   */
+  async reportExport({ kind = 'pdf', html = '', width = 1220, name = 'jikai-report', scale = 0 } = {}) {
+    const r = await window.jikai?.reportExport?.({ kind, html, width, name, scale });
     if (!r) return unsupported('长图导出', '主进程没有提供导出通道（preload 没更新？）');
     return r;
   },

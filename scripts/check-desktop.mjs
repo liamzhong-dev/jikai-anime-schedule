@@ -55,7 +55,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { builtinItems } from '../src/data/builtin/index.js';
 import { REPORT_WIDTH } from '../src/core/report.js';
 import { matchLibrary, parseYucPage, slimYuc } from '../src/data/yuc.js';
@@ -65,6 +65,12 @@ import { closeRunningApp } from './lib/killapp.mjs';
 const root = process.cwd();
 const dist = path.join(root, 'dist');
 const arg = (name, fallback) => (process.argv.find((a) => a.startsWith(`--${name}=`)) ?? '').split('=')[1] || fallback;
+
+/*
+ * ⚠️ `warnings` 必须定义在**起 Electron 进程之前**：给自检档案补封面那一步
+ * （见下面 `exportpng` 那段）在那时就要往里写话了。
+ */
+const warnings = [];
 
 const view = arg('view', 'tier');
 const wait = arg('wait', '6000');
@@ -574,6 +580,34 @@ if (profile) {
   env.JIKAI_USERDATA = profileDir;
 
   /*
+   * 导出那条用例必须在**封面已缓存**的档案上跑，所以这里先补图。
+   *
+   * 这不是可选的辅助步骤：上面第一步就把整个档案目录删干净重建了，
+   * 封面缓存跟着一起没了，而报告页在封面没到位时会**自己把导出按钮置灰**
+   * （怕导出到一半图还没来）。于是这条用例把自己按死了，报的却是
+   * 「按钮是灰的」—— 看上去像导出功能坏了，其实是环境空了。
+   *
+   * 更坏的是另一层：一份没图的报告里 `missing` **永远等于 0**，
+   * 那条「导出不缺封面」的断言会空转。绿灯 + 什么都没验，比红灯糟多了。
+   */
+  if (exportpng) {
+    /*
+     * 直接**同进程**调用，不起子进程：spawn 那版在 `check:all` 里失败过，
+     * 而且 stdout / stderr 双双为空 —— 连「为什么退出的」都拿不到，
+     * 只剩一句「补封面失败」。同进程跑的话异常自带堆栈，指得到地方。
+     */
+    const { seedReportCovers } = await import('./seed-report-covers.mjs');
+    try {
+      const seeded = await seedReportCovers({ season, profile: profileDir, quiet: true });
+      // 合成图那句一定要摆出来：不然「清晰度」那栏数字会被当成真封面读
+      for (const line of seeded.lines) warnings.push(line);
+    } catch (err) {
+      console.error(`✗ 给自检档案补封面失败：${err?.stack ?? err?.message ?? String(err)}`);
+      process.exit(1);
+    }
+  }
+
+  /*
    * 「再试一次」那一路要从**降级态**起步，先往这份档案里写一个 degrade:true。
    * 不写的话这一次本来就是硬件加速，「清掉标记」根本无从验起 ——
    * 那种自检会是绿的，因为压根没有任何东西需要被清掉。
@@ -720,7 +754,6 @@ try {
 }
 
 const failures = [];
-const warnings = [];
 const check = (ok, msg) => { if (!ok) failures.push(msg); };
 
 /*
@@ -769,12 +802,34 @@ let vpFrames = null;
 /** 导出长图：主进程点按钮、等产物、再把 PNG 头读回来，走独立一行 */
 let exportReport = null;
 {
-  const line = output.out.split(/\r?\n/).find((l) => l.trim().startsWith('SMOKE_EXPORT'));
+  /*
+   * ⚠️ 必须按**整词**匹配。
+   *
+   * 后来加的回执行叫 `SMOKE_EXPORTIMG`，它是 `SMOKE_EXPORT` 的**前缀** ——
+   * 用 startsWith('SMOKE_EXPORT') 会把那一行先捡走（它在导出过程中就打出来了，
+   * 排在探针回执前面）。解析还不报错：JSON.parse 照样成功，只是字段全是 undefined，
+   * 于是报出来的全是「找不到导出按钮」「产物 undefined 字节」这种看着像功能坏了的话，
+   * 半点线索都不指向这里。
+   */
+  const line = output.out.split(/\r?\n/).find((l) => /^SMOKE_EXPORT\s/.test(l.trim()));
   if (line) {
     try {
       exportReport = JSON.parse(line.slice(line.indexOf('{')));
     } catch {
       exportReport = { parseError: line.slice(0, 200) };
+    }
+  }
+}
+
+/** 导出前那张「封面体检表」：缺图既不报错也不改文件大小，只有这张表说得清 */
+let exportImageReport = null;
+{
+  const line = output.out.split(/\r?\n/).find((l) => /^SMOKE_EXPORTIMG\s/.test(l.trim()));
+  if (line) {
+    try {
+      exportImageReport = JSON.parse(line.slice(line.indexOf('{')));
+    } catch {
+      exportImageReport = { parseError: line.slice(0, 200) };
     }
   }
 }
@@ -1514,6 +1569,35 @@ if (exportpng) {
         );
       }
     }
+    /*
+     * ---- 导出里的封面一张都不能少 ----
+     *
+     * ⚠️ 这条**必须先看 total 是不是 0**：一份连图都没有的报告，`missing` 永远是 0，
+     * 断言会空转 —— 绿着，却什么也没验到。所以先拿「这一页确实有封面」
+     * 把前提钉住（`reportCoverSizes.total` 是界面上数出来的）。
+     *
+     * 为什么要单列一条：掉封面既不报错也不改文件大小，掉一半的封面照样是张
+     * 合法 PNG，体积差一点也落在噪音里 —— 文件层面完全看不出来。
+     */
+    const im = exportImageReport;
+    check(!!im && !im.parseError, `没拿到导出封面体检回执（SMOKE_EXPORTIMG）${traceTail()}`);
+    if (im && !im.parseError) {
+      check(
+        Number(im.total) > 0,
+        `导出页里一张封面都没有（${JSON.stringify(im)}）—— 这条断言会空转，等于没验${traceTail()}`,
+      );
+      check(
+        Number(im.missing) === 0,
+        `导出丢了 ${im.missing} 张封面（共 ${im.total} 张）—— 成品上就是几个空位，且不报错${traceTail()}`,
+      );
+      const seen = Number(report?.reportCoverSizes?.total ?? 0);
+      if (seen > 0) {
+        check(
+          Number(im.total) === seen,
+          `导出页里只有 ${im.total} 张封面，界面上是 ${seen} 张 —— 有一批根本没进导出 HTML${traceTail()}`,
+        );
+      }
+    }
   }
 }
 
@@ -1608,6 +1692,24 @@ if (view === 'report') {
     + ` · ${report.reportBlocks} 块（其中封面墙 ${report.reportWallTiles} 张）· 素材 ${report.reportPool} 部`,
   );
   console.log(`  封面：缓存 ${report.coverCache} · 直连 ${report.coverRemote}（必须为 0）· 色块 ${report.coverNone}`);
+  /*
+   * 画布上那批封面**实际多大**。这条是给「图糊」守的：
+   * 奖项封面铺 300px 的时候，喂 150px 的缩略图就是糊的，而截图看不出差别。
+   * 门槛 300 是因为奖项那个坑位就是 300px —— 小于它的必然是缩略图那档。
+   *
+   * ⚠️ 不写成硬断言：这条自检的封面是**离线种子**，而原图那一档要联网才有，
+   * 离线环境下 sharp=0 是正常的（那时走的是缩略图退路）。
+   * 所以只把数字摆出来，让「明明有原图却在用缩略图」这种情况一眼看得见。
+   */
+  const cs = report.reportCoverSizes;
+  if (cs) {
+    console.log(
+      `  封面清晰度：画布上 ${cs.total} 张 · 原图档(≥300px) ${cs.sharp} · 缩略图档 ${cs.thumb} · 最大 ${cs.maxW}px`,
+    );
+    if (cs.total > 0 && cs.sharp === 0) {
+      console.log('    （离线种子环境取不到原图，走的是缩略图退路 —— 联网时这里应当出现原图档）');
+    }
+  }
   // 打出来是因为「缩没缩」在截图里看不出来 —— 一张缩过的长图和一张原尺寸的，
   // 缩略图级别看上去都是「一块有内容的画布」。只有数字能证明它真的缩了。
   console.log(`  画布缩放：${report.reportZoomPct}%（倍率 ${report.reportZoom}）· 横向溢出 ${report.reportOverflowX}px（应为 0）`);
@@ -1619,6 +1721,10 @@ if (exportpng && exportReport && !exportReport.parseError) {
     + (e.png ? ` · 图 ${e.png.w}×${e.png.h}` : '')
     + (noslice ? ' · 走的分片退路' : ''),
   );
+  const im = exportImageReport;
+  if (im && !im.parseError) {
+    console.log(`  导出封面：共 ${im.total} 张 · 缺 ${im.missing}（必须为 0）`);
+  }
 }
 if (view === 'history') {
   console.log(

@@ -81,21 +81,30 @@ function writeTempHtml(html, tag) {
  * `did-finish-load` 只保证 DOM 到位，`<img>` 里的 dataURL 是异步解码的 ——
  * 不等的话会导出一片空框，而且**偶发**：图小的时候看不出来，图大了必现。
  */
-async function waitForImages(win) {
+/**
+ * 等图真的解码完。
+ *
+ * `did-finish-load` 只保证 DOM 到位，`<img>` 里的 dataURL 是异步解码的 ——
+ * 不等的话会导出一片空框。
+ *
+ * @returns {Promise<{total:number, ok:number, missing:number, rounds:number}>}
+ *   `missing` 是最终仍没解码出来的张数。**调用方拿它决定能不能截图**，
+ *   不要只看「没抛异常」—— 缺图不报错，只在成品上少几张封面。
+ */
+async function waitForImages(win, { tag = '', settle = true } = {}) {
   /*
    * ⚠️ 下面每一步都套了超时 —— 这不是保险起见，是踩出来的：
    *
    * `img.decode()` 会**永远不 settle**（既不 resolve 也不 reject）。图没开始加载时
    * 它就一直挂着，而 `Promise.all` 于是永远 pending，`executeJavaScript` 也就
    * 永远不返回 —— 导出静静地卡在「准备导出页面」，界面上只有一个不动的进度条。
-   * 自检里那份最小报告**一张图都没有**，所以这条路径从来没被走到过。
    *
    * 超时之后不视为失败：图没解码完最多是导出图里少几张封面，
    * 而卡住是「这个功能整个不能用」，两害相权很清楚。
    */
-  const race = (p, ms, tag) => Promise.race([p, wait(ms).then(() => `timeout(${tag})`)]);
-  const run = (js, ms, tag) =>
-    race(win.webContents.executeJavaScript(js).catch((e) => `throw:${e?.message ?? e}`), ms, tag);
+  const race = (p, ms, what) => Promise.race([p, wait(ms).then(() => `timeout(${what})`)]);
+  const run = (js, ms, what) =>
+    race(win.webContents.executeJavaScript(js).catch((e) => `throw:${e?.message ?? e}`), ms, what);
 
   /*
    * 封面在界面里是**懒加载**的（`Cover` 上写着 loading="lazy"）。
@@ -113,60 +122,86 @@ async function waitForImages(win) {
     6000,
     'wake',
   );
-  mark(`叫起懒加载的图：${woken}`);
+  mark(`${tag}叫起懒加载的图：${woken}`);
 
   /*
-   * 等它们真的解码完：轮询「已经解码出来的张数」，不再增长就认为到位。
+   * 等它们真的解码完。这里连着两个坑，第二个更难发现：
    *
-   * 不用 `Promise.all(decode())` —— 它会**永远不 settle**（既不 resolve 也不 reject），
-   * `executeJavaScript` 于是永远不返回，导出静静地停在「准备导出页面」，
-   * 界面上只剩一个不动的进度条。而自检喂的那份最小报告一张图都没有，
-   * 所以这条路径从来没被走到过。
+   * ① 不能用 `Promise.all(decode())` —— 它会**永远不 settle**，
+   *    `executeJavaScript` 于是永远不返回，导出静静地停在「准备导出页面」。
+   *
+   * ② 「连着两次数量没变就认为到位」这个判据在**大图**上是错的。
+   *    报告现在喂的是封面原图那一档，单张几 MB 的 base64 解码要一两秒；
+   *    这段时间里「已解码张数」是一个**平台期**（停在 3 张不动，其实还有 4 张在途中），
+   *    平台期只要撑过两拍就被当成「不会再多了」—— 于是成品少几张封面，
+   *    **而且偶发**：机器快一点就赶上了，慢一点就掉图。肉眼形式的症状是
+   *    「有时候导出好着呢」，永远对不到读一遍或多等一会儿上来。
+   *
+   * 所以改成：**全齐才算数**；实在等不齐，也要连续 8 拍（约 4 秒）纹丝不动才认输。
+   * 每拍同时把 total 一起读回来 —— 只拿 ok 张数的话，「一张图都没有」
+   * 和「全解码完了」都是 0 变化，判据会空转。
    */
-  let ready = -1;
+  let snap = { total: 0, ok: 0 };
+  let prev = -1;
   let stable = 0;
-  const deadline = Date.now() + 30000;
+  let rounds = 0;
+  const deadline = Date.now() + 40000;
   while (Date.now() < deadline) {
-    const n = await run(
-      `[...document.images].filter((i) => i.complete && i.naturalWidth > 0).length`,
+    const s = await run(
+      `(() => { const imgs = [...document.images];
+         return { total: imgs.length,
+                  ok: imgs.filter((i) => i.complete && i.naturalWidth > 0).length }; })()`,
       5000,
       'poll',
     );
-    if (typeof n === 'number') {
-      if (n === ready) {
-        stable += 1;
-        // 连着两次一样就认为不会再多了；给两次是为了躲开「刚好这一拍没变化」
-        if (stable >= 2) break;
-      } else {
-        stable = 0;
-        ready = n;
-      }
+    rounds += 1;
+    if (s && typeof s.ok === 'number') {
+      snap = s;
+      if (s.total > 0 && s.ok >= s.total) break;
+      if (s.ok === prev) stable += 1;
+      else { stable = 0; prev = s.ok; }
+      if (stable >= 8 && rounds >= 3) break;
     }
     await wait(400);
   }
-  mark(`等图：解码出 ${ready} 张`);
+  const missing = Math.max(0, snap.total - snap.ok);
+  mark(`${tag}等图：${snap.ok}/${snap.total}（缺 ${missing}）· ${rounds} 拍`);
 
-  // 字体和布局落定
-  const fonts = await race(
-    win.webContents.executeJavaScript('document.fonts ? document.fonts.ready.then(() => true) : true').catch(() => false),
-    5000,
-    'fonts',
-  );
-  mark(`等字体：${fonts}`);
+  // 缺图时才再多花一步 —— 全齐的时候不去打扰字体那些查询，白加一次 IPC 往返
+  if (missing > 0 || settle) {
+    // 字体和布局落定
+    const fonts = await race(
+      win.webContents.executeJavaScript('document.fonts ? document.fonts.ready.then(() => true) : true').catch(() => false),
+      5000,
+      'fonts',
+    );
+    mark(`${tag}等字体：${fonts}`);
 
-  // 不管上面等没等到，都如实报一下每张图的状态 —— 「导出图里空了几块」靠这个定位
-  const state = await race(
-    win.webContents
-      .executeJavaScript(
-        `[...document.images].map((i) => (i.complete ? (i.naturalWidth > 0 ? 'ok' : 'empty') : 'pending')).join(',')`,
-      )
-      .catch(() => 'throw'),
-    4000,
-    'state',
-  );
-  mark(`图状态：${state}`);
+    if (missing > 0) {
+      // 如实报一下每张图的状态 —— 「导出图里空了几块」靠这个定位
+      const state = await race(
+        win.webContents
+          .executeJavaScript(
+            `[...document.images].map((i) => (i.complete ? (i.naturalWidth > 0 ? 'ok' : 'empty') : 'pending')).join(',')`,
+          )
+          .catch(() => 'throw'),
+        4000,
+        'state',
+      );
+      mark(`${tag}图状态：${state}`);
+    }
 
-  await wait(220);
+    await wait(220);
+  }
+
+  return { total: snap.total, ok: snap.ok, missing, rounds };
+}
+
+/** 给外面看的那种形态：只留三个数，别把内部轮询的细节漏出去 */
+function imageAudit(a) {
+  const total = Number(a?.total) || 0;
+  const ok = Math.min(total, Number(a?.ok) || 0);
+  return { total, ok, missing: Math.max(0, total - ok) };
 }
 
 /** 内容高度：画布自己的高度，不是 document 的（body 可能有额外外边距） */
@@ -221,9 +256,9 @@ async function openHidden({ html, width, height, offscreen, tag, largerThanScree
   mark(`openHidden(${tag}) 建窗口 offscreen=${offscreen} larger=${largerThanScreen} ${width}x${height}`);
   await win.loadFile(file);
   mark(`openHidden(${tag}) loadFile 完成`);
-  await waitForImages(win);
+  const images = await waitForImages(win, { tag: `[${tag}] ` });
   mark(`openHidden(${tag}) 等图完成`);
-  return { win, file };
+  return { win, file, images };
 }
 
 function cleanup(win, file) {
@@ -240,7 +275,7 @@ function cleanup(win, file) {
  * @returns {Promise<{buffer:Buffer, width:number, height:number, contentHeight:number}>}
  */
 async function renderPdf({ html, width }) {
-  const { win, file } = await openHidden({ html, width, height: 1000, offscreen: false, tag: 'pdf' });
+  const { win, file, images: firstPass } = await openHidden({ html, width, height: 1000, offscreen: false, tag: 'pdf' });
   try {
     const contentH = await canvasHeight(win);
     if (!contentH) throw new Error('打印窗口里没找到画布（.report__canvas）');
@@ -253,15 +288,50 @@ async function renderPdf({ html, width }) {
          document.head.appendChild(s); return true; })()`,
     );
 
+    /*
+     * 打印之前再看一眼图。
+     *
+     * `openHidden` 里已经等过一轮，但那是在窗口只有 1000 高的时候；
+     * 注入 `@page`、量完高度之后，之前没进过视口的图层有可能还没解码完
+     * （大图偶发掉几张就是这么来的）。这里是**同一份数字**的第二遍，
+     * 成本几乎为零（全齐时一轮就返回），换来的是「打印时的状态」是被确认过的。
+     */
+    const finalImages = await waitForImages(win, { tag: '[pdf] ', settle: false });
+    mark(`打印前图：${finalImages.ok}/${finalImages.total}（缺 ${finalImages.missing}）`
+      + (firstPass.missing > 0 ? ` · 首轮缺 ${firstPass.missing} 张` : ''));
+
     const buffer = await win.webContents.printToPDF({
       printBackground: true,
       preferCSSPageSize: true,
       margins: { marginType: 'none' },
     });
-    return { buffer, width: Math.round(width), height: pageH, contentHeight: contentH };
+    return {
+      buffer,
+      width: Math.round(width),
+      height: pageH,
+      contentHeight: contentH,
+      images: imageAudit(finalImages),
+    };
   } finally {
     cleanup(win, file);
   }
+}
+
+/**
+ * PNG 那份结果的尺寸。
+ *
+ * ⚠️ `width` / `height` 报的是**物理像素**（= 画布 × 倍率），不是 CSS 像素。
+ * 早先报的是 CSS 那一份，界面于是显示「1220×1431」，而用户拿到的文件其实是
+ * 1830×2147 —— 他照着界面上的数字去对，怎么都对不上，只能以为导出的图不对。
+ * CSS 那一份没丢，挪到 `cssWidth` / `cssHeight`。
+ */
+function pngMetrics({ width, contentH, scale }) {
+  return {
+    width: Math.round(width * scale),
+    height: Math.round(contentH * scale),
+    cssWidth: Math.round(width),
+    cssHeight: Math.round(contentH),
+  };
 }
 
 /**
@@ -281,9 +351,11 @@ async function renderPdf({ html, width }) {
  * 判定 ① 成不成立的依据是**截出来的高度**，不是「有没有报错」：
  * 被钳住时它不抛异常，只是悄悄给你一张 1019 高的半张图。
  *
- * @param {{html:string, width:number, onProgress?:Function}} opts
+ * @param {{html:string, width:number, onProgress?:Function, scale?:number}} opts
+ *   `scale` 是用户挑的固定倍率；`0` / 不传表示跟随 `window.devicePixelRatio`。
+ *   ⚠️ 它只决定「用多少物理像素装这张画布」—— 图本身不够大时，调高它不会多出细节。
  */
-async function renderPng({ html, width, onProgress }) {
+async function renderPng({ html, width, onProgress, scale: scaleWanted = 0 }) {
   const report = (pct, label) => {
     if (typeof onProgress !== 'function') return;
     try {
@@ -308,6 +380,8 @@ async function renderPng({ html, width, onProgress }) {
   let scale = 1;
   let degraded = false;
   let wantW = 0;
+  // 「导出图里到底有几张封面」—— 缺图不报错，所以这个得一路带到返回值里给自检当判据
+  let images = null;
 
   /*
    * ⚠️ 不用离屏窗口（offscreen）。
@@ -321,7 +395,7 @@ async function renderPng({ html, width, onProgress }) {
    * 用普通隐藏窗口（show:false + paintWhenInitiallyHidden），图片正常走加载流程。
    * 代价是可能带滚动条，下面注入的隐藏滚动条样式就是为这个准备的。
    */
-  const { win, file } = await openHidden({
+  const hidden = await openHidden({
     html,
     width: width + GUTTER,
     height: 1000,
@@ -329,6 +403,8 @@ async function renderPng({ html, width, onProgress }) {
     tag: 'png',
     largerThanScreen: true,
   });
+  const { win, file } = hidden;
+  images = imageAudit(hidden.images);
   try {
     const wc = win.webContents;
     /*
@@ -350,7 +426,11 @@ async function renderPng({ html, width, onProgress }) {
     if (!contentH) throw new Error('离屏窗口里没找到画布（.report__canvas）');
     mark(`内容高 ${contentH}px`);
 
-    dpr = Number(await wc.executeJavaScript('window.devicePixelRatio')) || 1;
+    const screenDpr = Number(await wc.executeJavaScript('window.devicePixelRatio')) || 1;
+    // 用户挑了固定档就听他的，否则跟着屏幕走。
+    // ⚠️ 用固定档的意义：同一份报告换一台 100% 缩放的机器导出，清晰度不该变。
+    dpr = scaleWanted > 0 ? scaleWanted : screenDpr;
+    mark(`倍率 ${dpr}x${scaleWanted > 0 ? '（用户指定）' : `（跟随屏幕 ${screenDpr}）`}`);
 
     // 超长时把输出比例降下来，并如实带回去 —— 直接撞上限的话
     // `toDataURL()` **不抛错、只给一张空图**，那才是最难查的
@@ -398,6 +478,16 @@ async function renderPng({ html, width, onProgress }) {
           innerH = Number(await wc.executeJavaScript('window.innerHeight')) || 0;
         }
         mark(`① innerHeight=${innerH}（要 ${contentH}）`);
+        /*
+         * 拍之前再看一眼图 —— 这一遍不是多余的。
+         *
+         * 上面刚把窗口从 1000 拉到了内容高度（可能好几千），原先在视口外、
+         * 从没真正光栅化过的那些图层这时候才第一次被要求画出来；
+         * 之前 `openHidden` 里那轮「loadFile 之后」的等待遇不到它们。
+         * 大报告偶发少几张封面就是差这一遍。全齐时它一轮就返回，几乎不花时间。
+         */
+        images = await waitForImages(win, { tag: '[png①] ', settle: false });
+        mark(`① 拍之前图：${images.ok}/${images.total}（缺 ${images.missing}）`);
         const img = await wc.capturePage();
         mark(`① capturePage 完成`);
         const size = img.getSize(); // JPEG 出来也是同样的像素尺寸，判据不变
@@ -410,12 +500,12 @@ async function renderPng({ html, width, onProgress }) {
             : img.crop({ x: 0, y: 0, width: Math.min(wantW, size.width), height: Math.min(wantH, size.height) });
           return {
             buffer: out.toPNG(),
-            width: Math.round(width),
-            height: contentH,
+            ...pngMetrics({ width, contentH, scale }),
             scale,
             degraded,
             slices: 1,
             mode: 'single',
+            images: imageAudit(images),
           };
         }
       } catch (e) {
@@ -453,13 +543,15 @@ async function sliceShot({ html, width, contentH, dpr, scale, degraded, report, 
    * 普通隐藏窗口（show:false + paintWhenInitiallyHidden）滚动后能正常出帧。
    */
   mark(`② 分片：另开窗口 ${width + GUTTER}x1000`);
-  const { win, file } = await openHidden({
+  const hidden = await openHidden({
     html,
     width: width + GUTTER,
     height: 1000,
     offscreen: false,
     tag: 'png-slice',
   });
+  const { win, file } = hidden;
+  let images = imageAudit(hidden.images);
   try {
     const wc = win.webContents;
     await wc
@@ -480,6 +572,9 @@ async function sliceShot({ html, width, contentH, dpr, scale, degraded, report, 
     const wantW = Number(wantWIn) > 0 ? Math.round(wantWIn) : Math.round(width * scale);
     const slices = Math.max(1, Math.ceil(contentH / viewH));
     report(0.35, `分 ${slices} 片截图`);
+    // 拼之前再确认一次：这条退路不是罕见情况，缺图在这里同样会静悄悄掉几张
+    images = await waitForImages(win, { tag: '[png②] ', settle: false });
+    mark(`② 拼之前图：${images.ok}/${images.total}（缺 ${images.missing}）`);
     await wc.executeJavaScript(
       `(() => { const c = document.createElement('canvas');
          c.width = Math.round(${Math.round(width)} * ${scale});
@@ -538,12 +633,12 @@ async function sliceShot({ html, width, contentH, dpr, scale, degraded, report, 
     const m = /^data:image\/png;base64,(.*)$/s.exec(dataUrl);
     return {
       buffer: Buffer.from(m[1], 'base64'),
-      width: Math.round(width),
-      height: contentH,
+      ...pngMetrics({ width, contentH, scale }),
       scale,
       degraded,
       slices: drawn,
       mode: 'sliced',
+      images: imageAudit(images),
     };
   } finally {
     cleanup(win, file);

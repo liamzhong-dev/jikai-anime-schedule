@@ -29,7 +29,7 @@ import {
   isFollowing, removeCatchup, toggleFollow, unfollow, writeSeasonCache,
   ensureTierlist, patchTierlist, resetTierlist,
   addDiaryEntry, removeDiaryEntry, readDiary, myRatingOf, readLatestRated, readDiaryOf,
-  ensureReport, setReportBlocks, resetReport,
+  ensureReport, setReportBlocks, resetReport, patchReport,
   exportableState, importState,
 } from './core/store.js';
 import { compareToBangumi } from './core/diary.js';
@@ -41,8 +41,11 @@ import { collectImages, exportTierlistPng } from './core/tierExport.js';
 import {
   WALL_DEFAULT_COUNT, WALL_MAX,
   addBlock, autoWallSubjects, blockById, makeBlock, moveBlock, nextBlockId, patchBlock, removeBlock,
+  reportExportScale,
 } from './core/report.js';
 import { buildReportHtml, canvasHtmlOf, collectStyles } from './core/reportHtml.js';
+import { useCustomImages } from './core/useCustomImages.js';
+import { customAnimeList, fileOfCustomKey, isCustomKey } from './core/customImages.js';
 import { coverScaleFromCardMin } from './core/layout.js';
 import { COVER_SCALE_OUT, FONT_SCALE_OUT, canvasScale, cardMinScaled, mixScale, spacingScale, uiScale } from './core/scale.js';
 import CanvasScaleProvider from './components/CanvasScale.jsx';
@@ -883,10 +886,34 @@ export default function App() {
     enabled: Boolean(detailCover),
   });
 
-  // 池子 + 详情那一张。键是条目 id，两边的 id 不可能撞（番堂是 y 开头）
-  const coverImages = useMemo(
-    () => ({ ...poolCovers.images, ...detailCovers.images }),
-    [poolCovers.images, detailCovers.images],
+  /*
+   * 用户自己导入的图（插画、官方视觉图、截图……）。
+   *
+   * 清单（file / name）一进来就全量读；图本体（dataUrl）**用到才读** ——
+   * 一张图的 base64 动辄几百 KB，全灌进内存的话加十来张就开始卡重渲染。
+   */
+  const customImages = useCustomImages({ enabled: true });
+  const customFiles = customImages.meta.map((m) => m.file).join('|');
+
+  // 只有这两页会把图画出来（也才会导出它），其余视图不读，白占内存而已
+  useEffect(() => {
+    if (view !== 'report' && view !== 'tier') return;
+    customImages.ensure(customImages.meta.map((m) => m.file));
+    // customFiles 是清单的内容指纹：加图 / 删图会变，其余时候引用稳定，不会反复读
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, customFiles]);
+
+  /*
+   * 池子 + 详情那一张。键是条目 id，两边的 id 不可能撞（番堂是 y 开头）
+   * 自定义图的键是 `img:<file>`，同样撞不上，所以可以直接并进同一张表。
+   *
+   * 这里叫 base 是因为它**不含**报告那批原图 —— 原图要等 report 读出来才知道
+   * 该取哪几张，而 report 定义在下面（1460 行附近）。最终给出去的那张表在
+   * `reportHiCovers` 之后才合成，名字仍是 `coverImages`。
+   */
+  const baseCoverImages = useMemo(
+    () => ({ ...poolCovers.images, ...detailCovers.images, ...customImages.imagesByKey }),
+    [poolCovers.images, detailCovers.images, customImages.imagesByKey],
   );
   const yucMatched = useMemo(() => matchLibrary(yucItems, season), [yucItems, season]);
 
@@ -908,6 +935,17 @@ export default function App() {
     else toggleFollow(lib.id, { notify: true, airHint: hint });
   }, [st.following]);
 
+
+  /*
+   * Tier 的素材池 = 自定义图 + 本季番剧。
+   *
+   * 自定义图排在前面：它通常只有几张，而番剧有几十部 ——
+   * 「我刚加的那张图去哪了」比「番剧按什么顺序排」更常被问到。
+   */
+  const tierPool = useMemo(
+    () => [...customAnimeList(customImages.meta, customImages.data), ...season],
+    [customImages.meta, customImages.data, season],
+  );
 
   const handleAutoRank = useCallback(() => {
     const { items, ranked, unranked } = autoRankByScore(tierlist.items, season, tierlist.rows);
@@ -935,7 +973,8 @@ export default function App() {
     setTierNote('');
     try {
       const byId = new Map(season.map((a) => [String(a.id), a]));
-      const entries = tierlist.items.map((it) => {
+      // 自定义图不走「按 url 取封面」那条路：它的本体就在本地，下面直接并进 images
+      const entries = tierlist.items.filter((it) => !isCustomKey(it.key)).map((it) => {
         const a = byId.get(String(it.key));
         // 导出要原图：这里是唯一会去取 `l` 的地方。
         // 同时备一份 `c`（平时浏览缓存下来的那一档）当退路 ——
@@ -978,6 +1017,17 @@ export default function App() {
         },
       });
 
+      // 自定义图：dataUrl 已经在本地了（进这一页时读过），直接塞进同一张表。
+      // 读不出来的（图被删了）也要算进 missing —— 静默少一格的话，
+      // 用户会以为自己没排过这部。
+      const customName = new Map(customImages.meta.map((m) => [m.file, m.name]));
+      for (const it of tierlist.items) {
+        if (!isCustomKey(it.key)) continue;
+        const url = customImages.data[fileOfCustomKey(it.key)];
+        if (url) images.set(String(it.key), url);
+        else missing.push(String(it.key));
+      }
+
       if (!images.size && !tierlist.items.length) {
         pushToast('还没排过', '先把番剧拖进档位再导出');
         setTierExporting(false);
@@ -992,6 +1042,11 @@ export default function App() {
         title: `${seasonLabel(seasonKey)} Tier List`,
         subtitle: `共 ${tierlist.items.length} 部 · 次回 jikai`,
         metaOf: (key) => {
+          if (isCustomKey(key)) {
+            // 自定义图没有「作品名」，用导入时的名字；没有就给个占位让它不至于空着
+            const name = customName.get(fileOfCustomKey(key)) || '自定义图片';
+            return { name, seed: name };
+          }
           const a = byId.get(String(key));
           const name = a?.titleZh || a?.titleJa || '';
           return { name, seed: name || key };
@@ -1018,7 +1073,7 @@ export default function App() {
     } finally {
       setTierExporting(false);
     }
-  }, [seasonKey, tierlist, season, pushToast]);
+  }, [seasonKey, tierlist, season, customImages.meta, customImages.data, pushToast]);
 
   const handleExportPresets = useCallback(async () => {
     const payload = exportLayoutPresets();
@@ -1423,23 +1478,107 @@ export default function App() {
    * 门槛必须按**报告自己用到的**算，不能拿整季去算：整季 82 部里总有几张
    * 还没缓存，那样每一份报告都会被判成「缺图」而永远导不出去。
    */
-  const reportCoverEntries = useMemo(() => {
+  /**
+   * 报告用的「id ⟶ 条目」：番剧走档案，自定义图走假条目。
+   *
+   * 合成一个 lookup 是有意的 —— 报告里画封面墙、画奖项的那一层（`ReportBlock`）
+   * 只认「给个 key，回一条条目」。让它也知道「有第二种素材」，
+   * 就等于在两处各写一个分支，而只改一处时症状是「自定义图那一格莫名是空的」。
+   *
+   * ⚠️ 必须自己接住 `img:` 前缀：`diaryLookup` 是按数字 id 查的，
+   * 拿到 `img:xxx` 只会给一个 `__missing` 占位条目。
+   */
+  const reportLookup = useMemo(() => {
+    const custom = new Map(
+      customAnimeList(customImages.meta, customImages.data).map((a) => [String(a.id), a]),
+    );
+    return (key) => {
+      const k = String(key ?? '');
+      if (custom.has(k)) return custom.get(k);
+      return diaryLookup(k);
+    };
+  }, [diaryLookup, customImages.meta, customImages.data]);
+
+  /**
+   * 报告里真正用到的作品 id（封面墙 + 奖项关联的）。
+   *
+   * 抽成一个 useMemo 是因为下面有**两处**要用它：一处算缺图（用缩略图那档），
+   * 一处去取原图（用 `l` 档）。两处的条目集合必须完全一致 —— 各收一遍的话，
+   * 哪天奖项又多一种挂图方式，就会算出两个不同的集合，
+   * 症状是「统计说图够了、画出来却少一张」，而且看不出是集合不一致。
+   */
+  const reportUsedIds = useMemo(() => {
     const ids = new Set();
     for (const b of report?.blocks ?? []) {
-      if (b.type === 'wall') for (const id of b.subjectIds) ids.add(id);
+      if (b.type === 'wall') for (const id of b.subjectIds ?? []) ids.add(id);
       if (b.type === 'award' && b.subjectId) ids.add(b.subjectId);
     }
-    return [...ids].map((key) => {
-      const a = diaryLookup(key);
-      return { key, url: a?.cover ? coverVariant(a.cover, DISPLAY_VARIANT).url : '' };
-    });
-  }, [report, diaryLookup]);
+    return [...ids];
+  }, [report]);
+
+  const seasonById = useMemo(() => new Map(season.map((a) => [String(a.id), a])), [season]);
+
+  /*
+   * 报告**专用**的一份原图（`l` 档）。
+   *
+   * 为什么只为报告单独取：界面上别处（卡片、追番、番堂）的图块只有 100~200px，
+   * 用缩略图那档（150×212）刚好够；但报告里的奖项封面要铺 300px，导出再乘倍率，
+   * 等于把 150px 的图放大三倍 —— 这才是「奖项图发糊」的根因，
+   * 跟导出倍率没关系：倍率再高也只是把糊图放得更大。
+   *
+   * 代价可控：只取**报告里实际用到的**那些条目（通常二三十张），
+   * 不是整季 82 张（整季原图约 45 MB，缩略图才约 2.6 MB）。
+   *
+   * ⚠️ 断网时这一路一张都拿不到，`images` 里就没有那些键 ——
+   * 于是下面合并时自然落到池子里那张缩略图上。**退路是这个覆盖顺序自带的**，
+   * 不用再写一遍「取不到就用缩略图」。
+   */
+  const reportHiEntries = useMemo(
+    () => coverEntries(
+      reportUsedIds.map((id) => seasonById.get(String(id))).filter((a) => a?.cover),
+      EXPORT_VARIANT,
+    ),
+    [reportUsedIds, seasonById],
+  );
+
+  const reportHiCovers = useCovers({
+    group: seasonKey,
+    entries: reportHiEntries,
+    enabled: view === 'report' && reportHiEntries.length > 0,
+  });
+
+  const coverImages = useMemo(
+    () => ({ ...baseCoverImages, ...reportHiCovers.images }),
+    [baseCoverImages, reportHiCovers.images],
+  );
+
+  const reportCoverEntries = useMemo(
+    () => reportUsedIds
+      // 自定义图的本体就在本地（dataUrl），不需要去缓存里找，也不该算进「缺图」
+      .filter((key) => !isCustomKey(key))
+      .map((key) => {
+        const a = diaryLookup(key);
+        return { key, url: a?.cover ? coverVariant(a.cover, DISPLAY_VARIANT).url : '' };
+      }),
+    [reportUsedIds, diaryLookup],
+  );
 
   // 没有封面地址的作品（查不到的条目）本来就不该算进缺图 —— 它们画出来就是占位块，
   // 跟「有地址但没缓存下来」是两回事。
+  /*
+   * 「还有几张封面没到位」—— 按**画布真正用来渲染的那张表**算。
+   *
+   * ⚠️ 早先这里算的是 `poolCovers`（界面上那些缩略图）那一池，而报告额外走了一批
+   * 原图（`reportHiCovers`）。两张表不一致时会出两种怪事：
+   *   ① 原图已经齐了，按钮还灰着 —— 看着像「导出功能坏了」；
+   *   ② 反过来更糟：缩略图齐了按钮就亮，可导出的是一批糊图，
+   *      而用户以为那就是他要的高清。这正是「奖项图糊」能以成品形式漏出去的原因。
+   *
+   * 判据应该只有一句：**这一刻画布上会不会有色块**。那就是取并集之后的 `coverImages`。
+   */
   const reportCoverage = useMemo(
-    () => coverCoverage(reportCoverEntries.filter((e) => e.url), poolCovers.images),
-    [reportCoverEntries, poolCovers.images],
+    () => coverCoverage(reportCoverEntries.filter((e) => e.url), coverImages),
+    [reportCoverEntries, coverImages],
   );
 
   /**
@@ -1455,6 +1594,7 @@ export default function App() {
       header: { title: `${seasonLabel(seasonKey)} 季度报告`, subtitle: `共 ${season.length} 部 · 次回 jikai` },
       wall: { title: '本季封面墙', subjectIds: autoWallSubjects(season, WALL_DEFAULT_COUNT) },
       award: { title: '最佳作画', body: '' },
+      image: { title: '', size: 80 },
       text: { body: '' },
     }[type] ?? {};
     const block = makeBlock(type, { id, ...seed });
@@ -1476,6 +1616,14 @@ export default function App() {
   const handleMoveBlock = useCallback((from, to) => {
     setReportBlocks(seasonKey, moveBlock(report?.blocks ?? [], from, to));
   }, [seasonKey, report]);
+
+  /**
+   * 导出倍率。它不属于任何一块，是这份报告导出那一次的参数 ——
+   * 所以走 `patchReport` 而不是块的 patch。
+   */
+  const handleReportExportScale = useCallback((scale) => {
+    patchReport(seasonKey, { exportScale: scale });
+  }, [seasonKey]);
 
   /**
    * 素材面板点一下 = 进封面墙。
@@ -1503,6 +1651,25 @@ export default function App() {
     setReportBlocks(seasonKey, addBlock(list, block));
     setReportSel(block.id);
   }, [seasonKey, report, pushToast]);
+
+  /*
+   * 加一张自定义图 / 删一张。
+   *
+   * ⚠️ 删除**不检查有没有被引用**：报告里存的是 `img:<file>`，图没了那一格会变空位。
+   * 这事在提示里说清楚就行，不该拦着不让删 —— 用户想删一张图，
+   * 被一句「还被引用着」挡回来是最烦人的。
+   */
+  const handleAddCustomImage = useCallback(async () => {
+    const r = await customImages.add();
+    if (r?.ok) pushToast('图加进来了', '在素材面板里点它就能放进报告');
+    else if (r?.error) pushToast('这张图没加成', r.error);
+  }, [customImages, pushToast]);
+
+  const handleRemoveCustomImage = useCallback(async (file) => {
+    if (!file) return;
+    await customImages.remove(file);
+    pushToast('图删掉了', '报告里用到它的那一格会空出来');
+  }, [customImages, pushToast]);
 
   const handleResetReport = useCallback(() => {
     resetReport(seasonKey);
@@ -1546,7 +1713,15 @@ export default function App() {
         title: `${seasonLabel(seasonKey)} 季度报告`,
       });
 
-      const res = await platform.reportExport({ kind, html, width, name: `jikai-report-${seasonKey}` });
+      const res = await platform.reportExport({
+        kind,
+        html,
+        width,
+        name: `jikai-report-${seasonKey}`,
+        // 倍率从报告上取（`0` = 跟随屏幕）。它能决定「用多少物理像素装这张画布」，
+        // 但**不能**把糊图变清楚 —— 后者靠的是上面那批原图。
+        scale: reportExportScale(report),
+      });
       if (!res?.ok) {
         pushToast('导出失败', res?.error ?? '主进程没给出结果');
         return;
@@ -2063,10 +2238,12 @@ export default function App() {
               <TierListView
                 seasonKey={seasonKey}
                 tierlist={tierlist}
-                pool={season}
-                images={poolCovers.images}
+                pool={tierPool}
+                images={coverImages}
                 coversNote={coversNote}
                 coversRemote={coversRemote}
+                onAddImage={handleAddCustomImage}
+                imageBusy={customImages.busy}
                 onPatch={(patch) => patchTierlist(seasonKey, patch)}
                 onAutoRank={handleAutoRank}
                 onReset={handleResetTier}
@@ -2089,9 +2266,12 @@ export default function App() {
                 seasonKey={seasonKey}
                 seasonLabel={seasonLabel(seasonKey)}
                 pool={season}
-                // 复用日记那份「id ⟶ 条目」：范围是全量内置数据 + 作品档案，
-                // 所以报告里挂上一季的番也查得到；查不到的给占位条目，不返回 null
-                lookup={diaryLookup}
+                // 番剧走档案、自定义图走假条目，合成一个 —— ReportBlock 那边只认 key
+                lookup={reportLookup}
+                customImages={customImages.meta}
+                imageBusy={customImages.busy}
+                onAddImage={handleAddCustomImage}
+                onRemoveImage={handleRemoveCustomImage}
                 coverage={reportCoverage}
                 note={reportNote}
                 exporting={reportExporting}
@@ -2108,6 +2288,8 @@ export default function App() {
                 onExportPdf={() => handleExportReport('pdf')}
                 onExportPng={() => handleExportReport('png')}
                 onReset={handleResetReport}
+                exportScale={reportExportScale(report)}
+                onExportScale={handleReportExportScale}
               />
             </WindowCard>
           )}
