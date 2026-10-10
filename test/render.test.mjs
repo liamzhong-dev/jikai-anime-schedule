@@ -1613,3 +1613,150 @@ test('备份区里有「导出文件包」这个入口，并且忙的时候会�
   assert.ok(idle.includes('从备份导入'), '导入入口被挤掉了');
   assert.ok(idle.includes('导出备份'), '导出备份入口被挤掉了');
 });
+
+/* ── 报告：自定义图片，以及「空的一律不画」 ──────────────────
+ *
+ * 这一组是改版面的直接理由：奖项那张图原来只有 96px、贴在左上角，
+ * 而「（还没写）」这类占位会**原样印进导出图** —— 用户拿到一张写着
+ * 「还没写」的长图，只能自己再去修图。所以这里两条都钉住。
+ */
+
+const IMG_FILE = 'ci-0123456789ab.png';
+const IMG_KEY = `img:${IMG_FILE}`;
+const IMG_URL = 'data:image/png;base64,iVBORw0KGgo=';
+
+/** 番剧走样本、自定义图走假条目 —— 和 App 里 reportLookup 的合成方式一致 */
+const reportLookup = (id) => {
+  if (String(id) === IMG_KEY) {
+    return { id: IMG_KEY, titleZh: '一张插画', cover: IMG_URL, score: 0, __custom: true };
+  }
+  return SAMPLE_ITEMS.find((a) => String(a.id) === String(id))
+    ?? { id: Number(id), titleZh: '', titleJa: `条目 ${id}`, cover: null, __missing: true };
+};
+
+test('报告：图片块按档位居中，图下面标名字', async () => {
+  const blocks = [makeBlock('image', {
+    id: 'b-1', title: '本季视觉图', imageFile: IMG_FILE, caption: '官方主视觉', size: 60,
+  })];
+  const html = await renderReport({ report: reportOf(blocks), lookup: reportLookup, coverage: FULL_COVERAGE });
+  assert.ok(html.includes(`data-report-image-file="${IMG_FILE}"`), '要写明用的是哪张图');
+  assert.ok(html.includes('data-report-image="1"'), '图要真的画出来，而不是留一个空框');
+  assert.ok(html.includes(IMG_URL), 'src 必须是 dataURL —— 导出那份文档和 app 不同源，别的地址进不了产物');
+  assert.ok(html.includes('width:60%'), '宽度档位要落到样式上');
+  assert.ok(html.includes('官方主视觉'), '名字要标出来');
+  assert.ok(html.includes('rb-image__figure'), '走的是居中那一套版式');
+});
+
+test('报告：没挑图的图片块给指路提示，而不是一片空白', async () => {
+  const blocks = [makeBlock('image', { id: 'b-1' })];
+  const html = await renderReport({ report: reportOf(blocks), lookup: reportLookup, coverage: FULL_COVERAGE });
+  assert.ok(html.includes('data-report-image-empty="0"'), '要能读出来「是还没挑图」而不是「图坏了」');
+  assert.ok(html.includes('还没挑图'), '得告诉用户下一步去哪挑');
+});
+
+test('报告：空的一律不画 —— 占位文字会原样印到导出图里', async () => {
+  const blocks = [
+    makeBlock('header', { id: 'b-1' }),
+    makeBlock('text', { id: 'b-2' }),
+    makeBlock('award', { id: 'b-3' }),
+  ];
+  const html = await renderReport({ report: reportOf(blocks), lookup: reportLookup, coverage: FULL_COVERAGE });
+  for (const ph of ['（还没写）', '（没写标题）', '（没写奖项名）']) {
+    assert.ok(!html.includes(ph), `画布上不该出现占位文字 ${ph}`);
+  }
+  // 三块都该标成「空的」：编辑时靠这个给一句指路（那条提示在 body.print 下不显示）
+  assert.equal(countOf(html, 'data-report-blank="1"'), 3, '空的块要标出来');
+});
+
+test('报告：奖项的图居中放大，下面标作品名', async () => {
+  const blocks = [makeBlock('award', {
+    id: 'b-1', title: '最佳作画', body: '线条克制', subjectId: String(A0.id),
+  })];
+  const html = await renderReport({ report: reportOf(blocks), lookup: reportLookup, coverage: FULL_COVERAGE });
+  assert.ok(html.includes('rb-award__figure'), '奖项要走居中那一套');
+  assert.ok(!html.includes('rb-award__row'), '旧的「缩略图贴左边、正文挤右边」那套不该还在');
+  assert.ok(html.includes('rb-award__cap'), '作品名要标在图下面');
+  const name = A0.titleZh || A0.titleJa;
+  assert.ok(html.includes(name), `图下面标的应当是《${name}》`);
+});
+
+test('报告：奖项也能挂自定义图，不是只有库里的番', async () => {
+  const blocks = [makeBlock('award', { id: 'b-1', title: '最佳视觉', imageFile: IMG_FILE })];
+  const html = await renderReport({ report: reportOf(blocks), lookup: reportLookup, coverage: FULL_COVERAGE });
+  assert.ok(html.includes('rb-award__cover'), '自定义图也要画出来');
+  assert.ok(html.includes('一张插画'), '没填 caption 的时候用导入时的名字');
+});
+
+test('报告：素材面板能加自定义图，也能把它删掉', async () => {
+  const html = await renderReport({
+    report: reportOf([]),
+    lookup: reportLookup,
+    customImages: [{ file: IMG_FILE, name: '一张插画', bytes: 2048, addedAt: 1 }],
+    coverage: FULL_COVERAGE,
+  });
+  assert.ok(html.includes('data-report-add-image="1"'), '要有加图的入口');
+  assert.ok(html.includes('data-report-image-count="1"'), '加了几张要数得出来');
+  // 自定义图要**进素材池**：它和番剧走同一条「点一下加进封面墙」的路，
+  // 另开一个入口的话，用户得记住「图片在别的地方加」
+  assert.ok(html.includes(`data-report-pool-item="${IMG_KEY}"`), '自定义图要出现在素材池里');
+  assert.ok(html.includes(`data-report-image-remove="${IMG_FILE}"`), '每一张都要能删掉');
+});
+
+test('Tier List：工具栏有加自定义图片的入口', async () => {
+  const html = await renderTier();
+  assert.ok(html.includes('data-tier-add-image="1"'), 'Tier 这一边也要能加图');
+});
+
+/*
+ * 尺寸与字号那两个档位。
+ *
+ * ⚠️ 这两条断言守的是一件看不见但很要命的事：档位必须进 **inline style**，
+ * 因为导出是抓画布这份 DOM 另存一份 HTML。写成 class 或全局设置的话，
+ * 界面上看着调好了、导出的图却回到默认值 —— 而这种不一致只有拿到产物才发现。
+ */
+test('报告：封面尺寸与字号档位要写进块的 inline style（导出靠它跟着变）', async () => {
+  const blocks = [
+    makeBlock('award', { id: 'b-1', title: '最佳作画', subjectId: String(A0.id), coverSize: 460, fontScale: 1.45 }),
+  ];
+  const html = await renderReport({ report: reportOf(blocks), lookup: reportLookup, coverage: FULL_COVERAGE });
+
+  assert.ok(html.includes('--rb-cover:460px'), `奖项封面宽度要 inline 到块上，实际：${html.match(/--rb-cover:[^;"]*/)?.[0] ?? '没有'}`);
+  assert.ok(html.includes('--rb-fs:1.45'), `字号倍率要 inline 到块上，实际：${html.match(/--rb-fs:[^;"]*/)?.[0] ?? '没有'}`);
+  // 自检读的那一版（数字属性）也要在，无头环境下靠它数
+  assert.ok(html.includes('data-report-cover-size="460"'), '宽度要有能读的属性');
+  assert.ok(html.includes('data-report-font-scale="1.45"'), '字号倍率要有能读的属性');
+});
+
+test('报告：不填档位时给默认值，且不能是 0（0 会让图和字一起消失）', async () => {
+  const blocks = [makeBlock('award', { id: 'b-1', title: '最佳作画', subjectId: String(A0.id) })];
+  const html = await renderReport({ report: reportOf(blocks), lookup: reportLookup, coverage: FULL_COVERAGE });
+
+  assert.ok(html.includes('--rb-cover:300px'), '默认封面宽度 300px');
+  assert.ok(html.includes('--rb-fs:1'), '默认字号倍率 1');
+  assert.equal(countOf(html, '--rb-cover:0px'), 0, '封面宽度不该是 0');
+  assert.equal(countOf(html, '--rb-fs:0'), 0, '字号倍率不该是 0');
+});
+
+test('报告：工具栏有导出清晰度档位（它管的是物理像素，不是图本身清不清）', async () => {
+  const html = await renderReport({ report: reportOf([]), lookup: reportLookup, coverage: FULL_COVERAGE });
+  assert.ok(html.includes('data-report-field="exportScale"'), '要有清晰度那一档');
+  // 「跟随屏幕」必须在选项里：不给固定档的话，换台 100% 缩放的机器导出就会变糊，
+  // 而用户不会想到清晰度跟屏幕设置有关
+  assert.ok(html.includes('跟随屏幕'), '默认那档要写清楚它是跟着屏幕走的');
+});
+
+test('报告：每一块都能改自己的字号（块级档位，不是整篇统一）', async () => {
+  const blocks = [
+    makeBlock('text', { id: 'b-1', body: '第一段', fontScale: 0.85 }),
+    makeBlock('text', { id: 'b-2', body: '第二段', fontScale: 1.75 }),
+  ];
+  const html = await renderReport({
+    report: reportOf(blocks),
+    lookup: reportLookup,
+    coverage: FULL_COVERAGE,
+    selectedId: 'b-2',
+  });
+  // 两块各自带自己的倍率 —— 只验「有一处变了」的话，整篇统一的写法也会通过
+  assert.ok(html.includes('--rb-fs:0.85'), '第一块是小字号');
+  assert.ok(html.includes('--rb-fs:1.75'), '第二块是特大字号');
+});

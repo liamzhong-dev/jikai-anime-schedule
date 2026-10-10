@@ -1,6 +1,6 @@
 # 次回 · jikai
 
-[![Version](https://img.shields.io/badge/version-2.2.0-8b7cf6)](https://github.com/liamzhong-dev/jikai-anime-schedule/releases)
+[![Version](https://img.shields.io/badge/version-2.3.0-8b7cf6)](https://github.com/liamzhong-dev/jikai-anime-schedule/releases)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
@@ -20,6 +20,14 @@ Windows 追番桌面小工具。本季番剧、播出时间表、更新倒计时
 不想装东西也可以跑源码，见下面「运行」。
 
 ## 更新记录
+
+### 2.3.0
+
+- 季度报告：封面换成封面原图那一档，奖项位放大到 300px 也不发糊
+- 季度报告：奖项封面大小、每块正文字号都能单独调，导出倍率有跟随屏幕 / 1x / 1.5x / 2x 四档
+- 季度报告：新增自定义图片块，自己的插画和截图能放进长图
+- Tier List：自定义模板里也能加自己的图
+- 长图导出修掉偶发少几张封面
 
 ### 2.2.0
 
@@ -98,15 +106,23 @@ Windows 追番桌面小工具。本季番剧、播出时间表、更新倒计时
 
 档位模板有四套预设，外加一套自己定义的：档位行能自己加、自己删，每行的标题和颜色都能改。自定义模板下的排布跟预设是同一套数据，切回去不丢。
 
+自定义模板里也能加自己的图，官方视觉图、插画、截图都行，跟番剧条目一样拖进档位。
+
 ![Tier List](screenshots/23-tier.png)
 
 ### 季度报告
 
-把一季的番剧拼成一张可编辑的长图。标题、正文、数据块、封面墙都是一种「块」，能加能删能拖动排序。
+把一季的番剧拼成一张可编辑的长图。标题、正文、数据块、封面墙、奖项都是一种「块」，能加能删能拖动排序。
+
+奖项那块能自己挑封面大小（160 到 460），每一块的正文字号也有小到特大五档，同一份报告里每块可以不一样。
+
+封面取的是封面原图那一档，奖项位放大到 300px 也不发糊。断网取不到原图时退回缩略图。
+
+想放自己的图，用「＋ 自定义图片」把插画、截图导进来，之后跟封面一样往块里塞。
 
 画布默认按窗口宽度缩放到能看全，不用横向拖。想看细节点 `1:1`，或用 `−` / `＋` 自己调。缩放只影响预览，导出的图还是原始尺寸。
 
-导出前会算一次封面覆盖率，缺图就不让导 —— 缺封面的墙要到发出去才会被发现。
+导出倍率有跟随屏幕、1x、1.5x、2x 四档。倍率只决定用多少物理像素装这张画布，封面本身不大时调高它不会多出细节。导出前会算一次封面覆盖率，缺图就不让导。
 
 ![季度报告](screenshots/24-report.png)
 
@@ -275,6 +291,8 @@ npm run assets && npm run build && npx electron-builder --win --x64 --config ele
 - 只适配 Windows，macOS 和 Linux 未验证
 - 换主题没有过渡动画
 - 壁纸单张上限约 3.2MB，只存一份，不分视图
+- 报告长图单边超过 16384 像素会自动降比例，界面会写降到了多少；2x 导出的文件明显更大
+- 报告用 Bangumi 的封面原图，条目本身没有高清封面时只能拿到缩略图那档
 
 ## 联系
 

@@ -1,7 +1,7 @@
 {
   "name": "jikai",
   "private": true,
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "次回 jikai：ACG 追番桌面台历 —— 本季番剧、播出时间表、更新倒计时、补番 deadline、追番日记、季度报告",
   "type": "module",
   "main": "electron/main.cjs",

@@ -1,9 +1,16 @@
 import React, { useMemo, useRef, useState } from 'react';
 import Cover from './Cover.jsx';
 import ReportBlock from './ReportBlock.jsx';
+import { customAnimeList, fileOfCustomKey, isCustomKey } from '../core/customImages.js';
 import {
+  AWARD_COVER_SIZES,
   BLOCK_LABELS,
   BLOCK_TYPES,
+  EXPORT_SCALES,
+  EXPORT_SCALE_LABELS,
+  FONT_SCALES,
+  FONT_SCALE_LABELS,
+  IMAGE_SIZES,
   WALL_DEFAULT_COUNT,
   WALL_MAX,
   ZOOM,
@@ -57,6 +64,9 @@ export default function ReportView({
   seasonLabel = '',
   pool = [],
   lookup = () => null,
+  // 用户自己导入的图：既能在素材面板里挑，也能当奖项 / 图片块的素材
+  customImages = [],
+  imageBusy = false,
   coverage = null,
   note = '',
   exporting = false,
@@ -72,9 +82,13 @@ export default function ReportView({
   onPatchBlock,
   onMoveBlock,
   onAddToWall,
+  onAddImage,
+  onRemoveImage,
   onExportPdf,
   onExportPng,
   onReset,
+  exportScale = 0,
+  onExportScale,
 }) {
   const [keywordState, setKeywordState] = useState('');
   const keyword = keywordProp ?? keywordState;
@@ -107,6 +121,15 @@ export default function ReportView({
   const selected = blocks.find((b) => b.id === selectedId) ?? null;
   const selIndex = selected ? blocks.findIndex((b) => b.id === selected.id) : -1;
 
+  /**
+   * 素材池 = 自定义图 + 当季番剧。
+   *
+   * 自定义图排在前面，是因为它通常只有几张、而番剧有几十部 ——
+   * 「我刚加的那张图去哪了」比「番剧按什么顺序」更常被问到。
+   */
+  const customRows = useMemo(() => customAnimeList(customImages), [customImages]);
+  const poolAll = useMemo(() => [...customRows, ...pool], [customRows, pool]);
+
   /** 素材面板：按关键字筛 + 标记「已经在墙里的」 */
   const poolRows = useMemo(() => {
     const k = keyword.trim().toLowerCase();
@@ -114,7 +137,7 @@ export default function ReportView({
     for (const b of blocks) {
       if (b.type === 'wall') for (const id of b.subjectIds) inWall.add(id);
     }
-    return pool
+    return poolAll
       .filter((a) => {
         if (!a || a.id == null) return false;
         if (!k) return true;
@@ -123,7 +146,7 @@ export default function ReportView({
           .some((s) => String(s).toLowerCase().includes(k));
       })
       .map((a) => ({ anime: a, used: inWall.has(String(a.id)) }));
-  }, [pool, keyword, blocks]);
+  }, [poolAll, keyword, blocks]);
 
   const wallTarget = selected?.type === 'wall' ? selected : null;
 
@@ -225,6 +248,30 @@ export default function ReportView({
           <strong>素材</strong>
           <span className="report__dim">{pool.length} 部</span>
         </div>
+
+        {/*
+          自定义图片：报告里不是只有「库里的番」能上图，插画、截图、
+          别处扒来的动画封面都该能放进来 —— 只有数据集的话，
+          想放一张官方视觉图都得先去 Bangumi 上建条目。
+        */}
+        <div className="report__images" data-report-images={customImages.length}>
+          <button
+            type="button"
+            className="report__ghost report__add-image"
+            data-report-add-image="1"
+            disabled={imageBusy}
+            onClick={() => onAddImage?.()}
+          >
+            {imageBusy ? '正在读图…' : '＋ 自定义图片'}
+          </button>
+          {customImages.length ? (
+            <span className="report__dim" data-report-image-count={customImages.length}>
+              {customImages.length} 张
+            </span>
+          ) : (
+            <span className="report__dim">插画 / 截图都能加</span>
+          )}
+        </div>
         <input
           className="report__search"
           type="search"
@@ -234,20 +281,43 @@ export default function ReportView({
           onChange={(e) => setKeyword(e.target.value)}
         />
         <div className="report__pool" data-report-pool-rows={poolRows.length}>
-          {poolRows.map(({ anime, used }) => (
-            <button
-              type="button"
-              key={anime.id}
-              className={`report__pool-item${used ? ' is-used' : ''}`}
-              data-report-pool-item={anime.id}
-              data-report-pool-used={used ? '1' : '0'}
-              title={used ? '已经在封面墙里了' : (wallTarget ? '加进封面墙' : '新建一墙并加进去')}
-              onClick={() => onAddToWall?.(String(anime.id), wallTarget?.id ?? null)}
-            >
-              <Cover anime={anime} className="report__pool-cover" />
-              <span className="report__pool-name">{anime.titleZh || anime.titleJa || `条目 ${anime.id}`}</span>
-            </button>
-          ))}
+          {poolRows.map(({ anime, used }) => {
+            const custom = isCustomKey(anime.id);
+            const file = custom ? fileOfCustomKey(anime.id) : '';
+            return (
+              <button
+                type="button"
+                key={anime.id}
+                className={`report__pool-item${used ? ' is-used' : ''}${custom ? ' is-custom' : ''}`}
+                data-report-pool-item={anime.id}
+                data-report-pool-used={used ? '1' : '0'}
+                title={used ? '已经在封面墙里了' : (wallTarget ? '加进封面墙' : '新建一墙并加进去')}
+                onClick={() => onAddToWall?.(String(anime.id), wallTarget?.id ?? null)}
+              >
+                <Cover anime={anime} className="report__pool-cover" />
+                <span className="report__pool-name">{anime.titleZh || anime.titleJa || `条目 ${anime.id}`}</span>
+                {/*
+                  删除按钮只能是 <span>：外面这整个条目已经是一个 <button> 了，
+                  按钮里再套按钮是非法 HTML，浏览器会把结构拆开、点击落到外面那个上。
+                */}
+                {custom ? (
+                  <span
+                    className="report__pool-del"
+                    data-report-image-remove={file}
+                    title="删掉这张图"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      onRemoveImage?.(file);
+                    }}
+                  >
+                    ✕
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
           {poolRows.length === 0 ? <p className="report__hint">这个关键字下没有作品</p> : null}
         </div>
       </aside>
@@ -395,6 +465,24 @@ export default function ReportView({
             <span className="report__cover-stat" data-report-cover-cached={coverage?.cached ?? 0} data-report-cover-total={coverage?.total ?? 0}>
               {coverage ? `封面 ${coverage.cached}/${coverage.total}` : '封面 —'}
             </span>
+            {/*
+              导出倍率。
+              ⚠️ 它管的是「用多少物理像素装这张画布」，**不能**把糊图变清楚 ——
+              这点必须写在旁边，否则用户调到 2x 发现还是糊，会以为是功能坏了，
+              而真正的瓶颈是喂进去的是 150px 的缩略图（见 App 里的 reportHiCovers）。
+            */}
+            <label className="report__scale" title="决定导出的物理像素数量：2x 更清晰也更大。图本身不够大时，调这个不会变清楚">
+              <span>清晰度</span>
+              <select
+                data-report-field="exportScale"
+                value={exportScale}
+                onChange={(e) => onExportScale?.(Number(e.target.value))}
+              >
+                {EXPORT_SCALES.map((n) => (
+                  <option key={n} value={n}>{EXPORT_SCALE_LABELS[n]}</option>
+                ))}
+              </select>
+            </label>
             <button
               type="button"
               className="report__ghost"
@@ -459,7 +547,7 @@ export default function ReportView({
               {isBlankBlock(selected) ? <span className="report__warn">还是空的</span> : null}
             </div>
 
-            {selected.type === 'header' || selected.type === 'wall' || selected.type === 'award' ? (
+            {['header', 'wall', 'award', 'image'].includes(selected.type) ? (
               <label className="report__field">
                 <span>标题</span>
                 <input
@@ -483,9 +571,9 @@ export default function ReportView({
               </label>
             ) : null}
 
-            {selected.type === 'text' || selected.type === 'award' ? (
+            {['text', 'award', 'image'].includes(selected.type) ? (
               <label className="report__field">
-                <span>正文</span>
+                <span>{selected.type === 'image' ? '备注（可选）' : '正文'}</span>
                 <textarea
                   rows={6}
                   data-report-field="body"
@@ -555,22 +643,111 @@ export default function ReportView({
             ) : null}
 
             {selected.type === 'award' ? (
-              <label className="report__field">
-                <span>关联作品（可选）</span>
-                <select
-                  data-report-field="subjectId"
-                  value={selected.subjectId}
-                  onChange={(e) => patchSelected({ subjectId: e.target.value })}
-                >
-                  <option value="">不关联</option>
-                  {pool.slice(0, 200).map((a) => (
-                    <option key={a.id} value={String(a.id)}>
-                      {a.titleZh || a.titleJa || `条目 ${a.id}`}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <>
+                <label className="report__field">
+                  <span>关联作品（可选）</span>
+                  <select
+                    data-report-field="subjectId"
+                    value={selected.subjectId}
+                    // 两个来源互斥：都填的时候画面上只有一处能画，
+                    // 留着另一个等于埋一个「为什么换图没生效」
+                    onChange={(e) => patchSelected({ subjectId: e.target.value, imageFile: '' })}
+                  >
+                    <option value="">不关联</option>
+                    {pool.slice(0, 200).map((a) => (
+                      <option key={a.id} value={String(a.id)}>
+                        {a.titleZh || a.titleJa || `条目 ${a.id}`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="report__field">
+                  <span>或者用自定义图片</span>
+                  <select
+                    data-report-field="imageFile"
+                    value={selected.imageFile}
+                    onChange={(e) => patchSelected({ imageFile: e.target.value, subjectId: '' })}
+                  >
+                    <option value="">不用</option>
+                    {customImages.map((m) => (
+                      <option key={m.file} value={m.file}>{m.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="report__field">
+                  <span>图上标的名字（可选）</span>
+                  <input
+                    type="text"
+                    data-report-field="caption"
+                    placeholder="留空就用作品名"
+                    value={selected.caption}
+                    onChange={(e) => patchSelected({ caption: e.target.value })}
+                  />
+                </label>
+                <label className="report__field">
+                  <span>封面大小</span>
+                  <select
+                    data-report-field="coverSize"
+                    value={selected.coverSize}
+                    onChange={(e) => patchSelected({ coverSize: Number(e.target.value) })}
+                  >
+                    {AWARD_COVER_SIZES.map((n) => <option key={n} value={n}>{n}px</option>)}
+                  </select>
+                </label>
+              </>
             ) : null}
+
+            {selected.type === 'image' ? (
+              <>
+                <label className="report__field">
+                  <span>图片</span>
+                  <select
+                    data-report-field="imageFile"
+                    value={selected.imageFile}
+                    onChange={(e) => patchSelected({ imageFile: e.target.value })}
+                  >
+                    <option value="">还没挑</option>
+                    {customImages.map((m) => (
+                      <option key={m.file} value={m.file}>{m.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="report__field">
+                  <span>宽度</span>
+                  <select
+                    data-report-field="size"
+                    value={selected.size}
+                    onChange={(e) => patchSelected({ size: Number(e.target.value) })}
+                  >
+                    {IMAGE_SIZES.map((n) => <option key={n} value={n}>{n}%</option>)}
+                  </select>
+                </label>
+                <label className="report__field">
+                  <span>图上标的名字（可选）</span>
+                  <input
+                    type="text"
+                    data-report-field="caption"
+                    placeholder="留空就不标"
+                    value={selected.caption}
+                    onChange={(e) => patchSelected({ caption: e.target.value })}
+                  />
+                </label>
+              </>
+            ) : null}
+
+            {/* 字号倍率：每一块各自一份，跟着 DOM 进产物 */}
+            <label className="report__field">
+              <span>这一块的字号</span>
+              <select
+                data-report-field="fontScale"
+                value={selected.fontScale}
+                onChange={(e) => patchSelected({ fontScale: Number(e.target.value) })}
+              >
+                {FONT_SCALES.map((n) => (
+                  <option key={n} value={n}>{FONT_SCALE_LABELS[n] ?? `${n}x`}</option>
+                ))}
+              </select>
+            </label>
 
             <div className="report__order">
               <button

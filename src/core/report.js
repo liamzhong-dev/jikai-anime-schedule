@@ -51,13 +51,84 @@ export const WIDTH_MIN = 800;
 export const WIDTH_MAX = 1600;
 
 /** 块类型。顺序 = 界面上「加一块」按钮的顺序 */
-export const BLOCK_TYPES = ['header', 'wall', 'award', 'text'];
+export const BLOCK_TYPES = ['header', 'wall', 'award', 'image', 'text'];
 
 export const BLOCK_LABELS = {
   header: '标题',
   wall: '封面墙',
   award: '奖项',
+  image: '图片',
   text: '正文',
+};
+
+/**
+ * 「图片」块的宽度档位（占画布的百分比）。
+ *
+ * 给档位而不是自由输入：报告是要导出成一张长图的，宽度写错一个数量级
+ * （比如填了 800）图就会溢出画布，而预览是缩放过的，不一定看得出来。
+ */
+export const IMAGE_SIZES = [40, 60, 80, 100];
+export const IMAGE_SIZE_DEFAULT = 80;
+
+/** 图片块里「名字 / 备注」的长度上限 */
+export const CAPTION_MAX = 40;
+export const IMAGE_BODY_MAX = 600;
+
+/**
+ * 奖项封面的宽度档位（CSS 像素）。
+ *
+ * 为什么给档位而不让自由填像素：这个宽度是**进了产物**的（导出就是抓画布 DOM），
+ * 填错一个数量级（比如 3000）会把整块撑破，而预览是缩着看的，不一定看得出来。
+ * 档位里最大的 460 已经超过画布半宽，再大就没有意义了。
+ *
+ * ⚠️ 比这些档位更重要的是**喂进去的图够不够大**：300px 的坑位如果给的是
+ * 150px 宽的缩略图，再怎么调档位都是糊的。原图那一路见 App 里的 `reportHiCovers`。
+ */
+export const AWARD_COVER_SIZES = [160, 220, 300, 380, 460];
+export const AWARD_COVER_DEFAULT = 300;
+
+/**
+ * 块内字号的倍率档位。
+ *
+ * 是**倍率**而不是绝对字号，跟 `--fs` 那套一个道理：每一处字号都写
+ * `calc(基准px * 倍率)`，加一处样式不用先想「这一处该是多少 px」，
+ * 而整块放大缩小时标题、正文、名字的比例不会散。
+ */
+export const FONT_SCALES = [0.85, 1, 1.2, 1.45, 1.75];
+export const FONT_SCALE_DEFAULT = 1;
+export const FONT_SCALE_MIN = 0.7;
+export const FONT_SCALE_MAX = 2;
+
+/** 字号档位在界面上叫什么。写死「1.2」看不出是大是小，容易挑错 */
+export const FONT_SCALE_LABELS = {
+  0.85: '小',
+  1: '标准',
+  1.2: '大',
+  1.45: '更大',
+  1.75: '特大',
+};
+
+/**
+ * 导出 PNG 的倍率档位。
+ *
+ * `0` 是「跟随屏幕」—— 沿用 `window.devicePixelRatio`，在 150% 缩放的机器上是 1.5。
+ * 之所以还要给固定档：同一份报告换一台 100% 缩放的机器导出就会变糊，
+ * 而用户完全不会想到「清晰度跟屏幕设置有关」。
+ *
+ * ⚠️ 倍率**不会让糊图变清楚**，它只是决定「用多少个物理像素去装这张画布」。
+ * 图本身只有 150px 宽时，2x 只是把那 150px 放大插值得更平滑一点，
+ * 细节不会凭空多出来 —— 所以原图那一档（`reportHiCovers`）才是关键。
+ *
+ * ⚠️ 长图会撞上限：Chromium 画布单边 16384px，撞上会自动降比例并在结果里
+ * 标 `degraded`，界面会把「降到多少」说出来。
+ */
+export const EXPORT_SCALES = [0, 1, 1.5, 2];
+export const EXPORT_SCALE_DEFAULT = 0;
+export const EXPORT_SCALE_LABELS = {
+  0: '跟随屏幕',
+  1: '1x',
+  1.5: '1.5x',
+  2: '2x（更清晰，文件更大）',
 };
 
 /** 各字段长度上限。长文本不截，画布会被撑成一张没法看的图 */
@@ -185,11 +256,64 @@ export function makeBlock(type, patch = {}) {
 }
 
 const EMPTY_BY_TYPE = {
-  header: { title: '', subtitle: '' },
-  wall: { title: '', subjectIds: [], columns: WALL_COLUMNS },
-  award: { title: '', body: '', subjectId: '' },
-  text: { body: '' },
+  header: { title: '', subtitle: '', fontScale: FONT_SCALE_DEFAULT },
+  wall: { title: '', subjectIds: [], columns: WALL_COLUMNS, fontScale: FONT_SCALE_DEFAULT },
+  award: {
+    title: '',
+    body: '',
+    subjectId: '',
+    imageFile: '',
+    caption: '',
+    coverSize: AWARD_COVER_DEFAULT,
+    fontScale: FONT_SCALE_DEFAULT,
+  },
+  image: {
+    title: '',
+    imageFile: '',
+    caption: '',
+    body: '',
+    size: IMAGE_SIZE_DEFAULT,
+    fontScale: FONT_SCALE_DEFAULT,
+  },
+  text: { body: '', fontScale: FONT_SCALE_DEFAULT },
 };
+
+/**
+ * 字号倍率：认浮点的档位值，认不出就回标准档。
+ *
+ * ⚠️ 夹的是**范围**不是档位：存档里出现 1.1 这种（旧版手改过、或以后加了新档位）
+ * 不该被硬拽到 1 上 —— 那会让用户「我明明调过」的印象凭空消失。
+ */
+function fontScaleOf(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return FONT_SCALE_DEFAULT;
+  return Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, n));
+}
+
+/** 奖项封面宽度：同上，夹范围保住手改过的值 */
+function coverSizeOf(v) {
+  const n = Math.trunc(Number(v));
+  if (!Number.isFinite(n)) return AWARD_COVER_DEFAULT;
+  return Math.min(600, Math.max(80, n));
+}
+
+/** 导出倍率：只认档位，`0` 表示跟随屏幕 */
+function exportScaleOf(v) {
+  const n = Number(v);
+  return EXPORT_SCALES.includes(n) ? n : EXPORT_SCALE_DEFAULT;
+}
+
+/**
+ * 认一个「用户导入的图」的文件名。
+ *
+ * 只认 `ci-<hex12>.<ext>` 这一种形状（和主进程那条正则一致）：
+ * 这个值是要拼进磁盘路径的，宁可少一张图，也不能让一个手改过的
+ * 存档值变成路径的一部分。
+ */
+function imageFileOf(v) {
+  const s = String(v ?? '').trim();
+  return /^ci-[0-9a-f]{12}\.(jpe?g|png|webp|gif|avif)$/.test(s) ? s : '';
+}
 
 /**
  * 把读回来的块修正成能用的结构；认不出类型或缺 id 的返回 null。
@@ -205,7 +329,12 @@ export function normalizeBlock(raw) {
 
   const base = { id, type, ...EMPTY_BY_TYPE[type] };
   if (type === 'header') {
-    return { ...base, title: text(src.title, TITLE_MAX), subtitle: text(src.subtitle, SUBTITLE_MAX) };
+    return {
+      ...base,
+      title: text(src.title, TITLE_MAX),
+      subtitle: text(src.subtitle, SUBTITLE_MAX),
+      fontScale: fontScaleOf(src.fontScale),
+    };
   }
   if (type === 'wall') {
     return {
@@ -213,6 +342,7 @@ export function normalizeBlock(raw) {
       title: text(src.title, TITLE_MAX),
       subjectIds: idList(src.subjectIds, WALL_MAX),
       columns: intIn(src.columns, WALL_COLUMNS_MIN, WALL_COLUMNS_MAX, WALL_COLUMNS),
+      fontScale: fontScaleOf(src.fontScale),
     };
   }
   if (type === 'award') {
@@ -221,9 +351,42 @@ export function normalizeBlock(raw) {
       title: text(src.title, TITLE_MAX),
       body: text(src.body, BODY_MAX),
       subjectId: idText(src.subjectId),
+      imageFile: imageFileOf(src.imageFile),
+      // `caption` 是「图上标什么名字」。空着不代表没名字 ——
+      // 关联的是作品时，名字就是作品名，用不着用户再抄一遍
+      caption: text(src.caption, CAPTION_MAX),
+      coverSize: coverSizeOf(src.coverSize),
+      fontScale: fontScaleOf(src.fontScale),
     };
   }
-  return { ...base, body: text(src.body, BODY_MAX) };
+  if (type === 'image') {
+    const size = Math.trunc(Number(src.size));
+    return {
+      ...base,
+      title: text(src.title, TITLE_MAX),
+      imageFile: imageFileOf(src.imageFile),
+      caption: text(src.caption, CAPTION_MAX),
+      body: text(src.body, IMAGE_BODY_MAX),
+      size: IMAGE_SIZES.includes(size) ? size : IMAGE_SIZE_DEFAULT,
+      fontScale: fontScaleOf(src.fontScale),
+    };
+  }
+  return { ...base, body: text(src.body, BODY_MAX), fontScale: fontScaleOf(src.fontScale) };
+}
+
+/**
+ * 块内字号倍率。
+ *
+ * 从块上单独取一层，是因为它要进 **inline style 的 CSS 变量**，而导出是抓画布 DOM ——
+ * 变量随 DOM 一起走，产物才会跟着变。写成 class 或者全局设置就带不进产物了。
+ */
+export function blockFontScale(block) {
+  return fontScaleOf(block?.fontScale);
+}
+
+/** 奖项封面的宽度（CSS 像素），同上会随 DOM 进产物 */
+export function awardCoverSize(block) {
+  return coverSizeOf(block?.coverSize);
 }
 
 /** 块上有没有内容 —— 空块不值得占版面，界面要靠这个给提示 */
@@ -232,7 +395,9 @@ export function isBlankBlock(block) {
   if (!b) return true;
   if (b.type === 'header') return !b.title && !b.subtitle;
   if (b.type === 'wall') return b.subjectIds.length === 0;
-  if (b.type === 'award') return !b.title && !b.body;
+  if (b.type === 'award') return !b.title && !b.body && !b.subjectId && !b.imageFile;
+  // 图片块「有图就不算空」：图是主角，文字只是可选的名字和备注
+  if (b.type === 'image') return !b.imageFile && !b.title && !b.caption && !b.body;
   return !b.body;
 }
 
@@ -254,6 +419,7 @@ export function makeDefaultReport(seasonKey = null, { nowMs = Date.now() } = {})
     seasonKey: seasonKey ?? null,
     width: REPORT_WIDTH,
     theme: 'default',
+    exportScale: EXPORT_SCALE_DEFAULT,
     blocks: [],
     updatedAt: nowMs,
   };
@@ -276,9 +442,15 @@ export function normalizeReport(raw, { seasonKey = null, nowMs = Date.now() } = 
     seasonKey: typeof src.seasonKey === 'string' ? src.seasonKey : seasonKey,
     width: intIn(src.width, WIDTH_MIN, WIDTH_MAX, REPORT_WIDTH),
     theme: typeof src.theme === 'string' && src.theme ? src.theme : 'default',
+    exportScale: exportScaleOf(src.exportScale),
     blocks,
     updatedAt: Number.isFinite(src.updatedAt) ? src.updatedAt : nowMs,
   };
+}
+
+/** 导出倍率。`0` = 跟随屏幕（主进程那边读 devicePixelRatio） */
+export function reportExportScale(report) {
+  return exportScaleOf(report?.exportScale);
 }
 
 /** 整个「季度 -> 报告」映射的归一化，读写都过它 */
@@ -401,10 +573,30 @@ export function isMissing(anime) {
 }
 
 /**
+ * 奖项 / 图片那一块下面该标什么名字。
+ *
+ * 三条优先次序，是照「用户最少要打几个字」定的：
+ *   ① 自己填的 `caption`（他想标什么就标什么，比如「第 7 话那个镜头」）；
+ *   ② 关联条目的名字（作品名 / 导入图时的文件名），这条**不用**用户抄一遍；
+ *   ③ 都没有就给空串 —— 空串意味着画布上这一行**整个不渲染**，
+ *      而不是画一个「（没写）」的占位。占位文字进导出图是最难看的一种噪音。
+ */
+export function blockCaption(block, anime) {
+  const own = text(block?.caption, CAPTION_MAX);
+  if (own) return own;
+  if (anime) return text(anime.titleZh || anime.titleJa, CAPTION_MAX);
+  return '';
+}
+
+/**
  * 把封面墙的 id 解析成作品。
  *
  * 解析不到的不静默丢掉，单独放进 `missing` —— 报告里缺了 3 部作品，
  * 用户得知道是「那 3 部查不到了」，而不是以为墙本来就只放了这些。
+ *
+ * ⚠️ `subjectIds` 里可能混着**用户导入的图**（`img:<file>` 这种 key）。
+ * 它们由调用方给的 `lookup` 解析成「假条目」，这一层不认识也不需要认识 ——
+ * 键的约定在 `core/customImages.js`。
  */
 export function wallItems(block, lookup) {
   const ids = Array.isArray(block?.subjectIds) ? block.subjectIds : [];

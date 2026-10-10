@@ -2156,6 +2156,19 @@ html[data-scheme='light'] .card__follow { background: rgba(10, 12, 18, 0.62); }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
+/* 自定义图片：加图入口，以及池子里那一项的删除（删除只能盖在条目上） */
+.report__images { display: flex; align-items: center; gap: 8px; }
+.report__add-image { flex: 1 1 auto; }
+.report__pool-item { position: relative; }
+/* 已在墙里那个对勾和右上角的删除会撞在一起，自定义图这一项只留删除 */
+.report__pool-item.is-custom.is-used::after { content: none; }
+.report__pool-del {
+  position: absolute; right: 4px; top: 4px;
+  padding: 0 4px; border-radius: var(--r-sm);
+  background: rgba(242,100,122,0.16); color: #f2647a; font-size: 10px; line-height: 16px;
+  cursor: pointer;
+}
+
 /* ---------- 中：画布 ---------- */
 .report__stage { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .report__stage-head {
@@ -2253,6 +2266,9 @@ body.print .rb { border-color: transparent !important; }
 }
 .report__bar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .report__cover-stat { font-size: 11.5px; color: var(--text-2); }
+/* 导出倍率：和「导出 PNG」挨着放，因为它是**那一次导出**的参数，不是报告内容 */
+.report__scale { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); }
+.report__scale select { font-size: 11.5px; padding: 3px 6px; }
 .report__gate {
   margin: 0; padding: 6px 10px; font-size: 11.5px; line-height: 1.6;
   color: var(--warn); background: var(--warn-soft);
@@ -2337,11 +2353,12 @@ body.print .rb { border-color: transparent !important; }
   background: rgba(242,100,122,0.16); color: #f2647a; font-size: 11px; cursor: pointer;
 }
 
-.rb-head__title { margin: 0; font-size: 58px; line-height: 1.18; font-weight: 700; letter-spacing: 1px; }
-.rb-head__sub { margin: 10px 0 0; font-size: 26px; color: var(--rp-ink-2); }
+/* 块内字号统一乘 `--rb-fs`（由块自己 inline 到 DOM 上，导出会跟着走） */
+.rb-head__title { margin: 0; font-size: calc(58px * var(--rb-fs, 1)); line-height: 1.18; font-weight: 700; letter-spacing: 1px; }
+.rb-head__sub { margin: 10px 0 0; font-size: calc(26px * var(--rb-fs, 1)); color: var(--rp-ink-2); }
 
 .rb-wall__title, .rb-award__title {
-  margin: 0 0 14px; font-size: 30px; font-weight: 600;
+  margin: 0 0 14px; font-size: calc(30px * var(--rb-fs, 1)); font-weight: 600;
   padding-left: 12px; border-left: 4px solid var(--rp-accent);
 }
 .rb-wall__grid { display: grid; gap: 14px; }
@@ -2353,18 +2370,59 @@ body.print .rb { border-color: transparent !important; }
   background: var(--rp-tile); color: var(--rp-ink-2); font-size: 22px;
 }
 .rb-wall__cap {
-  font-size: 13px; line-height: 1.35; color: var(--rp-ink-2);
+  font-size: calc(13px * var(--rb-fs, 1)); line-height: 1.35; color: var(--rp-ink-2);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
-.rb-award__row { display: flex; gap: 14px; align-items: flex-start; }
-.rb-award__cover { width: 96px; flex: 0 0 96px; aspect-ratio: 1 / 1.4; border-radius: 8px; }
-.rb-award__body { margin: 0; font-size: 19px; line-height: 1.85; white-space: pre-wrap; }
+/*
+ * 奖项：图居中、放大，下面标作品名。
+ *
+ * 早先是「一张 96px 的缩略图贴左边、正文挤在右边」，在 1220 宽的画布上
+ * 那个图只有指甲盖大，导出之后更是糊成一团 —— 而奖项本来就是
+ * 「一句话 + 一张能看清的图」，版面该往海报那边靠，不是往表单那边靠。
+ */
+.rb-award { display: flex; flex-direction: column; align-items: center; text-align: center; }
+/* 标题也跟着居中：左边那道竖线是「列表项」的语言，跟居中的图放一起会打架 */
+.rb-award__title { padding-left: 0; border-left: none; }
+.rb-award__figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+/* 宽度吃块上那个 `--rb-cover`：奖项封面到底多大由用户在这一块上调 */
+.rb-award__cover { width: var(--rb-cover, 300px); max-width: 100%; aspect-ratio: 1 / 1.4; border-radius: 12px; }
+.rb-award__cap { font-size: calc(20px * var(--rb-fs, 1)); font-weight: 600; line-height: 1.35; color: var(--rp-ink); }
+.rb-award__body { margin: 16px 0 0; max-width: 92%; font-size: calc(19px * var(--rb-fs, 1)); line-height: 1.85; text-align: center; }
 
-.rb-text__line { margin: 0 0 10px; font-size: 19px; line-height: 1.9; }
+/* ---------- 图片块 ---------- */
+/*
+ * 宽度是「档位给的百分比 + 居中」，不统一裁成 1:1.4：
+ * 自定义图可能是横的插画，硬裁就只剩中间一条了。
+ */
+.rb-image { display: flex; flex-direction: column; align-items: center; text-align: center; }
+.rb-image__title { margin: 0 0 14px; font-size: calc(30px * var(--rb-fs, 1)); font-weight: 600; }
+.rb-image__figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.rb-image__img { display: block; width: 100%; border-radius: 12px; }
+.rb-image__cap { font-size: calc(20px * var(--rb-fs, 1)); font-weight: 600; line-height: 1.35; }
+.rb-image__body { margin: 14px 0 0; max-width: 92%; font-size: calc(18px * var(--rb-fs, 1)); line-height: 1.85; }
+.rb-image__empty {
+  width: 100%; aspect-ratio: 16 / 9; border: 1px dashed var(--rp-line); border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--rp-ink-2); font-size: calc(15px * var(--rb-fs, 1));
+}
+
+.rb-text__line { margin: 0 0 10px; font-size: calc(19px * var(--rb-fs, 1)); line-height: 1.9; }
 .rb-text__line:last-child { margin-bottom: 0; }
 
 .rb__hint { margin: 6px 0 0; font-size: 12px; color: var(--rp-ink-2); }
+
+/*
+ * 空块的指路提示 —— **只在编辑时**出现。
+ *
+ * 导出那份文档是 `<body class="print">`（见 `core/reportHtml.js`），所以这条规则
+ * 在产物里不成立：画布上它能帮人认出「这块还空着」，印到长图上就变成一句
+ * 莫名其妙的「（还没写）」，而那已经不是用户能改的了。
+ */
+body:not(.print) .rb.is-blank::after {
+  content: '这一块还是空的 —— 点一下，在右边填';
+  display: block; margin: 4px 0 2px; font-size: 12px; color: var(--rp-ink-2);
+}
 
 /* ---------- 追番历程 ---------- */
 /*

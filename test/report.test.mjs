@@ -9,12 +9,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AWARD_COVER_DEFAULT,
+  AWARD_COVER_SIZES,
   BLOCK_TYPES,
+  EXPORT_SCALES,
+  EXPORT_SCALE_DEFAULT,
+  FONT_SCALE_DEFAULT,
+  FONT_SCALES,
+  IMAGE_SIZE_DEFAULT,
+  IMAGE_SIZES,
   REPORT_WIDTH,
   WALL_DEFAULT_COUNT,
   WALL_MAX,
   addBlock,
   autoWallSubjects,
+  blockCaption,
   blockById,
   isBlankBlock,
   isMissing,
@@ -32,22 +41,35 @@ import {
 } from '../src/core/report.js';
 
 const HEADER = { id: 'b-1', type: 'header', title: '2026 夏季番', subtitle: '七月新番总结' };
+/** 一个合法的自定义图文件名（形状跟主进程那条正则一致） */
+const IMG_FILE = 'ci-0123456789ab.png';
 
 /* ── 块的基本形状 ────────────────────────────────────────── */
 
 test('makeBlock：认不出的类型返回 null，而不是塞个空块进去', () => {
   assert.equal(makeBlock('nope'), null);
   assert.equal(makeBlock(undefined), null);
-  assert.equal(makeBlock('image'), null, 'image 这一版还没做，不能悄悄当成合法类型');
+  // 用一个肯定不存在的类型名。⚠️ 别写死 'image' —— 它已经是合法类型了（v1.2+），
+  // 写死的话这条断言会在「加新类型」那天变成假红
+  assert.equal(makeBlock('shot'), null, '没做过的类型不能悄悄当成合法类型');
   for (const t of BLOCK_TYPES) assert.ok(makeBlock(t), `${t} 应当是合法类型`);
 });
 
 test('makeBlock：每种类型都带齐自己的字段（缺字段的块会让渲染层到处写 ??）', () => {
-  assert.deepEqual(Object.keys(makeBlock('header')).sort(), ['id', 'subtitle', 'title', 'type']);
-  assert.deepEqual(Object.keys(makeBlock('award')).sort(), ['body', 'id', 'subjectId', 'title', 'type']);
-  assert.deepEqual(Object.keys(makeBlock('text')).sort(), ['body', 'id', 'type']);
+  assert.deepEqual(Object.keys(makeBlock('header')).sort(), ['fontScale', 'id', 'subtitle', 'title', 'type']);
+  assert.deepEqual(
+    Object.keys(makeBlock('award')).sort(),
+    ['body', 'caption', 'coverSize', 'fontScale', 'id', 'imageFile', 'subjectId', 'title', 'type'],
+  );
+  assert.deepEqual(Object.keys(makeBlock('text')).sort(), ['body', 'fontScale', 'id', 'type']);
+  const image = makeBlock('image');
+  assert.deepEqual(
+    Object.keys(image).sort(),
+    ['body', 'caption', 'fontScale', 'id', 'imageFile', 'size', 'title', 'type'],
+  );
+  assert.equal(image.size, IMAGE_SIZE_DEFAULT);
   const wall = makeBlock('wall');
-  assert.deepEqual(Object.keys(wall).sort(), ['columns', 'id', 'subjectIds', 'title', 'type']);
+  assert.deepEqual(Object.keys(wall).sort(), ['columns', 'fontScale', 'id', 'subjectIds', 'title', 'type']);
   assert.deepEqual(wall.subjectIds, []);
   assert.equal(typeof wall.columns, 'number');
 });
@@ -95,7 +117,12 @@ test('isBlankBlock：空块要认得出来 —— 界面上光有空壳不给提
   assert.equal(isBlankBlock({ id: 'b-1', type: 'header' }), true);
   assert.equal(isBlankBlock({ id: 'b-2', type: 'wall', subjectIds: [] }), true);
   assert.equal(isBlankBlock(HEADER), false);
-  assert.equal(isBlankBlock({ id: 'b-3', type: 'award', title: '', body: '', subjectId: '9' }), true);
+  assert.equal(isBlankBlock({ id: 'b-3', type: 'award', title: '', body: '' }), true);
+  // 关联了作品 / 自定义图的奖项不算空：哪怕一个字没写，画布上也会有一张图
+  assert.equal(isBlankBlock({ id: 'b-3a', type: 'award', title: '', body: '', subjectId: '9' }), false);
+  assert.equal(isBlankBlock({ id: 'b-3b', type: 'award', title: '', body: '', imageFile: IMG_FILE }), false);
+  assert.equal(isBlankBlock({ id: 'b-3c', type: 'image', imageFile: IMG_FILE }), false);
+  assert.equal(isBlankBlock({ id: 'b-3d', type: 'image', title: '', body: '' }), true);
   // 认不出来的块也算「空」，否则界面上会显示一块看不出内容的空气
   assert.equal(isBlankBlock({ id: 'b-4', type: 'nope' }), true);
 });
@@ -312,4 +339,107 @@ test('reportStats：空报告给全 0，不是 undefined', () => {
   assert.equal(s.works, 0);
   assert.equal(s.wallTiles, 0);
   for (const t of BLOCK_TYPES) assert.equal(s.byType[t], 0, `${t} 的计数应当是 0 而不是 undefined`);
+});
+
+/* ── 图片块与「图上标什么名字」 ──────────────────────────── */
+
+test('图片块：文件名只认 ci-<hex12>.<ext>，脏值一律清空', () => {
+  // 这个值是要拼进磁盘路径的：宁可少一张图，也不能让手改过的存档变成路径
+  assert.equal(normalizeBlock({ id: 'b-1', type: 'image', imageFile: IMG_FILE }).imageFile, IMG_FILE);
+  for (const bad of ['../../etc/passwd', 'ci-abc.png', `${IMG_FILE}/x`, '', null, { file: IMG_FILE }]) {
+    assert.equal(normalizeBlock({ id: 'b-1', type: 'image', imageFile: bad }).imageFile, '', `脏值 ${String(bad)} 不该留下来`);
+  }
+});
+
+test('图片块：宽度只收档位里的值，别的退回默认', () => {
+  for (const n of IMAGE_SIZES) {
+    assert.equal(normalizeBlock({ id: 'b-1', type: 'image', size: n }).size, n);
+  }
+  // 写错一个数量级（把百分比写成像素）会让图溢出画布，而预览是缩着看的，看不出来
+  assert.equal(normalizeBlock({ id: 'b-1', type: 'image', size: 800 }).size, IMAGE_SIZE_DEFAULT);
+  assert.equal(normalizeBlock({ id: 'b-1', type: 'image', size: 'x' }).size, IMAGE_SIZE_DEFAULT);
+});
+
+test('blockCaption：自己填的 > 条目名 > 空（空意味着画布上这一行整个不画）', () => {
+  const anime = { id: 2, titleZh: '葬送的芙莉莲' };
+  assert.equal(blockCaption({ caption: '第 7 话那个镜头' }, anime), '第 7 话那个镜头');
+  assert.equal(blockCaption({ caption: '' }, anime), '葬送的芙莉莲');
+  // 这一条最关键：什么都没有时必须是空串，渲染层据此不渲染这一行 ——
+  // 画成「（还没写）」会原样印到导出图里，而那是用户改不掉的
+  assert.equal(blockCaption({}, null), '');
+  assert.equal(blockCaption({}, { __missing: true, titleZh: '' }), '');
+});
+
+test('封面墙里可以混自定义图：它们由 lookup 解析，这一层只管键', () => {
+  const custom = { id: `img:${IMG_FILE}`, titleZh: '一张插画' };
+  const lookup = (key) => (key === custom.id ? custom : { id: key, __missing: true });
+  const block = normalizeBlock({
+    id: 'b-1',
+    type: 'wall',
+    subjectIds: ['2', `img:${IMG_FILE}`],
+  });
+  const { items, missing } = wallItems(block, lookup);
+  assert.deepEqual(items.map((a) => a.titleZh), ['一张插画']);
+  assert.deepEqual(missing, ['2']);
+});
+
+/* ── 尺寸 / 字号档位 ──────────────────────────────────────── */
+
+test('封面尺寸与字号：块上带默认值，档位值认得出来', () => {
+  const award = makeBlock('award', { id: 'b-1', title: '最佳作画' });
+  assert.equal(award.coverSize, AWARD_COVER_DEFAULT);
+  assert.equal(award.fontScale, FONT_SCALE_DEFAULT);
+
+  // 每一档都要能存进去 —— 只验「默认和某一档」的话，档位表改了会悄悄少一档
+  for (const n of AWARD_COVER_SIZES) {
+    assert.equal(makeBlock('award', { id: 'b-1', coverSize: n }).coverSize, n);
+  }
+  for (const n of FONT_SCALES) {
+    assert.equal(makeBlock('award', { id: 'b-1', fontScale: n }).fontScale, n);
+  }
+});
+
+test('字号：手改过的中间值不该被硬拽回标准档（「我明明调过」不能凭空消失）', () => {
+  assert.equal(makeBlock('text', { id: 'b-1', fontScale: 1.1 }).fontScale, 1.1);
+  // 但离谱的值要被夹住：NaN / 字符串 / 负数都会让 calc() 算出个怪字号
+  assert.equal(makeBlock('text', { id: 'b-1', fontScale: 'abc' }).fontScale, FONT_SCALE_DEFAULT);
+  assert.equal(makeBlock('text', { id: 'b-1', fontScale: 0 }).fontScale, 0.7);
+  assert.equal(makeBlock('text', { id: 'b-1', fontScale: 99 }).fontScale, 2);
+});
+
+test('奖项封面宽度：同样的道理，夹范围但保住手改值', () => {
+  assert.equal(makeBlock('award', { id: 'b-1', coverSize: 250 }).coverSize, 250);
+  assert.equal(makeBlock('award', { id: 'b-1', coverSize: 9999 }).coverSize, 600);
+  assert.equal(makeBlock('award', { id: 'b-1', coverSize: 'x' }).coverSize, AWARD_COVER_DEFAULT);
+});
+
+/*
+ * 这一条是这轮最要紧的护栏：老报告里没有这两个字段，
+ * 加字段那天要是被洗成「空 → 默认 0」，所有旧块的字号会一起塌成 0。
+ * 反向写死默认值而不是「等于某个数」，是因为默认值以后也可能调。
+ */
+test('★ 旧存档（没有这两个字段）读出来必须拿到默认档，不是 0', () => {
+  const old = normalizeBlock({ id: 'b-1', type: 'award', title: '最佳动画', subjectId: '545917' });
+  assert.equal(old.coverSize, AWARD_COVER_DEFAULT);
+  assert.equal(old.fontScale, FONT_SCALE_DEFAULT);
+  assert.ok(old.coverSize > 0, '封面宽度不能是 0 —— 那会让奖项图整个消失');
+  assert.ok(old.fontScale > 0, '字号倍率不能是 0 —— calc(19px * 0) 会让正文看不见');
+
+  // 整份报告那一级同理
+  const rep = normalizeReport({ seasonKey: '2026q3', blocks: [old] });
+  assert.equal(rep.exportScale, EXPORT_SCALE_DEFAULT);
+  assert.equal(rep.blocks[0].title, '最佳动画');
+  assert.equal(rep.blocks[0].subjectId, '545917');
+});
+
+test('导出倍率：只认档位，认不出就回「跟随屏幕」', () => {
+  for (const n of EXPORT_SCALES) {
+    assert.equal(normalizeReport({ seasonKey: 'k', exportScale: n }).exportScale, n);
+  }
+  // 0.5 / 3 都不在档位里：写死「哪些值不该被接受」比只验合法值更能挡住手改存档
+  assert.equal(normalizeReport({ seasonKey: 'k', exportScale: 0.5 }).exportScale, EXPORT_SCALE_DEFAULT);
+  assert.equal(normalizeReport({ seasonKey: 'k', exportScale: 3 }).exportScale, EXPORT_SCALE_DEFAULT);
+  assert.equal(normalizeReport({ seasonKey: 'k', exportScale: null }).exportScale, EXPORT_SCALE_DEFAULT);
+  // 但 `'2'`（字符串）要收：存档被手改成字符串是常事，它能转成合法档位就没理由丢掉
+  assert.equal(normalizeReport({ seasonKey: 'k', exportScale: '2' }).exportScale, 2);
 });
